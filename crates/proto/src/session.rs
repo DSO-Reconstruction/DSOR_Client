@@ -144,6 +144,12 @@ impl Session {
         self.conn.send(payload, bits, reliability, 0);
     }
 
+    /// Say goodbye to the current server (DISCONNECTION_NOTIFICATION).
+    pub fn disconnect(&mut self, now: u64) {
+        self.handing_off = true;
+        self.conn.disconnect(now);
+    }
+
     pub fn update(&mut self, now: u64) {
         self.conn.update(now);
         self.pump(now);

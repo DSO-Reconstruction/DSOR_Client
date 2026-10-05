@@ -172,6 +172,23 @@ fn connect(mut commands: Commands, config: Res<NetConfig>, time: Res<Time<Real>>
     });
 }
 
+/// CONTRACT: leaving says goodbye. FAILURE: closing the window left the player in
+///   the world for the server's 60 s silence timeout, so the next login found a
+///   double of itself standing on the arrival point (2026-10-06).
+impl Drop for Net {
+    fn drop(&mut self) {
+        // Any time will do: the goodbye is flushed at once.
+        self.session.disconnect(u64::MAX / 2);
+        let mut out = Vec::new();
+        self.session.drain_outgoing(&mut out);
+        if let Some(t) = self.transport.as_mut() {
+            for d in &out {
+                let _ = t.send(d);
+            }
+        }
+    }
+}
+
 impl Net {
     /// The server's game tick now.
     pub fn server_tick(&self, now: u64) -> u32 {

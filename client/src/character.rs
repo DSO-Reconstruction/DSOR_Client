@@ -405,7 +405,14 @@ fn rebind(
                     .unwrap_or(*j)
             })
             .collect();
-        commands.entity(e).insert(SkinnedMesh { inverse_bindposes: skin.inverse_bindposes.clone(), joints });
+        // CONTRACT: no frustum culling on a re-bound part: its bounding box is the
+        //   one computed for its own (unanimated) skeleton copy, not where the shared
+        //   skeleton draws it. FAILURE (suspected, 2026-10-06): the player's own body
+        //   was culled in a landscape window while visible in a portrait one.
+        commands.entity(e).insert((
+            SkinnedMesh { inverse_bindposes: skin.inverse_bindposes.clone(), joints },
+            bevy::camera::visibility::NoFrustumCulling,
+        ));
     }
 }
 
