@@ -308,10 +308,27 @@ fn build_characters(
         let parts = character.desc.parts(&|n| names.contains(n));
         character.built = true;
         let skeleton_scene = assets.load(GltfAssetLabel::Scene(0).from_asset(format!("characters/{skel}/__animations.glb")));
-        commands.spawn((SkeletonOf(entity), WorldAssetRoot(skeleton_scene), ChildOf(entity)));
+        // CONTRACT: a Transform (and Visibility) on every child, or the hierarchy
+        //   does not carry the character's movement down to the skeleton.
+        // FAILURE (2026-10-06): without them the body stayed where the player had
+        //   arrived while the player walked on ("je suis un fantome qui se deplace").
+        commands.spawn((
+            SkeletonOf(entity),
+            WorldAssetRoot(skeleton_scene),
+            ChildOf(entity),
+            Transform::default(),
+            Visibility::default(),
+        ));
         for part in parts {
             let scene = assets.load(GltfAssetLabel::Scene(0).from_asset(format!("characters/{skel}/parts/{part}.glb")));
-            commands.spawn((PartOf(entity), WorldAssetRoot(scene), ChildOf(entity), Name::new(part)));
+            commands.spawn((
+                PartOf(entity),
+                WorldAssetRoot(scene),
+                ChildOf(entity),
+                Name::new(part),
+                Transform::default(),
+                Visibility::default(),
+            ));
         }
     }
 }

@@ -515,6 +515,7 @@ fn walk_local(
     mut players: Query<(&mut Transform, &mut LocalPlayer, &mut CharacterAnim)>,
     mut snapped: Local<bool>,
     mut still_for: Local<f32>,
+    mut autowalked: Local<bool>,
 ) {
     let mesh = nav.as_ref().and_then(|n| meshes.get(&n.0));
     for (mut tf, mut player, mut anim) in &mut players {
@@ -524,6 +525,18 @@ fn walk_local(
                 tf.translation = p;
             }
             *snapped = true;
+        }
+        // DSOR_AUTOWALK=dx,dz: walk that far once, on arrival (testing without a mouse).
+        if *snapped && player.target.is_none() && player.last_sent_tick > 0 {
+            if let Some((dx, dz)) = std::env::var("DSOR_AUTOWALK").ok().and_then(|v| {
+                let mut it = v.split(',').filter_map(|x| x.trim().parse::<f32>().ok());
+                Some((it.next()?, it.next()?))
+            }) {
+                if !*autowalked {
+                    *autowalked = true;
+                    player.target = Some(tf.translation + Vec3::new(dx, 0.0, dz));
+                }
+            }
         }
         let mut moving = false;
         if let Some(target) = player.target {
