@@ -15,7 +15,9 @@
 //! that address only.
 
 use std::collections::VecDeque;
-use std::net::{SocketAddrV4, ToSocketAddrs};
+use std::net::SocketAddrV4;
+#[cfg(not(target_arch = "wasm32"))]
+use std::net::ToSocketAddrs;
 
 use dsor_raknet::{Connection, DisconnectReason, Event, Reliability};
 
