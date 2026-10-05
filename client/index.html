@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>DSOR</title>
+  <!-- trunk build --release (from client/) builds the size-tuned profile. -->
+  <link data-trunk rel="rust" data-bin="dsor-client" data-cargo-profile="wasm-release" data-wasm-opt="s">
+  <style>
+    html, body { margin: 0; height: 100%; background: #0d0f14; overflow: hidden; }
+    canvas { display: block; width: 100%; height: 100%; outline: none; }
+  </style>
+</head>
+<!-- Game data is not bundled: serve the converted asset tree as dist/assets
+     (e.g. ln -s ../../assets client/dist/assets) next to this page.
+     Pick a map with ?map=a0302_wildforest -->
+<body></body>
+</html>

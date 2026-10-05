@@ -12,6 +12,7 @@ dsor-raknet = { path = "crates/raknet" }
 dsor-proto = { path = "crates/proto" }
 dsor-transport = { path = "crates/transport" }
 log = "0.4"
+bevy = { version = "0.19", default-features = false }
 
 [profile.release]
 opt-level = 3
