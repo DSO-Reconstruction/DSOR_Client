@@ -231,12 +231,18 @@ pub struct Character {
     built: bool,
     bones: Option<HashMap<String, Entity>>,
     pending_parts: Vec<Entity>,
+    /// Which dressing this is: bumped by `redress`, so the skeleton and parts of a
+    /// previous dressing, ready only after it was replaced, are ignored.
+    /// FAILURE (2026-10-06): the first skeleton reported ready after the inventory
+    /// re-dressed the player; the new parts bound to its despawned bones and the body
+    /// stayed behind as the player walked ("j'ai quitte le corps du perso").
+    generation: u32,
 }
 
 #[derive(Component)]
-struct SkeletonOf(Entity);
+struct SkeletonOf(Entity, u32);
 #[derive(Component)]
-struct PartOf(Entity);
+struct PartOf(Entity, u32);
 
 #[derive(Resource)]
 pub struct CharacterLibrary {
@@ -257,7 +263,7 @@ impl Plugin for CharacterPlugin {
             .register_asset_loader(AnimTableLoader)
             .register_asset_loader(PartListLoader)
             .add_systems(Startup, load_library)
-            .add_systems(Update, (build_characters, drive_animations))
+            .add_systems(Update, (build_characters, keep_parts_bound, drive_animations))
             .add_observer(on_instance_ready);
     }
 }
@@ -282,7 +288,7 @@ pub fn spawn_character(commands: &mut Commands, desc: CharacterDesc, transform: 
     commands
         .spawn((
             Name::new(format!("character {}", desc.animation_set())),
-            Character { desc, built: false, bones: None, pending_parts: Vec::new() },
+            Character { desc, built: false, bones: None, pending_parts: Vec::new(), generation: 0 },
             CharacterAnim::default(),
             transform,
             Visibility::default(),
@@ -313,7 +319,7 @@ fn build_characters(
         // FAILURE (2026-10-06): without them the body stayed where the player had
         //   arrived while the player walked on ("je suis un fantome qui se deplace").
         commands.spawn((
-            SkeletonOf(entity),
+            SkeletonOf(entity, character.generation),
             WorldAssetRoot(skeleton_scene),
             ChildOf(entity),
             Transform::default(),
@@ -322,7 +328,7 @@ fn build_characters(
         for part in parts {
             let scene = assets.load(GltfAssetLabel::Scene(0).from_asset(format!("characters/{skel}/parts/{part}.glb")));
             commands.spawn((
-                PartOf(entity),
+                PartOf(entity, character.generation),
                 WorldAssetRoot(scene),
                 ChildOf(entity),
                 Name::new(part),
@@ -350,8 +356,8 @@ fn on_instance_ready(
     mut graphs: ResMut<Assets<AnimationGraph>>,
 ) {
     let entity = ready.entity;
-    if let Ok(SkeletonOf(owner)) = skeletons.get(entity) {
-        let owner = *owner;
+    if let Ok(SkeletonOf(owner, generation)) = skeletons.get(entity) {
+        let (owner, generation) = (*owner, *generation);
         let mut bones = HashMap::new();
         let mut player = None;
         for e in children.iter_descendants(entity) {
@@ -363,6 +369,9 @@ fn on_instance_ready(
             }
         }
         let Ok((mut character, mut anim)) = characters.get_mut(owner) else { return };
+        if character.generation != generation {
+            return;
+        }
         // Animations: one graph per character, every state of its set.
         if let (Some(player), Some(library)) = (player, library.as_ref()) {
             let set = character.desc.animation_set();
@@ -391,8 +400,11 @@ fn on_instance_ready(
         character.bones = Some(bones);
         return;
     }
-    if let Ok(PartOf(owner)) = parts.get(entity) {
+    if let Ok(PartOf(owner, generation)) = parts.get(entity) {
         let Ok((mut character, _)) = characters.get_mut(*owner) else { return };
+        if character.generation != *generation {
+            return;
+        }
         match &character.bones {
             Some(bones) => rebind(&mut commands, entity, bones, &children, &names, &skinned),
             None => character.pending_parts.push(entity),
@@ -401,6 +413,7 @@ fn on_instance_ready(
 }
 
 /// Point every skinned mesh of `part` at the shared skeleton, joint by joint by name.
+/// SEE: keep_parts_bound, which does the same every frame.
 fn rebind(
     commands: &mut Commands,
     part: Entity,
@@ -411,25 +424,72 @@ fn rebind(
 ) {
     for e in children.iter_descendants(part) {
         let Ok(skin) = skinned.get(e) else { continue };
-        let joints: Vec<Entity> = skin
-            .joints
-            .iter()
-            .map(|j| {
-                names
-                    .get(*j)
-                    .ok()
-                    .and_then(|n| bones.get(n.as_str()).copied())
-                    .unwrap_or(*j)
-            })
-            .collect();
-        // CONTRACT: no frustum culling on a re-bound part: its bounding box is the
-        //   one computed for its own (unanimated) skeleton copy, not where the shared
-        //   skeleton draws it. FAILURE (suspected, 2026-10-06): the player's own body
-        //   was culled in a landscape window while visible in a portrait one.
-        commands.entity(e).insert((
-            SkinnedMesh { inverse_bindposes: skin.inverse_bindposes.clone(), joints },
-            bevy::camera::visibility::NoFrustumCulling,
-        ));
+        let joint_names: Option<Vec<String>> =
+            skin.joints.iter().map(|j| names.get(*j).ok().map(|n| n.as_str().to_owned())).collect();
+        let Some(joint_names) = joint_names else { continue };
+        bind(commands, e, skin, &joint_names, bones);
+        commands.entity(e).insert(JointNames(joint_names));
+    }
+}
+
+fn bind(commands: &mut Commands, e: Entity, skin: &SkinnedMesh, joint_names: &[String], bones: &HashMap<String, Entity>) {
+    let joints: Vec<Entity> = joint_names
+        .iter()
+        .zip(skin.joints.iter())
+        .map(|(n, own)| bones.get(n.as_str()).copied().unwrap_or(*own))
+        .collect();
+    // CONTRACT: no frustum culling on a re-bound part: its bounding box is the one
+    //   computed for its own (unanimated) skeleton copy, not where the shared
+    //   skeleton draws it.
+    commands.entity(e).insert((
+        SkinnedMesh { inverse_bindposes: skin.inverse_bindposes.clone(), joints },
+        bevy::camera::visibility::NoFrustumCulling,
+    ));
+}
+
+/// The joint names of a part's skin, as its own skeleton copy named them.
+#[derive(Component)]
+struct JointNames(Vec<String>);
+
+/// Every frame: every part of every character is bound to its CURRENT skeleton.
+/// CONTRACT: a glTF scene can be instanced again (its textures finishing loading
+///   re-spawns it), which recreates the part's entities with their own joints; a
+///   one-time binding is then lost and the body stops following the character.
+/// FAILURE (2026-10-06): the player walked away from their own body.
+fn keep_parts_bound(
+    mut commands: Commands,
+    characters: Query<(Entity, &Character)>,
+    children: Query<&Children>,
+    names: Query<&Name>,
+    skinned: Query<(&SkinnedMesh, Option<&JointNames>)>,
+) {
+    for (root, character) in &characters {
+        let Some(bones) = &character.bones else { continue };
+        for e in children.iter_descendants(root) {
+            let Ok((skin, known)) = skinned.get(e) else { continue };
+            let joint_names: Vec<String> = match known {
+                Some(JointNames(n)) => n.clone(),
+                None => {
+                    let Some(n) = skin
+                        .joints
+                        .iter()
+                        .map(|j| names.get(*j).ok().map(|n| n.as_str().to_owned()))
+                        .collect::<Option<Vec<_>>>()
+                    else {
+                        continue;
+                    };
+                    commands.entity(e).insert(JointNames(n.clone()));
+                    n
+                }
+            };
+            let bound = joint_names
+                .iter()
+                .zip(skin.joints.iter())
+                .all(|(n, j)| bones.get(n.as_str()).is_none_or(|b| b == j));
+            if !bound {
+                bind(&mut commands, e, skin, &joint_names, bones);
+            }
+        }
     }
 }
 
@@ -478,6 +538,7 @@ pub fn redress(
     character.desc.equipment = equipment;
     character.desc.armament = armament;
     character.built = false;
+    character.generation = character.generation.wrapping_add(1);
     character.bones = None;
     character.pending_parts.clear();
     anim.player = None;

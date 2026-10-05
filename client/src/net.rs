@@ -131,7 +131,7 @@ impl Plugin for NetPlugin {
             )
             .add_systems(
                 Update,
-                (spawn_local, dress, apply_remotes, move_remotes, click_to_move, walk_local, zoom_camera, follow_camera, hide_occluders, send_moves)
+                (debug_hierarchy, spawn_local, dress, apply_remotes, move_remotes, click_to_move, walk_local, zoom_camera, follow_camera, hide_occluders, send_moves)
                     .chain()
                     .run_if(resource_exists::<Net>),
             );
@@ -649,6 +649,9 @@ fn hide_occluders(
     mut visibility: Query<&mut Visibility>,
     mut hidden: Local<Vec<Entity>>,
 ) {
+    if std::env::var("DSOR_NO_OCCLUDERS").is_ok() {
+        return;
+    }
     let Ok((player, at)) = players.single() else { return };
     let Ok(cam) = cameras.single() else { return };
     let own: std::collections::HashSet<Entity> = children.iter_descendants(player).collect();
@@ -727,4 +730,47 @@ fn dress(
         })
         .collect();
     redress(&mut commands, e, &mut c, &mut a, kids, equipment, armament(&worn));
+}
+
+/// DSOR_DEBUG_HIER=1: once, four seconds in, where the player's body really is.
+pub fn debug_hierarchy(
+    time: Res<Time>,
+    mut done: Local<bool>,
+    players: Query<(Entity, &GlobalTransform), With<LocalPlayer>>,
+    children: Query<&Children>,
+    names: Query<&Name>,
+    globals: Query<&GlobalTransform>,
+    skinned: Query<&bevy::mesh::skinning::SkinnedMesh>,
+    parents: Query<&ChildOf>,
+) {
+    if *done || std::env::var("DSOR_DEBUG_HIER").is_err() || time.elapsed_secs() < 6.0 {
+        return;
+    }
+    *done = true;
+    let Ok((player, at)) = players.single() else { return };
+    info!("HIER player {player:?} at {:?}", at.translation());
+    for c in children.get(player).into_iter().flatten() {
+        let n = names.get(*c).map(|n| n.as_str().to_owned()).unwrap_or_default();
+        info!("HIER  child {c:?} {n:?} global {:?} has_global {}", globals.get(*c).map(|g| g.translation()).ok(), globals.contains(*c));
+    }
+    let mut shown = 0;
+    for e in children.iter_descendants(player) {
+        if let Ok(s) = skinned.get(e) {
+            let j0 = s.joints.first().copied();
+            let jp = j0.and_then(|j| parents.get(j).ok().map(|p| p.parent()));
+            info!(
+                "HIER  skinned {e:?} global {:?}; joint0 {:?} {:?} at {:?}; joint0 under player: {}",
+                globals.get(e).map(|g| g.translation()).ok(),
+                j0,
+                j0.and_then(|j| names.get(j).ok().map(|n| n.as_str().to_owned())),
+                j0.and_then(|j| globals.get(j).ok().map(|g| g.translation())),
+                j0.map(|j| children.iter_descendants(player).any(|d| d == j)).unwrap_or(false),
+            );
+            let _ = jp;
+            shown += 1;
+            if shown > 4 {
+                break;
+            }
+        }
+    }
 }
