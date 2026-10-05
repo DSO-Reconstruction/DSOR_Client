@@ -9,6 +9,7 @@ license.workspace = true
 log.workspace = true
 dsor-raknet.workspace = true
 dsor-proto.workspace = true
+dsor-transport.workspace = true
 # 3d: PBR + glTF + scenes; ui: the FPS/entity text; free_camera: WASD + mouse fly
 # camera. No audio for now.
 bevy = { workspace = true, features = ["3d", "ui", "png", "free_camera", "default_font"] }

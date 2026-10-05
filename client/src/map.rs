@@ -161,7 +161,7 @@ impl Plugin for MapPlugin {
     fn build(&self, app: &mut App) {
         app.init_asset::<MapManifest>()
             .init_asset_loader::<MapManifestLoader>()
-            .add_systems(Update, (start_map, stream_models).chain())
+            .add_systems(Update, (start_map, stream_models).chain().run_if(resource_exists::<CurrentMap>))
             .add_observer(hide_effect_surfaces);
     }
 }

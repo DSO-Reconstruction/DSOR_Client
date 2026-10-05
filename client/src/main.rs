@@ -10,6 +10,8 @@
 mod character;
 mod hud;
 mod map;
+mod nav;
+mod net;
 
 use bevy::camera_controller::free_camera::{FreeCamera, FreeCameraPlugin};
 use bevy::diagnostic::{EntityCountDiagnosticsPlugin, FrameTimeDiagnosticsPlugin};
@@ -36,6 +38,8 @@ struct Options {
     character: Option<(u8, u8)>,
     /// Demo: the animation state to show it in.
     anim: Option<String>,
+    /// Play online: the login server and the launcher's identity.
+    net: Option<net::NetConfig>,
 }
 
 fn parse_cam(s: &str) -> Option<([f32; 3], [f32; 3])> {
@@ -45,7 +49,7 @@ fn parse_cam(s: &str) -> Option<([f32; 3], [f32; 3])> {
 
 #[cfg(not(target_arch = "wasm32"))]
 fn options() -> Options {
-    let mut o = Options { map: DEFAULT_MAP.into(), screenshot: None, cam: None, shadows: false, character: None, anim: None };
+    let mut o = Options { map: DEFAULT_MAP.into(), screenshot: None, cam: None, shadows: false, character: None, anim: None, net: None };
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -59,6 +63,31 @@ fn options() -> Options {
                 o.character = Some((class, gender));
             }
             "--anim" => o.anim = args.next(),
+            "--server" => {
+                let login = args.next().unwrap_or_else(|| "127.0.0.1:2190".into());
+                o.net = Some(net::NetConfig {
+                    login,
+                    account: "107909469".into(),
+                    session: "f7d06d94-af66-4ed7-bdae-b98f8e049ceb".into(),
+                    relay: None,
+                    character: None,
+                });
+            }
+            "--account" => {
+                if let (Some(n), Some(a)) = (o.net.as_mut(), args.next()) {
+                    n.account = a;
+                }
+            }
+            "--sid" => {
+                if let (Some(n), Some(sid)) = (o.net.as_mut(), args.next()) {
+                    n.session = sid;
+                }
+            }
+            "--char" => {
+                if let Some(n) = o.net.as_mut() {
+                    n.character = args.next().and_then(|c| c.parse().ok());
+                }
+            }
             m if !m.starts_with('-') => o.map = m.trim_end_matches(".map.json").into(),
             other => eprintln!("unknown argument {other}"),
         }
@@ -68,7 +97,7 @@ fn options() -> Options {
 
 #[cfg(target_arch = "wasm32")]
 fn options() -> Options {
-    let mut o = Options { map: DEFAULT_MAP.into(), screenshot: None, cam: None, shadows: false, character: None, anim: None };
+    let mut o = Options { map: DEFAULT_MAP.into(), screenshot: None, cam: None, shadows: false, character: None, anim: None, net: None };
     let search = web_sys::window()
         .and_then(|w| w.location().search().ok())
         .unwrap_or_default();
@@ -78,6 +107,23 @@ fn options() -> Options {
             "map" if !v.is_empty() => o.map = v.into(),
             "cam" => o.cam = parse_cam(&v.replace("%2C", ",")),
             "shadows" => o.shadows = true,
+            "server" | "account" | "sid" | "relay" | "char" => {
+                let n = o.net.get_or_insert_with(|| net::NetConfig {
+                    login: "127.0.0.1:2190".into(),
+                    account: String::new(),
+                    session: String::new(),
+                    relay: None,
+                    character: None,
+                });
+                let v = v.replace("%3A", ":").replace("%2F", "/");
+                match k {
+                    "server" => n.login = v,
+                    "account" => n.account = v,
+                    "sid" => n.session = v,
+                    "relay" => n.relay = Some(v),
+                    _ => n.character = v.parse().ok(),
+                }
+            }
             _ => {}
         }
     }
@@ -100,7 +146,11 @@ fn asset_root() -> String {
 
 fn main() {
     let opts = options();
-    App::new()
+    let mut app = App::new();
+    if let Some(config) = &opts.net {
+        app.insert_resource(config.clone());
+    }
+    app
         .add_plugins(
             DefaultPlugins
                 .set(AssetPlugin { file_path: asset_root(), ..default() })
@@ -121,6 +171,8 @@ fn main() {
             FreeCameraPlugin,
             MapPlugin,
             character::CharacterPlugin,
+            net::NetPlugin,
+            nav::NavPlugin,
             hud::HudPlugin,
         ))
         .insert_resource(ClearColor(Color::srgb(0.05, 0.06, 0.08)))
@@ -129,17 +181,22 @@ fn main() {
             brightness: 900.0,
             affects_lightmapped_meshes: true,
         })
-        .insert_resource(opts)
+        .insert_resource(opts.clone())
         .add_systems(Startup, setup)
         .add_systems(Update, (screenshot_when_loaded, demo_character))
         .run();
 }
 
 fn setup(mut commands: Commands, asset_server: Res<AssetServer>, opts: Res<Options>) {
-    commands.insert_resource(CurrentMap::new(
-        opts.map.clone(),
-        asset_server.load(format!("maps/{}.map.json", opts.map)),
-    ));
+    // Online, the server says which map; offline, the command line does.
+    if opts.net.is_some() {
+        // NetConfig is inserted before the app runs: net::connect reads it at Startup.
+    } else {
+        commands.insert_resource(CurrentMap::new(
+            opts.map.clone(),
+            asset_server.load(format!("maps/{}.map.json", opts.map)),
+        ));
+    }
 
     // Camera: left at the origin until the map frames it, unless --cam says where.
     let cam = match opts.cam {
@@ -147,11 +204,12 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>, opts: Res<Optio
             .looking_at(map::game_to_bevy(t), Vec3::Y),
         None => Transform::default(),
     };
-    commands.spawn((
-        Camera3d::default(),
-        cam,
-        FreeCamera { walk_speed: 15.0, run_speed: 60.0, ..default() },
-    ));
+    let camera = commands.spawn((Camera3d::default(), cam)).id();
+    // Online the game camera follows the player (net::follow_camera); the free
+    // fly camera is the map viewer's.
+    if opts.net.is_none() {
+        commands.entity(camera).insert(FreeCamera { walk_speed: 15.0, run_speed: 60.0, ..default() });
+    }
 
     // Sun: high and from the side, so walls and props read in relief.
     commands.spawn((
@@ -185,7 +243,7 @@ fn screenshot_when_loaded(
     if !current.spawned {
         return;
     }
-    if opts.character.is_some() && !demo.iter().all(|a| a.is_ready()) {
+    if (opts.character.is_some() || opts.net.is_some()) && (demo.is_empty() || !demo.iter().all(|a| a.is_ready())) {
         return;
     }
     let (done, total) = current.progress(&asset_server);

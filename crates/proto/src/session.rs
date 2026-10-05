@@ -138,6 +138,12 @@ impl Session {
         self.conn.send(payload, bits, Reliability::ReliableOrdered, 0);
     }
 
+    /// A game command with its own reliability: the 2018 client sends MoveCommand
+    /// unreliable sequenced (captured: reliability 1, one per tick).
+    pub fn send_command_with(&mut self, payload: &[u8], bits: usize, reliability: Reliability) {
+        self.conn.send(payload, bits, reliability, 0);
+    }
+
     pub fn update(&mut self, now: u64) {
         self.conn.update(now);
         self.pump(now);
@@ -183,7 +189,18 @@ impl Session {
 
     fn on_message(&mut self, data: &[u8], bits: usize, now: u64) {
         match classify(data, bits) {
-            Envelope::Identity(name) => self.events.push_back(SessionEvent::Service(name)),
+            Envelope::Identity(name) => {
+                // CONTRACT: the service says what it is; the stage follows it, not the
+                //   order of hand-offs. FAILURE: a login server that remembers the
+                //   account sends it straight to the map (experimental
+                //   Sessions.character_of), and the world was read as a roster.
+                match name.as_str() {
+                    "DrasaOnlineMapServer" => self.stage = Stage::Map,
+                    "DrasaCharacterService" => self.stage = Stage::Characters,
+                    _ => {}
+                }
+                self.events.push_back(SessionEvent::Service(name))
+            }
             Envelope::MapAssignment { name, rule_set } => {
                 self.events.push_back(SessionEvent::MapAssigned { name, rule_set })
             }
