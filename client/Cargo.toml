@@ -1,0 +1,11 @@
+[package]
+name = "dsor-client"
+description = "Drakensang Online client on Bevy, native and WebAssembly"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+log.workspace = true
+dsor-raknet.workspace = true
+dsor-proto.workspace = true

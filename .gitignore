@@ -1,0 +1,11 @@
+/target
+/dist
+# Game data belongs to the publisher: converted assets are generated locally by
+# tools/convert_assets.sh and never committed.
+/assets
+*.glb
+*.png
+*.dds
+*.n3
+*.nvx2
+*.nax3

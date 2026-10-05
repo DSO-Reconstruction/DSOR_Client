@@ -1,0 +1,9 @@
+[package]
+name = "dsor-raknet"
+description = "RakNet 4.035 client protocol, transport-agnostic"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+log.workspace = true

@@ -1,0 +1,33 @@
+[workspace]
+resolver = "2"
+members = ["crates/raknet", "crates/proto", "crates/relay", "client"]
+
+[workspace.package]
+edition = "2021"
+version = "0.1.0"
+license = "MIT"
+
+[workspace.dependencies]
+dsor-raknet = { path = "crates/raknet" }
+dsor-proto = { path = "crates/proto" }
+log = "0.4"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+
+# Bevy compiles slowly unoptimised and runs badly in debug; dependencies get
+# optimised even in dev builds, our own crates stay quick to rebuild.
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
+
+# The size-tuned profile for the browser build (trunk build --release uses it via
+# the client's index.html data-cargo-profile).
+[profile.wasm-release]
+inherits = "release"
+opt-level = "s"
+strip = "debuginfo"
