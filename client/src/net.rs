@@ -30,8 +30,13 @@ use crate::nav::{CurrentNav, NavMesh};
 
 /// How far up or down one step may go (stairs, slopes).
 const MAX_STEP: f32 = 1.2;
-/// Seconds a character keeps running after it last moved. SEE: move_remotes.
-const RUN_GRACE: f32 = 0.25;
+/// Seconds ANOTHER player keeps running after they last moved: just over the 40 ms
+/// between two of their records. SEE: move_remotes. The player's own run stops the
+/// moment they stop ("elle devrait s'arreter quand j'arrete de marcher").
+const RUN_GRACE: f32 = 0.12;
+/// A click this close to the player is no destination: holding the button on
+/// yourself must not make the run flicker.
+const CLICK_DEAD_ZONE: f32 = 0.4;
 
 /// Game tick, as the 2018 client counts it.
 const TICK_SECONDS: f32 = 0.04;
@@ -501,7 +506,10 @@ fn click_to_move(
             ray.intersect_plane(tf.translation, InfinitePlane3d::new(Vec3::Y)).map(|d| ray.get_point(d))
         });
         if let Some(point) = hit {
-            player.target = Some(point);
+            let flat = Vec2::new(point.x - tf.translation.x, point.z - tf.translation.z).length();
+            if flat > CLICK_DEAD_ZONE {
+                player.target = Some(point);
+            }
         }
     }
 }
@@ -514,7 +522,6 @@ fn walk_local(
     meshes: Res<Assets<NavMesh>>,
     mut players: Query<(&mut Transform, &mut LocalPlayer, &mut CharacterAnim)>,
     mut snapped: Local<bool>,
-    mut still_for: Local<f32>,
     mut autowalked: Local<bool>,
 ) {
     let mesh = nav.as_ref().and_then(|n| meshes.get(&n.0));
@@ -571,8 +578,7 @@ fn walk_local(
             }
         }
         tf.rotation = Quat::from_rotation_y(player.facing);
-        *still_for = if moving { 0.0 } else { *still_for + time.delta_secs() };
-        let wanted = if *still_for < RUN_GRACE { AnimState::Run } else { AnimState::Idle };
+        let wanted = if moving { AnimState::Run } else { AnimState::Idle };
         if anim.state != wanted {
             anim.state = wanted;
         }
