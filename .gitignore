@@ -9,3 +9,4 @@
 *.n3
 *.nvx2
 *.nax3
+/client/dist

@@ -75,7 +75,8 @@ pub struct NetConfig {
     pub character: Option<u32>,
 }
 
-#[derive(Resource)]
+/// CONTRACT: a NON-SEND resource: in the browser the transport holds a WebSocket
+///   and JS closures, which cannot cross threads; natively it costs nothing.
 pub struct Net {
     session: Session,
     transport: Option<Transport>,
@@ -132,13 +133,13 @@ impl Plugin for NetPlugin {
             .add_systems(Startup, connect.run_if(resource_exists::<NetConfig>))
             .add_systems(
                 PreUpdate,
-                pump.run_if(resource_exists::<Net>),
+                pump.run_if(net_exists),
             )
             .add_systems(
                 Update,
                 (debug_hierarchy, spawn_local, dress, apply_remotes, move_remotes, click_to_move, walk_local, zoom_camera, follow_camera, hide_occluders, send_moves)
                     .chain()
-                    .run_if(resource_exists::<Net>),
+                    .run_if(net_exists),
             );
     }
 }
@@ -147,7 +148,14 @@ fn now_ms(time: &Time<Real>) -> u64 {
     (time.elapsed_secs_f64() * 1000.0) as u64
 }
 
-fn connect(mut commands: Commands, config: Res<NetConfig>, time: Res<Time<Real>>) {
+fn net_exists(net: Option<NonSend<Net>>) -> bool {
+    net.is_some()
+}
+
+/// Exclusive: a non-send resource can only be inserted through the World.
+fn connect(world: &mut World) {
+    let Some(config) = world.get_resource::<NetConfig>().cloned() else { return };
+    let now = now_ms(world.resource::<Time<Real>>());
     let Some(credentials) = Credentials::parse(&config.account, &config.session) else {
         error!("bad credentials: account {:?}, session {:?}", config.account, config.session);
         return;
@@ -158,8 +166,8 @@ fn connect(mut commands: Commands, config: Res<NetConfig>, time: Res<Time<Real>>
     };
     // One RakNet GUID per run, as the real client keeps one for all its connections.
     let guid = 0x0660_0000_0000_0000 | (credentials.account as u64) << 8 | 0x42;
-    let session = Session::new(login, credentials, guid, now_ms(&time));
-    commands.insert_resource(Net {
+    let session = Session::new(login, credentials, guid, now);
+    world.insert_non_send(Net {
         session,
         transport: None,
         clock_offset: None,
@@ -223,7 +231,7 @@ impl Net {
 #[allow(clippy::too_many_arguments)]
 fn pump(
     mut commands: Commands,
-    mut net: ResMut<Net>,
+    mut net: NonSendMut<Net>,
     time: Res<Time<Real>>,
     current: Option<Res<CurrentMap>>,
     roots: Query<Entity, With<MapRoot>>,
@@ -390,7 +398,7 @@ fn on_command(net: &mut Net, command: ServerCommand, actor: Option<u32>) {
 
 fn apply_remotes(
     mut commands: Commands,
-    mut net: ResMut<Net>,
+    mut net: NonSendMut<Net>,
     mut remotes: Query<(Entity, &mut RemotePlayer)>,
     nav: Option<Res<CurrentNav>>,
     meshes: Res<Assets<NavMesh>>,
@@ -453,7 +461,7 @@ fn move_remotes(time: Res<Time>, mut remotes: Query<(&mut Transform, &mut Remote
 
 fn spawn_local(
     mut commands: Commands,
-    mut net: ResMut<Net>,
+    mut net: NonSendMut<Net>,
     existing: Query<Entity, With<LocalPlayer>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
@@ -617,7 +625,7 @@ fn follow_camera(
 /// One MoveCommand per game tick, as the 2018 client sends them: where the player
 /// is, speed 0 (the 2018 client never fills it), heading and facing in 256ths of a
 /// turn, the tick, and a 20-tick duration.
-fn send_moves(mut net: ResMut<Net>, time: Res<Time<Real>>, mut players: Query<(&Transform, &mut LocalPlayer)>) {
+fn send_moves(mut net: NonSendMut<Net>, time: Res<Time<Real>>, mut players: Query<(&Transform, &mut LocalPlayer)>) {
     let Ok((tf, mut player)) = players.single_mut() else { return };
     if net.centre.is_none() {
         return;
@@ -713,7 +721,7 @@ fn armament(worn: &[(Vec<i8>, String)]) -> i8 {
 #[allow(clippy::type_complexity)]
 fn dress(
     mut commands: Commands,
-    mut net: ResMut<Net>,
+    mut net: NonSendMut<Net>,
     library: Option<Res<CharacterLibrary>>,
     skins: Res<Assets<ItemSkins>>,
     mut locals: Query<(Entity, &mut Character, &mut CharacterAnim, Option<&Children>), (With<LocalPlayer>, Without<RemotePlayer>)>,

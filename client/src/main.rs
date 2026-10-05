@@ -153,7 +153,13 @@ fn main() {
     app
         .add_plugins(
             DefaultPlugins
-                .set(AssetPlugin { file_path: asset_root(), ..default() })
+                .set(AssetPlugin {
+                    file_path: asset_root(),
+                    // The converted tree has no .meta files: asking for one per model
+                    // was thousands of 404s in the browser.
+                    meta_check: bevy::asset::AssetMetaCheck::Never,
+                    ..default()
+                })
                 .set(WindowPlugin {
                     primary_window: Some(Window {
                         title: format!("DSOR - {}", opts.map),
