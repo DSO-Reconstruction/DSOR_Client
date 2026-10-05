@@ -24,12 +24,14 @@ use dsor_proto::session::{Session, SessionEvent};
 use dsor_raknet::Reliability;
 use dsor_transport::Transport;
 
-use crate::character::{spawn_character, AnimState, CharacterAnim, CharacterDesc};
+use crate::character::{redress, spawn_character, AnimState, Character, CharacterAnim, CharacterDesc, CharacterLibrary, ItemSkins};
 use crate::map::{CurrentMap, MapManifest, MapRoot};
 use crate::nav::{CurrentNav, NavMesh};
 
 /// How far up or down one step may go (stairs, slopes).
 const MAX_STEP: f32 = 1.2;
+/// Seconds a character keeps running after it last moved. SEE: move_remotes.
+const RUN_GRACE: f32 = 0.25;
 
 /// Game tick, as the 2018 client counts it.
 const TICK_SECONDS: f32 = 0.04;
@@ -79,6 +81,29 @@ pub struct Net {
     /// The map frame's centre (wire = (game - centre) * 128).
     pub centre: Option<Vec3>,
     pending_local: Option<(CharacterDesc, Vec3, f32)>,
+    /// Actors already asked about (ActorRequest), so each is asked once.
+    requested: std::collections::HashSet<u32>,
+    /// Other players to spawn, despawn, or move, applied by `apply_remotes`.
+    remote_spawns: Vec<(u32, CharacterDesc, Vec3, f32, String)>,
+    remote_gone: Vec<u32>,
+    remote_moves: Vec<(u32, Vec3, f32, bool)>,
+    /// What this player wears, as the inventory names it: (slots, item template).
+    local_worn: Option<Vec<(Vec<i8>, String)>>,
+    /// Another player re-dressed (RemotePlayerInfo): actor, skins, armament.
+    remote_redress: Vec<(u32, Vec<(u8, Vec<String>)>, i8)>,
+}
+
+/// Another player, drawn from NewRemotePlayer and moved by their MoveCommands.
+#[derive(Component)]
+pub struct RemotePlayer {
+    pub actor: u32,
+    pub name: String,
+    /// Where their last record says they are heading.
+    pub target: Vec3,
+    pub facing: f32,
+    /// Seconds since this player last moved, so the run cycle is not cut between
+    /// two of their records.
+    pub still_for: f32,
 }
 
 /// The player this client controls.
@@ -106,7 +131,7 @@ impl Plugin for NetPlugin {
             )
             .add_systems(
                 Update,
-                (spawn_local, click_to_move, walk_local, zoom_camera, follow_camera, hide_occluders, send_moves)
+                (spawn_local, dress, apply_remotes, move_remotes, click_to_move, walk_local, zoom_camera, follow_camera, hide_occluders, send_moves)
                     .chain()
                     .run_if(resource_exists::<Net>),
             );
@@ -138,6 +163,12 @@ fn connect(mut commands: Commands, config: Res<NetConfig>, time: Res<Time<Real>>
         local_actor: None,
         centre: None,
         pending_local: None,
+        requested: Default::default(),
+        remote_spawns: Vec::new(),
+        remote_gone: Vec::new(),
+        remote_moves: Vec::new(),
+        local_worn: None,
+        remote_redress: Vec::new(),
     });
 }
 
@@ -268,7 +299,133 @@ fn on_command(net: &mut Net, command: ServerCommand, actor: Option<u32>) {
             net.local_actor = actor;
             net.pending_local = Some((desc, Vec3::from(p.position), p.heading));
         }
+        // The real client asks about every actor the vicinity names
+        // (session-walk4: a burst of 8b/34 after each 0x85/125).
+        ServerCommand::ActorsEnterVicinity(v) => {
+            debug!("vicinity +{:x?}", v.actors);
+            for a in v.actors {
+                if Some(a) != net.local_actor && net.requested.insert(a) {
+                    net.send(&ClientCommand::ActorRequest(dsor_proto::commands::player::ActorRequest { actor: a }));
+                }
+            }
+        }
+        ServerCommand::ActorsLeftVicinity(v) => {
+            for a in v.actors {
+                net.requested.remove(&a);
+                net.remote_gone.push(a);
+            }
+        }
+        ServerCommand::NewRemotePlayer(p) => {
+            let Some(actor) = actor else { return };
+            let desc = CharacterDesc {
+                class: p.parts[0],
+                gender: p.parts[1],
+                hair: p.parts[2],
+                beard: p.parts[3],
+                body: p.parts[4],
+                variation: p.parts[5],
+                equipment: p.equipment.iter().map(|w| (w.slot, w.skin_parts.clone())).collect(),
+                armament: p.armament.max(0),
+            };
+            info!("{} ({}) is here, actor {actor:#x}, {} worn slot(s)", p.name, desc.animation_set(), desc.equipment.len());
+            net.remote_spawns.push((actor, desc, Vec3::from(p.position), p.heading, p.name));
+        }
+        ServerCommand::InventoryInfo(inv) => {
+            let worn = inv
+                .slots
+                .iter()
+                .filter_map(|(item, slots)| {
+                    inv.items.iter().find(|i| i.id == *item).map(|i| (slots.clone(), i.template.clone()))
+                })
+                .collect::<Vec<_>>();
+            info!("wearing {} item(s)", worn.len());
+            net.local_worn = Some(worn);
+        }
+        ServerCommand::RemotePlayerInfo(p) => {
+            if let Some(a) = actor {
+                let equipment = p.equipment.iter().map(|w| (w.slot, w.skin_parts.clone())).collect();
+                net.remote_redress.push((a, equipment, p.armament.max(0)));
+            }
+        }
+        ServerCommand::DiscardPlayer(_) => {
+            if let Some(a) = actor {
+                net.requested.remove(&a);
+                net.remote_gone.push(a);
+            }
+        }
+        ServerCommand::Move(m) => {
+            if let Some(a) = actor {
+                if Some(a) != net.local_actor {
+                    let at = net.wire_to_game(m.x, m.elevation, m.y);
+                    let facing = m.facing as f32 / 256.0 * TAU;
+                    net.remote_moves.push((a, at, facing, m.duration > 0));
+                }
+            }
+        }
         _ => {}
+    }
+}
+
+fn apply_remotes(
+    mut commands: Commands,
+    mut net: ResMut<Net>,
+    mut remotes: Query<(Entity, &mut RemotePlayer)>,
+    nav: Option<Res<CurrentNav>>,
+    meshes: Res<Assets<NavMesh>>,
+) {
+    let mesh = nav.as_ref().and_then(|n| meshes.get(&n.0));
+    for actor in std::mem::take(&mut net.remote_gone) {
+        for (e, r) in &remotes {
+            if r.actor == actor {
+                commands.entity(e).despawn();
+            }
+        }
+    }
+    for (actor, desc, at, heading, name) in std::mem::take(&mut net.remote_spawns) {
+        for (e, r) in &remotes {
+            if r.actor == actor {
+                commands.entity(e).despawn();
+            }
+        }
+        let at = mesh.and_then(|m| m.nearest(at, 4.0)).unwrap_or(at);
+        let e = spawn_character(&mut commands, desc, Transform::from_translation(at).with_rotation(Quat::from_rotation_y(heading)));
+        commands.entity(e).insert(RemotePlayer { actor, name, target: at, facing: heading, still_for: 1.0 });
+    }
+    for (actor, at, facing, _moving) in std::mem::take(&mut net.remote_moves) {
+        for (_, mut r) in &mut remotes {
+            if r.actor == actor {
+                let at = mesh.and_then(|m| m.ground(at.x, at.z, at.y, 3.0).map(|h| Vec3::new(at.x, h, at.z))).unwrap_or(at);
+                r.target = at;
+                r.facing = facing;
+            }
+        }
+    }
+}
+
+/// Other players run toward their last reported position at the run speed, and
+/// snap when they are far off (a teleport, a map entry).
+fn move_remotes(time: Res<Time>, mut remotes: Query<(&mut Transform, &mut RemotePlayer, &mut CharacterAnim)>) {
+    for (mut tf, mut r, mut anim) in &mut remotes {
+        let to = r.target - tf.translation;
+        let flat = Vec2::new(to.x, to.z).length();
+        let step = RUN_SPEED * 1.25 * time.delta_secs();
+        let moving = flat > 0.05;
+        if flat > 8.0 {
+            tf.translation = r.target;
+        } else if moving {
+            tf.translation += to * (step / flat).min(1.0);
+            tf.rotation = Quat::from_rotation_y(to.x.atan2(to.z));
+        } else {
+            tf.rotation = Quat::from_rotation_y(r.facing);
+        }
+        // CONTRACT: a short grace before standing: records arrive 25 a second and a
+        //   remote player reaches each one a little early, so without it the run
+        //   restarted at every record ("les animations ne se jouent pas entierement").
+        r.still_for = if moving { 0.0 } else { r.still_for + time.delta_secs() };
+        let wanted = if r.still_for < RUN_GRACE { AnimState::Run } else { AnimState::Idle };
+        if anim.state != wanted {
+            anim.state = wanted;
+        }
     }
 }
 
@@ -340,6 +497,7 @@ fn walk_local(
     meshes: Res<Assets<NavMesh>>,
     mut players: Query<(&mut Transform, &mut LocalPlayer, &mut CharacterAnim)>,
     mut snapped: Local<bool>,
+    mut still_for: Local<f32>,
 ) {
     let mesh = nav.as_ref().and_then(|n| meshes.get(&n.0));
     for (mut tf, mut player, mut anim) in &mut players {
@@ -383,7 +541,8 @@ fn walk_local(
             }
         }
         tf.rotation = Quat::from_rotation_y(player.facing);
-        let wanted = if moving { AnimState::Run } else { AnimState::Idle };
+        *still_for = if moving { 0.0 } else { *still_for + time.delta_secs() };
+        let wanted = if *still_for < RUN_GRACE { AnimState::Run } else { AnimState::Idle };
         if anim.state != wanted {
             anim.state = wanted;
         }
@@ -407,8 +566,10 @@ fn follow_camera(
     let rotation = Quat::from_euler(EulerRot::YXZ, CAM_YAW_DEG.to_radians(), CAM_PITCH_DEG.to_radians(), 0.0);
     let back = rotation * Vec3::Z;
     let target = player.translation + Vec3::new(0.0, 0.0, CAM_OFFSET_Z);
-    // `back` climbs sin(45) per unit: walk back until the camera is `zoom` above.
-    let distance = zoom.0 / back.y.max(0.1);
+    // The zoom is the camera's distance to the player along its view.
+    // FAILURE (2026-10-06): read as an altitude, the camera sat 35 units away and the
+    // player was a speck ("je vois pas le perso que je joue").
+    let distance = zoom.0;
     for (mut cam, mut projection) in &mut cameras {
         *cam = Transform::from_translation(target + back * distance).with_rotation(rotation);
         if let Projection::Perspective(p) = &mut *projection {
@@ -492,4 +653,48 @@ fn hide_occluders(
         }
     }
     *hidden = now_hidden;
+}
+
+/// The ArmamentState the hands give (the 2018 rule the experimental server's
+/// World.armament_of mirrors): a weapon in both hand slots is TwoHand (5); a weapon
+/// with something in the off hand 4; a weapon alone 3; nothing 0.
+/// INFERRED: Small/Large weapons are not told apart here (no item categories yet).
+fn armament(worn: &[(Vec<i8>, String)]) -> i8 {
+    let right = worn.iter().find(|(s, _)| s.contains(&5));
+    let left = worn.iter().find(|(s, _)| s.contains(&6));
+    match (right, left) {
+        (Some((s, _)), _) if s.contains(&6) => 5,
+        (Some(_), Some(_)) => 4,
+        (Some(_), None) => 3,
+        _ => 0,
+    }
+}
+
+/// Dress the player from the inventory, and other players from RemotePlayerInfo.
+#[allow(clippy::type_complexity)]
+fn dress(
+    mut commands: Commands,
+    mut net: ResMut<Net>,
+    library: Option<Res<CharacterLibrary>>,
+    skins: Res<Assets<ItemSkins>>,
+    mut locals: Query<(Entity, &mut Character, &mut CharacterAnim, Option<&Children>), (With<LocalPlayer>, Without<RemotePlayer>)>,
+    mut remotes: Query<(Entity, &RemotePlayer, &mut Character, &mut CharacterAnim, Option<&Children>), Without<LocalPlayer>>,
+) {
+    for (actor, equipment, armament) in std::mem::take(&mut net.remote_redress) {
+        for (e, r, mut c, mut a, kids) in &mut remotes {
+            if r.actor == actor {
+                redress(&mut commands, e, &mut c, &mut a, kids, equipment.clone(), armament);
+            }
+        }
+    }
+    let Some(table) = library.as_ref().and_then(|l| skins.get(&l.item_skins)) else { return };
+    let Ok((e, mut c, mut a, kids)) = locals.single_mut() else { return };
+    let Some(worn) = net.local_worn.take() else { return };
+    let equipment = worn
+        .iter()
+        .filter_map(|(slots, template)| {
+            table.0.get(template).map(|parts| (slots.first().copied().unwrap_or(0).max(0) as u8, parts.clone()))
+        })
+        .collect();
+    redress(&mut commands, e, &mut c, &mut a, kids, equipment, armament(&worn));
 }

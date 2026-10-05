@@ -252,7 +252,9 @@ fn screenshot_when_loaded(
         return;
     }
     *settled += 1;
-    if *settled < 60 {
+    // DSOR_SHOT_WAIT=<frames>: settle longer (two clients that must meet first).
+    let wait = std::env::var("DSOR_SHOT_WAIT").ok().and_then(|w| w.parse().ok()).unwrap_or(60);
+    if *settled < wait {
         return;
     }
     info!("screenshot -> {path} (frame {}, {loading} models still loading)", *frames);

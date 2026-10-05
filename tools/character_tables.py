@@ -91,3 +91,15 @@ for skel in ("uniskel", "uniskel_dwarf"):
         with open(os.path.join(assets, "characters", skel, "parts.json"), "w") as f:
             json.dump(names, f)
         print(f"{skel}/parts.json: {len(names)} parts")
+
+# Item template -> its Skin parts (_Template_Item.Skin, ';'-separated), so the client
+# can dress its own player from the inventory, which names templates, not skins.
+import sqlite3
+db = sqlite3.connect(os.path.join(src, "db", "static.db4"))
+skins = {
+    template: [p.strip() for p in skin.split(";") if p.strip()]
+    for template, skin in db.execute("select Id, Skin from _Template_Item where Skin <> ''")
+}
+with open(os.path.join(assets, "characters", "item_skins.json"), "w") as f:
+    json.dump(skins, f, separators=(",", ":"))
+print(f"item_skins.json: {len(skins)} items")

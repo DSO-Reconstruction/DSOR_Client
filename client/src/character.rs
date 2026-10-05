@@ -47,6 +47,27 @@ pub struct AnimTable(pub HashMap<String, HashMap<String, String>>);
 #[serde(transparent)]
 pub struct PartList(pub Vec<String>);
 
+/// Item template -> its Skin parts (tools/character_tables.py, from _Template_Item).
+#[derive(Asset, TypePath, Deserialize, Debug)]
+#[serde(transparent)]
+pub struct ItemSkins(pub HashMap<String, Vec<String>>);
+
+#[derive(Default, TypePath)]
+pub struct ItemSkinsLoader;
+impl AssetLoader for ItemSkinsLoader {
+    type Asset = ItemSkins;
+    type Settings = ();
+    type Error = std::io::Error;
+    async fn load(&self, r: &mut dyn Reader, _: &(), _: &mut LoadContext<'_>) -> Result<ItemSkins, Self::Error> {
+        let mut b = Vec::new();
+        r.read_to_end(&mut b).await?;
+        serde_json::from_slice(&b).map_err(std::io::Error::other)
+    }
+    fn extensions(&self) -> &[&str] {
+        &["item_skins.json"]
+    }
+}
+
 #[derive(Default, TypePath)]
 pub struct AnimTableLoader;
 impl AssetLoader for AnimTableLoader {
@@ -220,6 +241,7 @@ struct PartOf(Entity);
 #[derive(Resource)]
 pub struct CharacterLibrary {
     pub anims: Handle<AnimTable>,
+    pub item_skins: Handle<ItemSkins>,
     parts: HashMap<&'static str, Handle<PartList>>,
     skeletons: HashMap<&'static str, Handle<Gltf>>,
 }
@@ -230,6 +252,8 @@ impl Plugin for CharacterPlugin {
     fn build(&self, app: &mut App) {
         app.init_asset::<AnimTable>()
             .init_asset::<PartList>()
+            .init_asset::<ItemSkins>()
+            .register_asset_loader(ItemSkinsLoader)
             .register_asset_loader(AnimTableLoader)
             .register_asset_loader(PartListLoader)
             .add_systems(Startup, load_library)
@@ -247,6 +271,7 @@ fn load_library(mut commands: Commands, assets: Res<AssetServer>) {
     }
     commands.insert_resource(CharacterLibrary {
         anims: assets.load("characters/anims.json"),
+        item_skins: assets.load("characters/item_skins.json"),
         parts,
         skeletons,
     });
@@ -408,4 +433,30 @@ fn drive_animations(
         }
         anim.applied = Some(wanted);
     }
+}
+
+/// Dress a character again with new equipment: its skeleton and parts are rebuilt,
+/// its animation state kept.
+pub fn redress(
+    commands: &mut Commands,
+    entity: Entity,
+    character: &mut Character,
+    anim: &mut CharacterAnim,
+    children: Option<&Children>,
+    equipment: Vec<(u8, Vec<String>)>,
+    armament: i8,
+) {
+    if let Some(children) = children {
+        for c in children.iter() {
+            commands.entity(c).despawn();
+        }
+    }
+    character.desc.equipment = equipment;
+    character.desc.armament = armament;
+    character.built = false;
+    character.bones = None;
+    character.pending_parts.clear();
+    anim.player = None;
+    anim.nodes.clear();
+    anim.applied = None;
 }
