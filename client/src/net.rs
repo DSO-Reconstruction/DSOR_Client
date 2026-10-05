@@ -661,6 +661,9 @@ fn hide_occluders(
     cameras: Query<&GlobalTransform, With<Camera3d>>,
     children: Query<&Children>,
     mut visibility: Query<&mut Visibility>,
+    // Effect surfaces, decal boxes, particles: never occluders, and some are
+    // hidden on purpose (crate::materials) -- unhiding them would show them.
+    effects: Query<(), With<bevy::light::NotShadowCaster>>,
     mut hidden: Local<Vec<Entity>>,
 ) {
     if std::env::var("DSOR_NO_OCCLUDERS").is_ok() {
@@ -669,7 +672,7 @@ fn hide_occluders(
     let Ok((player, at)) = players.single() else { return };
     let Ok(cam) = cameras.single() else { return };
     let own: std::collections::HashSet<Entity> = children.iter_descendants(player).collect();
-    let filter = |e: Entity| !own.contains(&e);
+    let filter = |e: Entity| !own.contains(&e) && !effects.contains(e);
     let settings = MeshRayCastSettings::default()
         .with_visibility(RayCastVisibility::Any)
         .with_filter(&filter);

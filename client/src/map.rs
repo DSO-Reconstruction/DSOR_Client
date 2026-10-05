@@ -13,7 +13,7 @@
 //! against the camera frustum); nothing here disables it.
 
 use bevy::asset::{io::Reader, AssetLoader, LoadContext, LoadState, RecursiveDependencyLoadState};
-use bevy::gltf::{Gltf, GltfMaterialName};
+use bevy::gltf::Gltf;
 use bevy::prelude::*;
 use serde::Deserialize;
 
@@ -161,38 +161,7 @@ impl Plugin for MapPlugin {
     fn build(&self, app: &mut App) {
         app.init_asset::<MapManifest>()
             .init_asset_loader::<MapManifestLoader>()
-            .add_systems(Update, (start_map, stream_models).chain().run_if(resource_exists::<CurrentMap>))
-            .add_observer(hide_effect_surfaces);
-    }
-}
-
-/// Nebula shaders whose surfaces are not meant to be drawn as plain lit meshes.
-///
-/// DSO_Godot names every material `<node>_<shader>` (e.g. `static_0_1_volumefog`).
-/// These three come out of glTF as lit, alpha-blended sheets that show as milky
-/// white cards over the map:
-/// - `particle`: the emitter's spawn surface; the particles themselves are only
-///   in the `.fx.json` sidecar (DSO_Godot: "the emitter mesh itself stops being
-///   drawn" once the effect is rebuilt);
-/// - `refraction`: a screen-space DuDv warp of what is behind, not a colour;
-/// - `volumefog`: fog cards drawn with depth-based fade;
-/// - `decal`: ground decals. The exporter puts the decal's alpha mask
-///   (`EmsvMap0`, e.g. `decal_patch_02_mask`) in the glTF *emissive* slot over a
-///   tiled ground colour (`DiffMap0`, with a `Scale` UV factor), so in a stock
-///   PBR material they draw as glowing white squares. Needs a small custom
-///   material (colour at uv*Scale, alpha = mask at uv).
-/// Hidden until the client has real implementations of them.
-const HIDDEN_SHADER_SUFFIXES: [&str; 4] = ["_particle", "_refraction", "_volumefog", "_decal"];
-
-fn hide_effect_surfaces(
-    add: On<Add, GltfMaterialName>,
-    names: Query<&GltfMaterialName>,
-    mut commands: Commands,
-) {
-    if let Ok(name) = names.get(add.entity) {
-        if HIDDEN_SHADER_SUFFIXES.iter().any(|s| name.0.ends_with(s)) {
-            commands.entity(add.entity).insert(Visibility::Hidden);
-        }
+            .add_systems(Update, (start_map, stream_models).chain().run_if(resource_exists::<CurrentMap>));
     }
 }
 

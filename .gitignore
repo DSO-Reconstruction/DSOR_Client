@@ -10,3 +10,4 @@
 *.nvx2
 *.nax3
 /client/dist
+__pycache__/

@@ -8,10 +8,13 @@
 //! so the browser build fetches them over HTTP.
 
 mod character;
+mod decals;
 mod hud;
 mod map;
+mod materials;
 mod nav;
 mod net;
+mod particles;
 
 use bevy::camera_controller::free_camera::{FreeCamera, FreeCameraPlugin};
 use bevy::diagnostic::{EntityCountDiagnosticsPlugin, FrameTimeDiagnosticsPlugin};
@@ -49,14 +52,14 @@ fn parse_cam(s: &str) -> Option<([f32; 3], [f32; 3])> {
 
 #[cfg(not(target_arch = "wasm32"))]
 fn options() -> Options {
-    let mut o = Options { map: DEFAULT_MAP.into(), screenshot: None, cam: None, shadows: false, character: None, anim: None, net: None };
+    let mut o = Options { map: DEFAULT_MAP.into(), screenshot: None, cam: None, shadows: true, character: None, anim: None, net: None };
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
             "--screenshot" => o.screenshot = Some(SCREENSHOT_PATH.into()),
             "--screenshot-to" => o.screenshot = args.next(),
             "--cam" => o.cam = args.next().as_deref().and_then(parse_cam),
-            "--shadows" => o.shadows = true,
+            "--no-shadows" => o.shadows = false,
             "--character" => {
                 let class = args.next().and_then(|c| c.parse().ok()).unwrap_or(0);
                 let gender = args.next().and_then(|g| g.parse().ok()).unwrap_or(0);
@@ -97,7 +100,7 @@ fn options() -> Options {
 
 #[cfg(target_arch = "wasm32")]
 fn options() -> Options {
-    let mut o = Options { map: DEFAULT_MAP.into(), screenshot: None, cam: None, shadows: false, character: None, anim: None, net: None };
+    let mut o = Options { map: DEFAULT_MAP.into(), screenshot: None, cam: None, shadows: true, character: None, anim: None, net: None };
     let search = web_sys::window()
         .and_then(|w| w.location().search().ok())
         .unwrap_or_default();
@@ -106,7 +109,7 @@ fn options() -> Options {
         match k {
             "map" if !v.is_empty() => o.map = v.into(),
             "cam" => o.cam = parse_cam(&v.replace("%2C", ",")),
-            "shadows" => o.shadows = true,
+            "noshadows" => o.shadows = false,
             "server" | "account" | "sid" | "relay" | "char" => {
                 let n = o.net.get_or_insert_with(|| net::NetConfig {
                     login: "127.0.0.1:2190".into(),
@@ -175,6 +178,9 @@ fn main() {
             FrameTimeDiagnosticsPlugin::default(),
             EntityCountDiagnosticsPlugin::default(),
             FreeCameraPlugin,
+            materials::MaterialsPlugin,
+            decals::DecalPlugin,
+            particles::ParticlePlugin,
             MapPlugin,
             character::CharacterPlugin,
             net::NetPlugin,
@@ -184,7 +190,7 @@ fn main() {
         .insert_resource(ClearColor(Color::srgb(0.05, 0.06, 0.08)))
         .insert_resource(GlobalAmbientLight {
             color: Color::WHITE,
-            brightness: 900.0,
+            brightness: 600.0,
             affects_lightmapped_meshes: true,
         })
         .insert_resource(opts.clone())
@@ -219,8 +225,17 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>, opts: Res<Optio
 
     // Sun: high and from the side, so walls and props read in relief.
     commands.spawn((
-        DirectionalLight { illuminance: 6_000.0, shadow_maps_enabled: opts.shadows, ..default() },
-        Transform::default().looking_to(Vec3::new(-0.4, -1.0, -0.3), Vec3::Y),
+        DirectionalLight { illuminance: 7_500.0, shadow_maps_enabled: opts.shadows, ..default() },
+        // The game camera sees ~40 units around the player: two cascades cover it
+        // with sharp shadows near the player and keep the shadow pass cheap on web.
+        bevy::light::CascadeShadowConfigBuilder {
+            num_cascades: 2,
+            first_cascade_far_bound: 25.0,
+            maximum_distance: 80.0,
+            ..default()
+        }
+        .build(),
+        Transform::default().looking_to(Vec3::new(-0.6, -1.0, -0.45), Vec3::Y),
     ));
 }
 

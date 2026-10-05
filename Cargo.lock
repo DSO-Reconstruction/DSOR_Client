@@ -2418,6 +2418,8 @@ dependencies = [
  "bevy",
  "dsor-proto",
  "dsor-raknet",
+ "dsor-transport",
+ "gltf",
  "log",
  "serde",
  "serde_json",
