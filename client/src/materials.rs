@@ -20,9 +20,35 @@ use bevy::prelude::*;
 
 /// A Nebula decal: its mesh is the unit cube the texture is projected through
 /// (straight down its local Y) onto the ground inside it.
+///
+/// With `extras.dsor_decal` (tools/fix_materials.py --n3) it carries the colour,
+/// repeated over the ground at `scale`, and the mask cut over the box; without
+/// it the box material's merged texture is stretched over the box once.
 #[derive(Component, Reflect, Default)]
 #[reflect(Component, Default)]
-pub struct DecalVolume;
+pub struct DecalVolume {
+    pub tiling: Option<DecalTiling>,
+}
+
+#[derive(Reflect, Default, Clone)]
+pub struct DecalTiling {
+    pub color: Handle<Image>,
+    pub mask: Handle<Image>,
+    /// The n3 node's `Scale`: colour repeats per 1/scale world units.
+    pub scale: f32,
+}
+
+fn decal_tiling(textures: &[Option<Handle<Image>>], material: &gltf::Material) -> Option<DecalTiling> {
+    let extras = material.extras().as_ref()?.get();
+    let v: serde_json::Value = serde_json::from_str(extras).ok()?;
+    let d = v.get("dsor_decal")?;
+    let index = |k: &str| d.get(k).and_then(|x| x.as_u64());
+    Some(DecalTiling {
+        color: textures.get(index("color")? as usize)?.clone()?,
+        mask: textures.get(index("mask")? as usize)?.clone()?,
+        scale: d.get("scale").and_then(|x| x.as_f64()).unwrap_or(1.0) as f32,
+    })
+}
 
 #[derive(Clone, Copy, PartialEq)]
 enum State {
@@ -70,11 +96,23 @@ fn standard_material(m: &GltfMaterial) -> StandardMaterial {
 }
 
 #[derive(Default, Clone)]
-struct NebulaStates;
+struct NebulaStates {
+    /// This file's textures by glTF index (external images load by path, not as
+    /// labelled sub-assets, so on_texture is the only way to their handles).
+    textures: Vec<Option<Handle<Image>>>,
+}
 
 impl GltfExtensionHandler for NebulaStates {
     fn dyn_clone(&self) -> Box<dyn ErasedGltfExtensionHandler> {
         Box::new(self.clone())
+    }
+
+    fn on_texture(&mut self, gltf_texture: &gltf::Texture, texture: Handle<Image>) {
+        let i = gltf_texture.index();
+        if self.textures.len() <= i {
+            self.textures.resize(i + 1, None);
+        }
+        self.textures[i] = Some(texture);
     }
 
     fn on_material(
@@ -122,7 +160,8 @@ impl GltfExtensionHandler for NebulaStates {
             Some(state) => {
                 if state == State::Decal {
                     // A projection box, not a surface: crate::decals draws what it covers.
-                    entity.insert((DecalVolume, Visibility::Hidden));
+                    let tiling = decal_tiling(&self.textures, material);
+                    entity.insert((DecalVolume { tiling }, Visibility::Hidden));
                 }
                 let handle = load_context.get_label_handle::<StandardMaterial>(dsor_label(material_label));
                 entity.insert(MeshMaterial3d(handle));
@@ -137,12 +176,12 @@ pub struct MaterialsPlugin;
 impl Plugin for MaterialsPlugin {
     fn build(&self, app: &mut App) {
         // Scene components must be reflected to be instanced.
-        app.register_type::<DecalVolume>();
+        app.register_type::<DecalVolume>().register_type::<DecalTiling>();
         // After bevy_pbr's own handler, so the material it set is replaced.
         let handlers = app.world().resource::<GltfExtensionHandlers>().0.clone();
         #[cfg(target_family = "wasm")]
-        bevy::tasks::block_on(async { handlers.write().await.push(Box::new(NebulaStates)) });
+        bevy::tasks::block_on(async { handlers.write().await.push(Box::new(NebulaStates::default())) });
         #[cfg(not(target_family = "wasm"))]
-        handlers.write_blocking().push(Box::new(NebulaStates));
+        handlers.write_blocking().push(Box::new(NebulaStates::default()));
     }
 }

@@ -121,3 +121,79 @@ for root, _dirs, files in os.walk(assets):
             if not dry:
                 write_glb(path, doc, rest)
 print(stats)
+
+# -- decal tiling -------------------------------------------------------------
+# A decal's colour (DiffMap0) is not stretched over its box: Nebula repeats it by
+# the node's `Scale` shader parameter (0.2 for Kingshill's stones and sand, read
+# from the original .n3) while the mask covers the box once. The merged texture
+# above cannot do that, so the client draws decals with two UV sets
+# (client/src/decals.rs); this records what it needs as extras.dsor_decal:
+#   color / mask: glTF texture indices; scale: the n3 Scale (1.0 when absent).
+# Usage: fix_materials.py <assets> --n3 <export_win32/models>
+if "--n3" in sys.argv:
+    models = sys.argv[sys.argv.index("--n3") + 1]
+
+    def n3_scales(path):
+        """node name -> Scale, for every node of an .n3 that sets one."""
+        data = open(path, "rb").read()
+        out = {}
+        at = 0
+        while True:
+            at = data.find(b"Scale", at)
+            if at < 0:
+                return out
+            value = struct.unpack_from("<f", data, at + 5)[0]
+            # The owning node: the last "static_..."-style name before it.
+            head = data.rfind(b"DNPS", 0, at)
+            if head >= 0:
+                size = struct.unpack_from("<H", data, head + 4)[0]
+                name = data[head + 6 : head + 6 + size].decode("ascii", "replace")
+                out[name] = value
+            at += 5
+
+    dstats = {"decals": 0, "no_n3": 0}
+    for root, _dirs, files in os.walk(assets):
+        if "/textures" in root or root.endswith("/maps"):
+            continue
+        for name in files:
+            if not name.endswith(".glb"):
+                continue
+            path = os.path.join(root, name)
+            try:
+                doc, rest = read_glb(path)
+            except Exception:
+                continue
+            images = doc.get("images", [])
+            textures = doc.get("textures", [])
+            changed = False
+            for mat in doc.get("materials", []):
+                extras = mat.get("extras", {})
+                if extras.get("dsor_state") != "Decal" or "dsor_decal" in extras:
+                    continue
+                base = mat.get("pbrMetallicRoughness", {}).get("baseColorTexture")
+                if base is None:
+                    continue
+                merged = images[textures[base["index"]]["source"]]["uri"]
+                stem, _, mask_name = os.path.splitext(merged)[0].rpartition("__")
+                if not stem:
+                    continue
+                find = lambda tail: next((i for i, t in enumerate(textures)
+                                          if os.path.splitext(images[t["source"]]["uri"])[0].endswith(tail)), None)
+                color = find(os.path.basename(stem))
+                mask = find(mask_name)
+                if color is None or mask is None:
+                    continue
+                rel = os.path.relpath(path, assets)[: -len(".glb")]
+                n3 = os.path.join(models, rel + ".n3")
+                node = mat.get("name", "").rsplit("_decal", 1)[0]
+                scale = 1.0
+                if os.path.exists(n3):
+                    scale = n3_scales(n3).get(node, 1.0)
+                else:
+                    dstats["no_n3"] += 1
+                extras["dsor_decal"] = {"color": color, "mask": mask, "scale": scale}
+                dstats["decals"] += 1
+                changed = True
+            if changed and not dry:
+                write_glb(path, doc, rest)
+    print(dstats)

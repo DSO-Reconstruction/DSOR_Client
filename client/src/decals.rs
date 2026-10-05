@@ -4,9 +4,12 @@
 //! squares; projecting needs the depth buffer, which WebGL2 cannot sample.
 //!
 //! So the projection is done once, on the CPU: once the map is in, every opaque
-//! ground triangle inside a box is clipped to it and textured from its box
-//! coordinates (u = x + 0.5, v = z + 0.5). All decals sharing a material end up in
-//! one mesh, which also removes their ~350 box entities from the frame.
+//! ground triangle inside a box is clipped to it. The mask is laid over the box
+//! (uv_b = box x + 0.5, z + 0.5); the colour repeats over the ground at the n3
+//! node's `Scale` (uv = world x, z * Scale; 0.2 in Kingshill, so the stones keep
+//! their size however big the box). All decals sharing textures end up in one
+//! mesh, which also removes their ~350 box entities from the frame.
+//! UNVERIFIED against the 2018 client: the colour in world (not box) space.
 
 use std::collections::{HashMap, HashSet};
 
@@ -15,10 +18,29 @@ use bevy::camera::primitives::Aabb;
 use bevy::light::NotShadowCaster;
 use bevy::mesh::skinning::SkinnedMesh;
 use bevy::mesh::{Indices, PrimitiveTopology, VertexAttributeValues};
+use bevy::pbr::{ExtendedMaterial, MaterialExtension};
 use bevy::prelude::*;
+use bevy::render::render_resource::AsBindGroup;
+use bevy::shader::ShaderRef;
 
 use crate::map::CurrentMap;
 use crate::materials::DecalVolume;
+
+/// The decal's mask, cut over its box (uv_b); see shaders/decal.wgsl.
+#[derive(Asset, AsBindGroup, Reflect, Debug, Clone)]
+pub struct DecalMask {
+    #[texture(100)]
+    #[sampler(101)]
+    mask: Handle<Image>,
+}
+
+impl MaterialExtension for DecalMask {
+    fn fragment_shader() -> ShaderRef {
+        "embedded://dsor_client/shaders/decal.wgsl".into()
+    }
+}
+
+pub type DecalMaterial = ExtendedMaterial<StandardMaterial, DecalMask>;
 
 /// Frames to wait after every model has loaded, for scenes to spawn and their
 /// transforms to propagate.
@@ -39,7 +61,9 @@ pub struct DecalPlugin;
 
 impl Plugin for DecalPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Update, project_decals.run_if(resource_exists::<CurrentMap>));
+        bevy::asset::embedded_asset!(app, "shaders/decal.wgsl");
+        app.add_plugins(MaterialPlugin::<DecalMaterial>::default())
+            .add_systems(Update, project_decals.run_if(resource_exists::<CurrentMap>));
     }
 }
 
@@ -48,7 +72,17 @@ struct Batch {
     positions: Vec<[f32; 3]>,
     normals: Vec<[f32; 3]>,
     uvs: Vec<[f32; 2]>,
+    uvs_b: Vec<[f32; 2]>,
     indices: Vec<u32>,
+}
+
+/// What a batch is drawn with.
+#[derive(Clone, PartialEq, Eq, Hash)]
+enum Look {
+    /// Colour repeated at a scale, mask over the box.
+    Tiled(AssetId<Image>, AssetId<Image>, u32),
+    /// The box material's merged texture over the box (no dsor_decal extras).
+    Stretched(AssetId<StandardMaterial>),
 }
 
 fn world_aabb(affine: &bevy::math::Affine3A, min: Vec3, max: Vec3) -> (Vec3, Vec3) {
@@ -105,7 +139,8 @@ fn project_decals(
     current: Res<CurrentMap>,
     asset_server: Res<AssetServer>,
     mut meshes: ResMut<Assets<Mesh>>,
-    pending: Query<(Entity, &GlobalTransform, &MeshMaterial3d<StandardMaterial>), (With<DecalVolume>, Without<Projected>)>,
+    mut decal_materials: ResMut<Assets<DecalMaterial>>,
+    pending: Query<(Entity, &GlobalTransform, &DecalVolume, &MeshMaterial3d<StandardMaterial>), Without<Projected>>,
     ground: Query<
         (&Mesh3d, &GlobalTransform, &Aabb),
         (Without<DecalVolume>, Without<NotShadowCaster>, Without<SkinnedMesh>),
@@ -140,14 +175,38 @@ fn project_decals(
         }
     }
 
-    let mut batches: HashMap<AssetId<StandardMaterial>, (Handle<StandardMaterial>, Batch)> = HashMap::new();
-    for (entity, gt, material) in &pending {
+    let mut batches: HashMap<Look, (Option<Handle<DecalMaterial>>, Option<Handle<StandardMaterial>>, Batch)> =
+        HashMap::new();
+    for (entity, gt, volume, material) in &pending {
         commands.entity(entity).insert(Projected);
         let to_world = gt.affine();
         let to_box = to_world.inverse();
         let (lo, hi) = world_aabb(&to_world, Vec3::splat(-0.5), Vec3::splat(0.5));
         let mut seen = HashSet::new();
-        let batch = &mut batches.entry(material.0.id()).or_insert_with(|| (material.0.clone(), Batch::default())).1;
+        let (look, scale) = match &volume.tiling {
+            Some(t) => (Look::Tiled(t.color.id(), t.mask.id(), t.scale.to_bits()), Some(t.scale)),
+            None => (Look::Stretched(material.0.id()), None),
+        };
+        let batch = &mut batches
+            .entry(look)
+            .or_insert_with(|| match &volume.tiling {
+                Some(t) => {
+                    let m = decal_materials.add(DecalMaterial {
+                        base: StandardMaterial {
+                            base_color_texture: Some(t.color.clone()),
+                            alpha_mode: AlphaMode::Blend,
+                            depth_bias: 50.0,
+                            perceptual_roughness: 0.8,
+                            metallic: 0.0,
+                            ..default()
+                        },
+                        extension: DecalMask { mask: t.mask.clone() },
+                    });
+                    (Some(m), None, Batch::default())
+                }
+                None => (None, Some(material.0.clone()), Batch::default()),
+            })
+            .2;
         for c in cells(lo, hi) {
             for &i in grid.get(&c).into_iter().flatten() {
                 if !seen.insert(i) {
@@ -189,7 +248,13 @@ fn project_decals(
                         let wp = to_world.transform_point3(*p) + n * LIFT;
                         batch.positions.push(wp.into());
                         batch.normals.push(n.into());
-                        batch.uvs.push([p.x + 0.5, p.z + 0.5]);
+                        match scale {
+                            Some(k) => {
+                                batch.uvs.push([wp.x * k, wp.z * k]);
+                                batch.uvs_b.push([p.x + 0.5, p.z + 0.5]);
+                            }
+                            None => batch.uvs.push([p.x + 0.5, p.z + 0.5]),
+                        }
                     }
                     // Fan, wound to face up.
                     let up = (Vec3::from(batch.positions[base as usize + 1]) - Vec3::from(batch.positions[base as usize]))
@@ -210,23 +275,30 @@ fn project_decals(
 
     let parent = current.root;
     let mut triangles = 0;
-    for (handle, b) in batches.into_values() {
+    for (tiled, stretched, b) in batches.into_values() {
         if b.indices.is_empty() {
             continue;
         }
         triangles += b.indices.len() / 3;
-        let mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default())
+        let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default())
             .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, b.positions)
             .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, b.normals)
             .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, b.uvs)
             .with_inserted_indices(Indices::U32(b.indices));
+        if !b.uvs_b.is_empty() {
+            mesh.insert_attribute(Mesh::ATTRIBUTE_UV_1, b.uvs_b);
+        }
         let mut e = commands.spawn((
             Mesh3d(meshes.add(mesh)),
-            MeshMaterial3d(handle),
             NotShadowCaster,
             Transform::IDENTITY,
             Name::new("decals"),
         ));
+        match (tiled, stretched) {
+            (Some(m), _) => e.insert(MeshMaterial3d(m)),
+            (None, Some(m)) => e.insert(MeshMaterial3d(m)),
+            _ => continue,
+        };
         if let Some(p) = parent {
             e.insert(ChildOf(p));
         }
