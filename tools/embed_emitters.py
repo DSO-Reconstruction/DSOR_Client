@@ -13,6 +13,12 @@ It also hides helper surfaces: a `shd:standard` surface whose only colour is
 `tex:system/white` (405 of them: dummies, and boxes such as the one inside
 s03_deco_campfire_pot_01) drew as a plain white block. Their material gets
 dsor_state Hidden, as tools/fix_materials.py does for effect surfaces.
+
+And it gives every surface its Nebula render state (the sidecar's type_name)
+instead of the exporter's guess: Solid / DecalReceiveSolid draw opaque,
+AlphaTest / DecalReceiveAlphaTest cut out at 0.5. The exporter made any texture
+with an alpha channel BLEND: blended surfaces write no depth, so a cape (Nebula:
+AlphaTest) vanished behind blended foliage and ground decals drawn after it.
 SEE: tools/fix_materials.py (same in-place rewrite), DSO_Godot fx_to_scenes.gd.
 """
 import json, os, sys
@@ -46,7 +52,9 @@ def envelope(e):
     return [float(x) for x in v + k + [e.get("freq", 0.0), e.get("amp", 0.0), e.get("mod", 0)]]
 
 
-stats = {"emitters": 0, "helpers": 0, "files": 0, "skipped": 0}
+stats = {"emitters": 0, "helpers": 0, "opaque": 0, "cutout": 0, "files": 0, "skipped": 0}
+OPAQUE = {"Solid", "DecalReceiveSolid"}
+CUTOUT = {"AlphaTest", "DecalReceiveAlphaTest"}
 for root, _dirs, files in os.walk(assets):
     for name in files:
         if not name.endswith(".fx.json"):
@@ -65,6 +73,20 @@ for root, _dirs, files in os.walk(assets):
         changed = False
         materials = {m.get("name"): m for m in doc.get("materials", [])}
         for e in fx.get("emitters", []):
+            state = (e.get("emitter") or {}).get("type_name")
+            shader = (e.get("shader") or "").removeprefix("shd:")
+            m = materials.get(f"{e.get('node')}_{shader}")
+            if m is not None and "dsor_state" not in m.get("extras", {}):
+                if state in OPAQUE and m.get("alphaMode", "OPAQUE") != "OPAQUE":
+                    m.pop("alphaMode", None)
+                    m.pop("alphaCutoff", None)
+                    stats["opaque"] += 1
+                    changed = True
+                elif state in CUTOUT and m.get("alphaMode") != "MASK":
+                    m["alphaMode"] = "MASK"
+                    m["alphaCutoff"] = 0.5
+                    stats["cutout"] += 1
+                    changed = True
             tex = e.get("textures") or {}
             if e.get("shader") == "shd:standard" and tex.get("DiffMap0") == "tex:system/white":
                 m = materials.get(f"{e.get('node')}_standard")

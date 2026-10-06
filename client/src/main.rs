@@ -253,12 +253,11 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>, opts: Res<Optio
     // Sun: high and from the side, so walls and props read in relief.
     commands.spawn((
         DirectionalLight { illuminance: 7_500.0, shadow_maps_enabled: opts.shadows, ..default() },
-        // The game camera sees ~40 units around the player: two cascades cover it
-        // with sharp shadows near the player and keep the shadow pass cheap on web.
+        // One cascade: the boundary of a second one sat at the camera's own distance
+        // at full zoom-out and cut the view in two ("la vision est coupee en 2").
         bevy::light::CascadeShadowConfigBuilder {
-            num_cascades: 2,
-            first_cascade_far_bound: 25.0,
-            maximum_distance: 80.0,
+            num_cascades: 1,
+            maximum_distance: 70.0,
             ..default()
         }
         .build(),

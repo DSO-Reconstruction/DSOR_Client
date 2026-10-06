@@ -13,7 +13,7 @@
 //! against the camera frustum); nothing here disables it.
 
 use bevy::asset::{io::Reader, AssetLoader, LoadContext, LoadState, RecursiveDependencyLoadState};
-use bevy::gltf::Gltf;
+use bevy::gltf::{Gltf, GltfMaterial, GltfMesh, GltfNode};
 use bevy::prelude::*;
 use serde::Deserialize;
 
@@ -219,11 +219,27 @@ fn start_map(
 /// Request the map's models a few at a time and spawn each model's placements
 /// as soon as it is requested (a `WorldAssetRoot` whose scene is still loading
 /// simply spawns its children when the scene arrives).
+/// Map models stream in, MAX_MODELS_IN_FLIGHT at a time; each one's placements
+/// are spawned once its glTF is parsed.
+///
+/// CONTRACT: a static model (no animation, skin, particle emitter or decal) is
+///   spawned FLAT: one entity per visible surface, its node chain folded into its
+///   transform, under MapRoot. As a scene it cost every node of its hierarchy
+///   too: Kingshill was 37 534 node entities for 16 311 visible surfaces, and the
+///   browser (one thread) paid for each entity every frame (20-30 FPS).
+///   Effect and helper surfaces (dsor_state Hidden) are not spawned at all.
+/// SEE: crate::materials for the states a scene gets from its extension handler,
+///   which flat surfaces replicate here.
+#[allow(clippy::too_many_arguments)]
 fn stream_models(
     mut commands: Commands,
     asset_server: Res<AssetServer>,
     manifests: Res<Assets<MapManifest>>,
     mut current: ResMut<CurrentMap>,
+    gltfs: Res<Assets<Gltf>>,
+    nodes: Res<Assets<GltfNode>>,
+    meshes: Res<Assets<GltfMesh>>,
+    materials: Res<Assets<GltfMaterial>>,
 ) {
     let Some(root) = current.root else { return };
     if current.spawned {
@@ -231,49 +247,126 @@ fn stream_models(
     }
     let Some(manifest) = manifests.get(&current.manifest) else { return };
 
-    // Drop the loads whose glTF has been parsed (or failed).
-    let models = &current.models;
-    let still: Vec<usize> = current
-        .in_flight
-        .iter()
-        .copied()
-        .filter(|&m| {
-            !matches!(
-                asset_server.get_load_state(&models[m]),
-                Some(LoadState::Loaded | LoadState::Failed(_))
-            )
-        })
-        .collect();
+    // Place the models whose glTF has been parsed; forget the failed ones.
+    let mut still = Vec::new();
+    for m in std::mem::take(&mut current.in_flight) {
+        match asset_server.get_load_state(&current.models[m]) {
+            Some(LoadState::Loaded) => {
+                let Some(gltf) = gltfs.get(&current.models[m]) else {
+                    still.push(m);
+                    continue;
+                };
+                let placements = current.by_model[m].clone();
+                let flat = flat_surfaces(gltf, &nodes, &meshes, &materials, &asset_server);
+                commands.entity(root).with_children(|parent| {
+                    for &i in &placements {
+                        let inst = &manifest.instances[i];
+                        let at = Transform {
+                            translation: game_to_bevy(inst.p),
+                            rotation: Quat::from_xyzw(inst.r[0], inst.r[1], inst.r[2], inst.r[3]).normalize(),
+                            scale: Vec3::from_array(inst.s),
+                        };
+                        match &flat {
+                            Some(surfaces) => {
+                                let inst_affine = at.compute_affine();
+                                for s in surfaces {
+                                    let tf = Transform::from_matrix(Mat4::from(inst_affine * s.local));
+                                    let mut e = parent.spawn((Mesh3d(s.mesh.clone()), MeshMaterial3d(s.material.clone()), tf));
+                                    if s.no_shadow {
+                                        e.insert(bevy::light::NotShadowCaster);
+                                    }
+                                }
+                            }
+                            None => {
+                                let scene = gltf.scenes.first().cloned().unwrap_or_default();
+                                parent.spawn((WorldAssetRoot(scene), at));
+                            }
+                        }
+                    }
+                });
+                current.instances += placements.len();
+            }
+            Some(LoadState::Failed(_)) => {}
+            _ => still.push(m),
+        }
+    }
     current.in_flight = still;
 
     while current.in_flight.len() < MAX_MODELS_IN_FLIGHT && current.models.len() < manifest.models.len() {
         let m = current.models.len();
-        let path = model_path(&manifest.models[m]);
-        let gltf: Handle<Gltf> = asset_server.load(path.clone());
-        // Loading the labelled scene of the same file costs no second load.
-        let scene: Handle<WorldAsset> = asset_server.load(GltfAssetLabel::Scene(0).from_asset(path));
+        let gltf: Handle<Gltf> = asset_server.load(model_path(&manifest.models[m]));
         current.models.push(gltf);
         current.in_flight.push(m);
-
-        let placements = &current.by_model[m];
-        commands.entity(root).with_children(|parent| {
-            for &i in placements {
-                let inst = &manifest.instances[i];
-                let rotation = Quat::from_xyzw(inst.r[0], inst.r[1], inst.r[2], inst.r[3]).normalize();
-                parent.spawn((
-                    WorldAssetRoot(scene.clone()),
-                    Transform {
-                        translation: game_to_bevy(inst.p),
-                        rotation,
-                        scale: Vec3::from_array(inst.s),
-                    },
-                ));
-            }
-        });
-        current.instances += placements.len();
     }
-    if current.models.len() == manifest.models.len() {
+    if current.models.len() == manifest.models.len() && current.in_flight.is_empty() {
         current.spawned = true;
-        info!("map {}: all {} models requested", manifest.map, manifest.models.len());
+        info!("map {}: all {} models placed", manifest.map, manifest.models.len());
     }
+}
+
+/// One visible surface of a static model, in the model's space.
+struct FlatSurface {
+    mesh: Handle<Mesh>,
+    material: Handle<StandardMaterial>,
+    local: bevy::math::Affine3A,
+    no_shadow: bool,
+}
+
+/// The visible surfaces of a model that can be spawned flat, or None when it needs
+/// its scene (animations, skins, emitters, decal boxes).
+fn flat_surfaces(
+    gltf: &Gltf,
+    nodes: &Assets<GltfNode>,
+    meshes: &Assets<GltfMesh>,
+    materials: &Assets<GltfMaterial>,
+    asset_server: &AssetServer,
+) -> Option<Vec<FlatSurface>> {
+    if !gltf.animations.is_empty() || !gltf.skins.is_empty() {
+        return None;
+    }
+    let all: Vec<&GltfNode> = gltf.nodes.iter().map(|h| nodes.get(h)).collect::<Option<_>>()?;
+    if all.iter().any(|n| n.extras.as_ref().is_some_and(|e| e.value.contains("dsor_emitter"))) {
+        return None;
+    }
+    let children: std::collections::HashSet<usize> =
+        all.iter().flat_map(|n| n.children.iter().filter_map(|c| nodes.get(c).map(|c| c.index))).collect();
+    let mut out = Vec::new();
+    let mut stack: Vec<(usize, bevy::math::Affine3A)> = all
+        .iter()
+        .filter(|n| !children.contains(&n.index))
+        .map(|n| (n.index, bevy::math::Affine3A::IDENTITY))
+        .collect();
+    let by_index: std::collections::HashMap<usize, &GltfNode> = all.iter().map(|n| (n.index, *n)).collect();
+    while let Some((i, parent)) = stack.pop() {
+        let node = by_index.get(&i)?;
+        let local = parent * node.transform.compute_affine();
+        for c in &node.children {
+            stack.push((nodes.get(c)?.index, local));
+        }
+        let Some(mesh) = node.mesh.as_ref().and_then(|h| meshes.get(h)) else { continue };
+        for prim in &mesh.primitives {
+            let state = prim.material_extras.as_ref().map(|e| e.value.as_str()).unwrap_or("");
+            if state.contains("\"dsor_state\":\"Hidden\"") {
+                continue;
+            }
+            if state.contains("\"dsor_state\":\"Decal\"") {
+                return None;
+            }
+            let additive = state.contains("\"dsor_state\":\"Additive\"");
+            let Some(gm) = prim.material.as_ref() else { return None };
+            let Some(path) = gm.path() else { return None };
+            let label = path.label()?.to_owned();
+            // Mirrored nodes use the loader's inverted (cull-flipped) material.
+            let label = if local.matrix3.determinant() < 0.0 && !label.ends_with("(inverted)") {
+                format!("{label} (inverted)")
+            } else {
+                label
+            };
+            let suffix = if additive { "dsor" } else { "std" };
+            let material = asset_server.load::<StandardMaterial>(path.clone().with_label(format!("{label}/{suffix}")));
+            let opaque = materials.get(gm).is_some_and(|m| matches!(m.alpha_mode, AlphaMode::Opaque | AlphaMode::Mask(_)));
+            out.push(FlatSurface { mesh: prim.mesh.clone(), material, local, no_shadow: additive || !opaque });
+        }
+    }
+    Some(out)
 }

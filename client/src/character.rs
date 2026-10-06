@@ -406,6 +406,7 @@ fn on_instance_ready(
     gltfs: Res<Assets<Gltf>>,
     mut graphs: ResMut<Assets<AnimationGraph>>,
     joints: Query<(&Transform, Option<&ChildOf>)>,
+    parents: Query<&ChildOf>,
 ) {
     let entity = ready.entity;
     if let Ok(SkeletonOf(owner, generation)) = skeletons.get(entity) {
@@ -472,7 +473,7 @@ fn on_instance_ready(
             bones.extend(scaled_bones);
         }
         for part in std::mem::take(&mut character.pending_parts) {
-            rebind(&mut commands, part, &bones, &children, &names, &skinned);
+            rebind(&mut commands, part, &bones, &children, &names, &skinned, &parents);
         }
         character.bones = Some(bones);
         return;
@@ -483,7 +484,7 @@ fn on_instance_ready(
             return;
         }
         match &character.bones {
-            Some(bones) => rebind(&mut commands, entity, bones, &children, &names, &skinned),
+            Some(bones) => rebind(&mut commands, entity, bones, &children, &names, &skinned, &parents),
             None => character.pending_parts.push(entity),
         }
     }
@@ -498,30 +499,72 @@ fn rebind(
     children: &Query<&Children>,
     names: &Query<&Name>,
     skinned: &Query<&SkinnedMesh>,
+    parents: &Query<&ChildOf>,
 ) {
     for e in children.iter_descendants(part) {
         let Ok(skin) = skinned.get(e) else { continue };
         let joint_names: Option<Vec<String>> =
             skin.joints.iter().map(|j| names.get(*j).ok().map(|n| n.as_str().to_owned())).collect();
         let Some(joint_names) = joint_names else { continue };
-        bind(commands, e, skin, &joint_names, bones);
+        bind(commands, e, skin, &joint_names, bones, parents);
         commands.entity(e).insert(JointNames(joint_names));
     }
 }
 
-fn bind(commands: &mut Commands, e: Entity, skin: &SkinnedMesh, joint_names: &[String], bones: &HashMap<String, Entity>) {
+fn bind(
+    commands: &mut Commands,
+    e: Entity,
+    skin: &SkinnedMesh,
+    joint_names: &[String],
+    bones: &HashMap<String, Entity>,
+    parents: &Query<&ChildOf>,
+) {
+    drop_own_skeleton(commands, e, skin, bones, parents);
     let joints: Vec<Entity> = joint_names
         .iter()
         .zip(skin.joints.iter())
         .map(|(n, own)| bones.get(n.as_str()).copied().unwrap_or(*own))
         .collect();
-    // CONTRACT: no frustum culling on a re-bound part: its bounding box is the one
-    //   computed for its own (unanimated) skeleton copy, not where the shared
-    //   skeleton draws it.
+    // CONTRACT: a re-bound part's bounds are a box around the whole character, not
+    //   the box computed for its own unanimated skeleton copy. The part's mesh sits
+    //   at the character's origin, so a character-sized box in its space covers
+    //   wherever the shared skeleton draws it.
+    // FAILURE (2026-10-06): with NoFrustumCulling every part of every NPC was drawn
+    //   off screen too -- ~11 skinned meshes per NPC, 20 FPS in the browser.
     commands.entity(e).insert((
         SkinnedMesh { inverse_bindposes: skin.inverse_bindposes.clone(), joints },
-        bevy::camera::visibility::NoFrustumCulling,
+        bevy::camera::primitives::Aabb::from_min_max(CHARACTER_BOUNDS.0, CHARACTER_BOUNDS.1),
     ));
+}
+
+/// A box around any posed character (weapons and capes included), in its own space.
+const CHARACTER_BOUNDS: (Vec3, Vec3) = (Vec3::new(-2.0, -0.5, -2.0), Vec3::new(2.0, 3.5, 2.0));
+
+/// Characters farther than this from the camera stop animating (their pose is
+/// kept); the game camera sees about 40 units around the player.
+const ANIMATION_DISTANCE: f32 = 60.0;
+
+/// Despawn the part's own copy of the skeleton once its skin points at the shared
+/// one: ~70 unused joints per part, ~800 entities per dressed character, which
+/// the browser paid for every frame.
+/// CONTRACT: only joint trees that do not hold the skinned mesh itself.
+fn drop_own_skeleton(
+    commands: &mut Commands,
+    mesh: Entity,
+    skin: &SkinnedMesh,
+    bones: &HashMap<String, Entity>,
+    parents: &Query<&ChildOf>,
+) {
+    let shared: std::collections::HashSet<Entity> = bones.values().copied().collect();
+    let own: std::collections::HashSet<Entity> = skin.joints.iter().copied().filter(|j| !shared.contains(j)).collect();
+    let mesh_ancestors: std::collections::HashSet<Entity> = parents.iter_ancestors(mesh).collect();
+    for &j in &own {
+        let top = parents.get(j).map(|p| p.parent()).ok();
+        if top.is_some_and(|p| own.contains(&p)) || mesh_ancestors.contains(&j) || j == mesh {
+            continue;
+        }
+        commands.entity(j).try_despawn();
+    }
 }
 
 /// The joint names of a part's skin, as its own skeleton copy named them.
@@ -539,6 +582,7 @@ fn keep_parts_bound(
     children: Query<&Children>,
     names: Query<&Name>,
     skinned: Query<(&SkinnedMesh, Option<&JointNames>)>,
+    parents: Query<&ChildOf>,
 ) {
     for (root, character) in &characters {
         let Some(bones) = &character.bones else { continue };
@@ -564,7 +608,7 @@ fn keep_parts_bound(
                 .zip(skin.joints.iter())
                 .all(|(n, j)| bones.get(n.as_str()).is_none_or(|b| b == j));
             if !bound {
-                bind(&mut commands, e, skin, &joint_names, bones);
+                bind(&mut commands, e, skin, &joint_names, bones, &parents);
             }
         }
     }
@@ -602,11 +646,20 @@ fn apply_variations(
 struct VariedChild;
 
 fn drive_animations(
-    mut characters: Query<&mut CharacterAnim>,
+    mut characters: Query<(&mut CharacterAnim, &GlobalTransform)>,
     mut players: Query<(&mut AnimationPlayer, &mut AnimationTransitions)>,
+    cameras: Query<&GlobalTransform, With<Camera3d>>,
 ) {
-    for mut anim in &mut characters {
+    let eye = cameras.iter().next().map(|c| c.translation());
+    for (mut anim, at) in &mut characters {
         let Some(player) = anim.player else { continue };
+        // Far characters: paused, not evaluated.
+        let far = eye.is_some_and(|e| e.distance(at.translation()) > ANIMATION_DISTANCE);
+        if let Ok((mut p, _)) = players.get_mut(player) {
+            if far != p.all_paused() {
+                if far { p.pause_all(); } else { p.resume_all(); }
+            }
+        }
         let wanted = (anim.state.clone(), anim.speed);
         if anim.applied.as_ref() == Some(&wanted) {
             continue;

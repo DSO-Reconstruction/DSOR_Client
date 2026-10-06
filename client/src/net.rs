@@ -15,7 +15,6 @@
 use std::f32::consts::TAU;
 
 use bevy::input::mouse::MouseButton;
-use bevy::picking::mesh_picking::ray_cast::{MeshRayCast, MeshRayCastSettings, RayCastVisibility};
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 use dsor_proto::commands::{decode_message, movement, ClientCommand, ServerCommand};
@@ -151,7 +150,7 @@ impl Plugin for NetPlugin {
             )
             .add_systems(
                 Update,
-                (debug_hierarchy, spawn_local, dress, apply_remotes, move_remotes, click_to_move, walk_local, zoom_camera, follow_camera, hide_occluders, send_moves)
+                (debug_hierarchy, spawn_local, dress, apply_remotes, move_remotes, click_to_move, walk_local, zoom_camera, follow_camera, send_moves)
                     .chain()
                     .run_if(net_exists),
             );
@@ -687,59 +686,6 @@ fn send_moves(mut net: NonSendMut<Net>, time: Res<Time<Real>>, mut players: Quer
     let (bytes, bits) = command.encode();
     net.session.send_command_with(&bytes, bits, Reliability::UnreliableSequenced);
     let _ = TICK_SECONDS;
-}
-
-/// Decor between the camera and the player is hidden while it is in the way, as the
-/// game does with roofs and walls (the player spawns under Kingshill's roofs).
-/// INFERRED: the client's own occluder fading was not traced; this hides outright.
-fn hide_occluders(
-    mut ray_cast: MeshRayCast,
-    players: Query<(Entity, &GlobalTransform), With<LocalPlayer>>,
-    cameras: Query<&GlobalTransform, With<Camera3d>>,
-    children: Query<&Children>,
-    mut visibility: Query<&mut Visibility>,
-    // Effect surfaces, decal boxes, particles: never occluders, and some are
-    // hidden on purpose (crate::materials) -- unhiding them would show them.
-    effects: Query<(), With<bevy::light::NotShadowCaster>>,
-    mut hidden: Local<Vec<Entity>>,
-) {
-    if std::env::var("DSOR_NO_OCCLUDERS").is_ok() {
-        return;
-    }
-    let Ok((player, at)) = players.single() else { return };
-    let Ok(cam) = cameras.single() else { return };
-    let own: std::collections::HashSet<Entity> = children.iter_descendants(player).collect();
-    let filter = |e: Entity| !own.contains(&e) && !effects.contains(e);
-    let settings = MeshRayCastSettings::default()
-        .with_visibility(RayCastVisibility::Any)
-        .with_filter(&filter);
-    let feet = at.translation();
-    let mut now_hidden = Vec::new();
-    for offset in [Vec3::new(0.0, 1.0, 0.0), Vec3::new(0.0, 1.8, 0.0), Vec3::new(0.6, 1.0, 0.0), Vec3::new(-0.6, 1.0, 0.0), Vec3::new(0.0, 0.3, 0.0)] {
-        let goal = feet + offset;
-        let from = cam.translation();
-        let Ok(dir) = Dir3::new(goal - from) else { continue };
-        let reach = (goal - from).length() - 0.3;
-        let ray = Ray3d::new(from, dir);
-        for (entity, hit) in ray_cast.cast_ray(ray, &settings) {
-            if hit.distance < reach && hit.point.y > feet.y + 0.4 {
-                now_hidden.push(*entity);
-            }
-        }
-    }
-    for e in hidden.drain(..) {
-        if !now_hidden.contains(&e) {
-            if let Ok(mut v) = visibility.get_mut(e) {
-                *v = Visibility::Inherited;
-            }
-        }
-    }
-    for &e in &now_hidden {
-        if let Ok(mut v) = visibility.get_mut(e) {
-            *v = Visibility::Hidden;
-        }
-    }
-    *hidden = now_hidden;
 }
 
 /// The ArmamentState the hands give (the 2018 rule the experimental server's
