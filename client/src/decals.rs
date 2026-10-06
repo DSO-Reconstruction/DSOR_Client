@@ -50,8 +50,16 @@ const CELL: f32 = 8.0;
 /// Triangles steeper than this (|normal.y| below it) are walls: left out, as a
 /// straight-down projection would only smear them.
 const MIN_UP: f32 = 0.5;
-/// Lift over the ground, on top of the material's depth bias.
-const LIFT: f32 = 0.02;
+/// Lift over the ground: it alone keeps decals off the ground's depth.
+const LIFT: f32 = 0.04;
+
+/// CONTRACT: negative. bevy sorts transparent surfaces by view distance PLUS the
+///   material's depth_bias, so a positive bias (50, to win over the ground) sorted
+///   the map's decals as if 50 units nearer: drawn after every effect, they painted
+///   over them ("les sorts passent dessous le sol" -- frost nova vanished under the
+///   cobblestones and showed whole with decals off). Negative, they are drawn
+///   first, right after the opaque ground.
+pub const DECAL_DEPTH_BIAS: f32 = -1000.0;
 
 /// A decal box already drawn.
 #[derive(Component)]
@@ -150,6 +158,9 @@ fn project_decals(
     map_roots: Query<(), With<crate::map::MapRoot>>,
     mut plane: Local<Option<Handle<Mesh>>>,
 ) {
+    if std::env::var("DSOR_NO_DECALS").is_ok() {
+        return;
+    }
     // Only the map's own decals are projected here, once. A skill effect's decal box
     // (a scorch under a fireball impact) must not rerun the whole projection, which
     // indexes every ground surface; it stays hidden.
@@ -216,7 +227,7 @@ fn project_decals(
                         base: StandardMaterial {
                             base_color_texture: Some(t.color.clone()),
                             alpha_mode: AlphaMode::Blend,
-                            depth_bias: 50.0,
+                            depth_bias: DECAL_DEPTH_BIAS,
                             perceptual_roughness: 0.8,
                             metallic: 0.0,
                             ..default()

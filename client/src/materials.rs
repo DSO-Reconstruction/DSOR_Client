@@ -128,6 +128,28 @@ impl VarTrack {
     }
 }
 
+/// A Nebula sprite node (n3 "RPSS"): turned to face the camera every frame, its
+/// children placed in that frame (tools/embed_animators.py).
+#[derive(Component, Reflect, Default, Clone)]
+#[reflect(Component, Default)]
+pub struct FacesViewer;
+
+/// After the animation pose: each sprite node's world rotation becomes the
+/// camera's (its translation and scale stay the animation's).
+fn face_viewer(
+    cameras: Query<&GlobalTransform, With<Camera3d>>,
+    mut sprites: Query<(&mut Transform, &ChildOf), With<FacesViewer>>,
+    parents: Query<&GlobalTransform>,
+) {
+    let Some(cam) = cameras.iter().next() else { return };
+    let cam_rot = cam.compute_transform().rotation;
+    for (mut tf, parent) in &mut sprites {
+        let Ok(p) = parents.get(parent.parent()) else { continue };
+        let parent_rot = p.compute_transform().rotation;
+        tf.rotation = parent_rot.inverse() * cam_rot;
+    }
+}
+
 /// A primitive whose material an animator drives: its own copy, and the values
 /// the animation scales.
 #[derive(Component)]
@@ -234,6 +256,9 @@ impl GltfExtensionHandler for NebulaStates {
     fn on_gltf_node(&mut self, _: &mut LoadContext<'_>, gltf_node: &::gltf::Node, entity: &mut EntityWorldMut) {
         let Some(extras) = gltf_node.extras() else { return };
         let raw = extras.get();
+        if raw.contains("\"dsor_sprite\":true") {
+            entity.insert(FacesViewer);
+        }
         if !raw.contains("dsor_anim") {
             return;
         }
@@ -284,7 +309,7 @@ impl GltfExtensionHandler for NebulaStates {
         match state {
             Some(State::Decal) => {
                 m.alpha_mode = AlphaMode::Blend;
-                m.depth_bias = 50.0;
+                m.depth_bias = crate::decals::DECAL_DEPTH_BIAS;
             }
             Some(State::Additive) => {
                 m.alpha_mode = AlphaMode::Add;
@@ -363,7 +388,11 @@ impl Plugin for MaterialsPlugin {
     fn build(&self, app: &mut App) {
         // Scene components must be reflected to be instanced.
         app.register_type::<DecalVolume>().register_type::<DecalTiling>();
-        app.register_type::<ShaderAnim>().register_type::<VarTrack>();
+        app.register_type::<ShaderAnim>().register_type::<VarTrack>().register_type::<FacesViewer>();
+        app.add_systems(
+            PostUpdate,
+            face_viewer.after(bevy::app::AnimationSystems).before(TransformSystems::Propagate),
+        );
         app.add_systems(Update, animate_shader_vars);
         // After bevy_pbr's own handler, so the material it set is replaced.
         let handlers = app.world().resource::<GltfExtensionHandlers>().0.clone();

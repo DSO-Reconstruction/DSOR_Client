@@ -200,6 +200,22 @@ struct Bullet {
 /// lifetime of the player skills' bullets is under a second).
 const TRAIL_FADE: f32 = 1.0;
 
+/// A caster carried by its skill (Jump, Charge): from `from` to `to` between the
+/// skill's LoopStartFrame and HitFrame, in an arc for a jump.
+/// UNVERIFIED: the arc's height; the frames bounding the flight.
+#[derive(Component)]
+struct SkillMove {
+    from: Vec3,
+    to: Vec3,
+    delay: f32,
+    t: f32,
+    duration: f32,
+    arc: f32,
+}
+
+/// A jump's peak height over the straight line, units.
+const JUMP_ARC: f32 = 1.8;
+
 /// Something to do a little later in a skill (a bullet leaving the hand, an impact).
 #[derive(Component)]
 struct Pending {
@@ -252,7 +268,7 @@ impl Plugin for SkillsPlugin {
             .add_systems(Startup, load)
             .add_systems(
                 Update,
-                (index_skills, cast_input, remote_skills, test_cast, run_pending, fly_bullets, play_sequences, start_fx_animations, retire_effects, shake_camera, test_shot, test_view)
+                (index_skills, cast_input, remote_skills, test_cast, run_pending, carry_casters, fly_bullets, play_sequences, start_fx_animations, retire_effects, shake_camera, test_shot, test_view, debug_fx_positions)
                     .chain()
                     .after(crate::net::NetSystems),
             );
@@ -342,6 +358,18 @@ fn perform(
             });
         }
         _ => {}
+    }
+    if matches!(skill.kind.as_str(), "Jump" | "Charge" | "ChargeThrough") {
+        let start = skill.loop_start as f32 / FPS;
+        let end = (skill.hit_frame.max(skill.loop_start + 1)) as f32 / FPS;
+        commands.entity(actor).insert(SkillMove {
+            from: at,
+            to: point,
+            delay: start,
+            t: 0.0,
+            duration: (end - start).max(0.05),
+            arc: if skill.kind == "Jump" { JUMP_ARC } else { 0.0 },
+        });
     }
     if skill.kind == "Teleport" {
         commands.spawn(Pending { after: skill.hit_frame as f32 / FPS, what: PendingKind::Teleport { who: actor, to: point } });
@@ -826,6 +854,8 @@ fn test_cast(
     mut next: Local<f32>,
     mut clock: ResMut<TestCastClock>,
     mut count: Local<u32>,
+    nav: Option<Res<CurrentNav>>,
+    navmeshes: Res<Assets<NavMesh>>,
 ) {
     // DSOR_TEST_RUN=<speed>: the demo character runs in a circle (reproducing a
     // body left behind while moving).
@@ -844,6 +874,10 @@ fn test_cast(
     let (Some(table), Some(sequences)) = (tables.get(&data.skills), seqs.get(&data.sequences)) else { return };
     let Some(skill) = data.by_id.get(name).and_then(|w| table.0.get(w)) else { return };
     let Some((e, mut tfm, character, anim)) = demo.iter_mut().next() else { return };
+    // Stand on the navigation mesh, as the online player does.
+    if let Some(p) = nav.as_ref().and_then(|n| navmeshes.get(&n.0)).and_then(|m| m.nearest(tfm.translation, 3.0)) {
+        tfm.translation = p;
+    }
     let tf = *tfm;
     if !anim.is_ready() {
         return;
@@ -921,9 +955,16 @@ fn test_view(
     manifests: Res<Assets<crate::map::MapManifest>>,
     mut clock: ResMut<TestCastClock>,
     time: Res<Time>,
+    assets: Res<AssetServer>,
 ) {
     let Ok(spec) = std::env::var("DSOR_SEQ_VIEW") else { return };
     if !playing.is_empty() {
+        return;
+    }
+    // Once the map is in, so the screenshot shows the effect on its ground.
+    let Some(map) = current.as_ref() else { return };
+    let (done, total) = map.progress(&assets);
+    if !map.spawned || done < total {
         return;
     }
     let mut parts = spec.split(',');
@@ -934,7 +975,7 @@ fn test_view(
     let at = if xyz.len() == 3 {
         Vec3::new(xyz[0], xyz[1], xyz[2])
     } else {
-        let Some(m) = current.and_then(|c| manifests.get(&c.manifest)) else { return };
+        let Some(m) = manifests.get(&map.manifest) else { return };
         Vec3::from(m.center) + Vec3::Y * 1.5
     };
     let anchor = commands.spawn((Transform::from_translation(at), Visibility::default())).id();
@@ -967,6 +1008,63 @@ fn retire_effects(
         r.left -= time.delta_secs();
         if r.left <= 0.0 {
             commands.entity(e).try_despawn();
+        }
+    }
+}
+
+/// DSOR_FX_DEBUG=1: where effects, their actors and the actors' hips really are.
+fn debug_fx_positions(
+    fx: Query<(Entity, &GlobalTransform, &FxModel, Option<&ChildOf>), Added<FxModel>>,
+    chars: Query<(Entity, &GlobalTransform, &Character)>,
+    all: Query<&GlobalTransform>,
+    mut ray: bevy::picking::mesh_picking::ray_cast::MeshRayCast,
+    kids: Query<&Children>,
+) {
+    if std::env::var("DSOR_FX_DEBUG").is_err() {
+        return;
+    }
+    for (e, at, m, parent) in &fx {
+        info!("fx {e:?} {:?} at {:?} parent {:?}", m.gltf.path(), at.translation(), parent.map(|p| p.parent()));
+    }
+    if !fx.is_empty() {
+        for (e, at, c) in &chars {
+            let hips = c.bone("Hips").and_then(|h| all.get(h).ok()).map(|g| g.translation());
+            info!("character {e:?} at {:?}, hips at {hips:?}", at.translation());
+            // The visible ground under the character, against the map's meshes.
+            let p = at.translation();
+            let r = Ray3d::new(p + Vec3::Y * 5.0, Dir3::NEG_Y);
+            let mine: std::collections::HashSet<Entity> = std::iter::once(e).chain(kids.iter_descendants(e)).collect();
+            let filter = |x: Entity| !mine.contains(&x);
+            let settings = bevy::picking::mesh_picking::ray_cast::MeshRayCastSettings::default()
+                .with_visibility(bevy::picking::mesh_picking::ray_cast::RayCastVisibility::VisibleInView)
+                .with_filter(&filter);
+            let hits: Vec<f32> = ray.cast_ray(r, &settings).iter().take(4).map(|(_, h)| h.point.y).collect();
+            info!("visible ground under it (first hits): {hits:?}; navmesh/feet y {}", p.y);
+        }
+    }
+}
+
+fn carry_casters(
+    mut commands: Commands,
+    time: Res<Time>,
+    mut movers: Query<(Entity, &mut Transform, &mut SkillMove, Option<&mut LocalPlayer>)>,
+) {
+    for (e, mut tf, mut m, local) in &mut movers {
+        if let Some(mut l) = local {
+            // Held until it lands.
+            l.target = None;
+            l.casting = l.casting.max(m.delay + m.duration - m.t + 0.05);
+        }
+        m.t += time.delta_secs();
+        let k = ((m.t - m.delay) / m.duration).clamp(0.0, 1.0);
+        if m.t < m.delay {
+            continue;
+        }
+        let mut p = m.from.lerp(m.to, k);
+        p.y += m.arc * 4.0 * k * (1.0 - k);
+        tf.translation = p;
+        if k >= 1.0 {
+            commands.entity(e).remove::<SkillMove>();
         }
     }
 }

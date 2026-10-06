@@ -39,6 +39,30 @@ def string(d, i):
     return d[i + 2:i + 2 + n].decode("latin1"), i + 2 + n
 
 
+def sprite_nodes(d):
+    """Names of transform nodes flagged as sprites (n3 tag "RPSS" = 1): Nebula turns
+    them to face the viewer. EVIDENCE: mage_frostnova auraSprite carries it, its
+    plane child sits 4.7 units down its -Z; drawn unturned, the nova's aura stood
+    beside the caster instead of over them."""
+    out = set()
+    at = 0
+    while True:
+        at = d.find(b"DNM>", at)
+        if at < 0:
+            return out
+        try:
+            name, i = string(d, at + 8)
+        except (struct.error, UnicodeDecodeError):
+            at += 4
+            continue
+        end = d.find(b"DNM", i)
+        end = len(d) if end < 0 else end
+        j = d.find(b"RPSS", i, end)
+        if j >= 0 and d[j + 4] == 1:
+            out.add(name)
+        at = i
+
+
 def shader_floats(d):
     """[(node name, {var: value})] in file order: each node's TLFS params."""
     out = []
@@ -121,7 +145,8 @@ for root, _dirs, files in os.walk(models):
         raw = open(n3, "rb").read()
         anims = animators(raw)
         floats = shader_floats(raw)
-        if not anims and not floats:
+        sprites = sprite_nodes(raw)
+        if not anims and not floats and not sprites:
             continue
         try:
             doc, rest = read_glb(glb)
@@ -135,6 +160,10 @@ for root, _dirs, files in os.walk(models):
         for nd in nodes:
             nd.get("extras", {}).pop("dsor_anim", None)
             nd.get("extras", {}).pop("dsor_shader", None)
+            nd.get("extras", {}).pop("dsor_sprite", None)
+            if nd.get("name") in sprites:
+                nd.setdefault("extras", {})["dsor_sprite"] = True
+                stats["sprite nodes"] = stats.get("sprite nodes", 0) + 1
         shaded = 0
         for name, params in floats:
             for nd in nodes:
@@ -158,7 +187,7 @@ for root, _dirs, files in os.walk(models):
         for i, lst in by_node.items():
             nodes[i].setdefault("extras", {})["dsor_anim"] = lst
             stats["animated nodes"] += 1
-        if by_node or shaded:
+        if by_node or shaded or sprites:
             write_glb(glb, doc, rest)
             stats["models"] += 1
 print(stats)
