@@ -40,7 +40,16 @@ fn update_hud(
     time: Res<Time>,
     meshes: Query<&ViewVisibility, With<Mesh3d>>,
     mut counted: Local<(f64, usize, usize)>,
+    net: Option<NonSend<crate::net::Net>>,
 ) {
+    // What the server last said about our health and skill resource (132).
+    let vitals = net
+        .as_ref()
+        .map(|n| match (n.health, n.resource) {
+            (Some(h), Some(r)) => format!("\nvie {h:.0}, ressource {r:.1}"),
+            _ => "\nvie/ressource: pas encore recues du serveur".to_owned(),
+        })
+        .unwrap_or_default();
     // Surfaces drawn: what the renderer prepares, one by one, on the CPU. Counted
     // once a second (a full pass over every mesh each frame is a cost of its own).
     if time.elapsed_secs_f64() - counted.0 > 1.0 {
@@ -67,7 +76,7 @@ fn update_hud(
         None => ("-", 0, 0, 0),
     };
     let line = format!(
-        "{fps:.0} FPS ({ms:.2} ms)\nentities {entities:.0}, surfaces drawn {drawn}/{total}\nmap {name}: {placed} placements, models {loaded}/{models}\nWASD/QE move, hold right mouse to look, shift run, wheel speed"
+        "{fps:.0} FPS ({ms:.2} ms)\nentities {entities:.0}, surfaces drawn {drawn}/{total}{vitals}\nmap {name}: {placed} placements, models {loaded}/{models}\nWASD/QE move, hold right mouse to look, shift run, wheel speed"
     );
     if let Ok(mut t) = text.single_mut() {
         t.0 = line;

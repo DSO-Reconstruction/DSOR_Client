@@ -219,6 +219,18 @@ enum PendingKind {
 struct FxModel {
     gltf: Handle<Gltf>,
     started: bool,
+    /// Its node animation repeats only in a looping sequence (a bullet in flight);
+    /// otherwise it plays once. Repeated, frost nova's ring burst twice within its
+    /// track and the teleport's arrival four or five times.
+    looping: bool,
+}
+
+/// An effect whose track ended: its surfaces and lights go, its emitters stop and
+/// its particles live out their lives, then it is despawned.
+#[derive(Component)]
+struct Retiring {
+    left: f32,
+    started: bool,
 }
 
 /// Camera shake left, applied on top of the follow camera.
@@ -240,7 +252,7 @@ impl Plugin for SkillsPlugin {
             .add_systems(Startup, load)
             .add_systems(
                 Update,
-                (index_skills, cast_input, remote_skills, test_cast, run_pending, fly_bullets, play_sequences, start_fx_animations, shake_camera, test_shot, test_view)
+                (index_skills, cast_input, remote_skills, test_cast, run_pending, fly_bullets, play_sequences, start_fx_animations, retire_effects, shake_camera, test_shot, test_view)
                     .chain()
                     .after(crate::net::NetSystems),
             );
@@ -659,7 +671,7 @@ fn play_sequences(
                         }
                         let mut fx = commands.spawn((
                             WorldAssetRoot(assets.load(GltfAssetLabel::Scene(0).from_asset(path.clone()))),
-                            FxModel { gltf: assets.load(path), started: false },
+                            FxModel { gltf: assets.load(path), started: false, looping: p.looping },
                             place,
                             Visibility::default(),
                         ));
@@ -709,7 +721,11 @@ fn play_sequences(
             }
             if p.started[i] && ending {
                 if let Some(s) = p.spawned[i].take() {
-                    commands.entity(s).try_despawn();
+                    if matches!(track, Track::Fx { .. }) {
+                        commands.entity(s).try_insert(Retiring { left: TRAIL_FADE, started: false });
+                    } else {
+                        commands.entity(s).try_despawn();
+                    }
                 }
                 match &track {
                     Track::Anim { name, .. } => {
@@ -733,7 +749,7 @@ fn play_sequences(
         }
         if done {
             for s in p.spawned.iter_mut().filter_map(|s| s.take()) {
-                commands.entity(s).try_despawn();
+                commands.entity(s).try_insert(Retiring { left: TRAIL_FADE, started: false });
             }
             // A standalone anchor (a point on the ground) goes with its sequence.
             if p.actor.is_none() && anchor_alive && !p.looping {
@@ -773,7 +789,11 @@ fn start_fx_animations(
         debug!("fx {:?}: playing {} clip(s)", m.gltf.path(), gltf.animations.len());
         let (graph, node) = AnimationGraph::from_clip(gltf.animations[0].clone());
         let mut anim = AnimationPlayer::default();
-        anim.play(node).repeat();
+        if m.looping {
+            anim.play(node).repeat();
+        } else {
+            anim.play(node);
+        }
         commands.entity(player).insert((AnimationGraphHandle(graphs.add(graph)), anim));
         m.started = true;
     }
@@ -921,5 +941,32 @@ fn test_view(
     play(&mut commands, seq.clone(), None, anchor, true);
     if clock.0.is_none() {
             clock.0 = Some(time.elapsed_secs());
+    }
+}
+
+fn retire_effects(
+    mut commands: Commands,
+    time: Res<Time>,
+    mut retiring: Query<(Entity, &mut Retiring)>,
+    children: Query<&Children>,
+    shown_parts: Query<(), Or<(With<Mesh3d>, With<PointLight>)>>,
+    emitters: Query<(), With<crate::particles::Emitter>>,
+) {
+    for (e, mut r) in &mut retiring {
+        if !r.started {
+            r.started = true;
+            for c in children.iter_descendants(e) {
+                if shown_parts.contains(c) {
+                    commands.entity(c).insert(Visibility::Hidden);
+                }
+                if emitters.contains(c) {
+                    commands.entity(c).insert(crate::particles::StopEmitting);
+                }
+            }
+        }
+        r.left -= time.delta_secs();
+        if r.left <= 0.0 {
+            commands.entity(e).try_despawn();
+        }
     }
 }

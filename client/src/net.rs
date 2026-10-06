@@ -99,6 +99,8 @@ pub struct Net {
     pub local_name: Option<String>,
     /// Our current skill resource (rage, mana...), from ActorStatsUpdate (132).
     pub resource: Option<f32>,
+    /// Our current health, from the same command.
+    pub health: Option<f32>,
     /// The first quick slot bar (QuickSlotsInfo 83): skill ids by wire slot.
     pub bar: Vec<Option<String>>,
     /// Skills other actors used, relayed by the server (73-77), for crate::skills.
@@ -227,6 +229,7 @@ fn connect(world: &mut World) {
         skill_events: Vec::new(),
         local_name: None,
         resource: None,
+        health: None,
     });
 }
 
@@ -429,6 +432,7 @@ fn on_command(net: &mut Net, command: ServerCommand, actor: Option<u32>) {
         ServerCommand::ActorStatsUpdate(v) => {
             if actor.is_some() && actor == net.local_actor {
                 net.resource = Some(v.resource);
+                net.health = Some(v.health);
             }
         }
         ServerCommand::QuickSlotsInfo(q) => {
