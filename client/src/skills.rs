@@ -76,6 +76,10 @@ pub struct SkillDef {
     pub motion_unblock: u32,
     pub range: f32,
     pub cooldown: f32,
+    #[serde(default)]
+    pub cooldown_category: String,
+    #[serde(default)]
+    pub resource_cost: f32,
     pub pre: HashMap<String, String>,
     pub execute: HashMap<String, String>,
     pub post: HashMap<String, String>,
@@ -199,6 +203,8 @@ struct Pending {
 
 enum PendingKind {
     Bullet { from: Vec3, dir: Vec3, def: BulletDef },
+    /// The caster lands on the aimed point (Teleport skills).
+    Teleport { who: Entity, to: Vec3 },
     Sequence { name: String, at: Transform },
 }
 
@@ -312,6 +318,9 @@ fn perform(
         }
         _ => {}
     }
+    if skill.kind == "Teleport" {
+        commands.spawn(Pending { after: skill.hit_frame as f32 / FPS, what: PendingKind::Teleport { who: actor, to: point } });
+    }
     if !skill.impact.is_empty() && skill.impact != "empty_sequence" {
         let impact_at = match skill.kind.as_str() {
             "Shifted" | "Teleport" | "Jump" | "RangedTargetPoint" => point,
@@ -357,6 +366,7 @@ fn cast_input(
     navmeshes: Res<Assets<NavMesh>>,
     time: Res<Time<Real>>,
     mut players: Query<(Entity, &Transform, &mut LocalPlayer, &Character)>,
+    mut cooldowns: Local<HashMap<String, f64>>,
 ) {
     let Some(mut net) = net else { return };
     let shift = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
@@ -379,6 +389,18 @@ fn cast_input(
     let (Some(table), Some(sequences)) = (tables.get(&data.skills), seqs.get(&data.sequences)) else { return };
     let Some(&wire) = data.by_id.get(&name) else { return };
     let Some(skill) = table.0.get(&wire) else { return };
+    // As the real client: no cast while the skill (or its category) cools down, nor
+    // without the resource it costs. The server refuses those anyway, and drawing
+    // them anyway made skills seem to fire twice or into nothing (server.log:
+    // "refused: mage_fireball_default costs 40.0 and only 28.0 is left").
+    let now = time.elapsed_secs_f64();
+    let key = if skill.cooldown_category.is_empty() { skill.id.clone() } else { skill.cooldown_category.clone() };
+    if cooldowns.get(&key).is_some_and(|ready| now < *ready) {
+        return;
+    }
+    if net.resource.is_some_and(|r| r + 1e-3 < skill.resource_cost) {
+        return;
+    }
     let (Ok(window), Ok((camera, cam_tf))) = (windows.single(), cameras.single()) else { return };
     let mesh = nav.as_ref().and_then(|n| navmeshes.get(&n.0));
     let Some(mut point) = cursor_ground(window, camera, cam_tf, mesh, tf.translation) else { return };
@@ -411,6 +433,10 @@ fn cast_input(
         _ => ClientCommand::Skill(combat::Skill { base, server: None }),
     };
     net.send(&command);
+    cooldowns.insert(key, now + skill.cooldown as f64);
+    if let Some(r) = net.resource.as_mut() {
+        *r -= skill.resource_cost;
+    }
     info!("cast {} (wire {wire}, {}) at {point:?}", skill.id, skill.kind);
     perform(&mut commands, skill, sequences, entity, Some(character), tf.translation, facing, point);
 }
@@ -451,6 +477,7 @@ fn run_pending(
     data: Res<SkillData>,
     seqs: Res<Assets<SequenceTable>>,
     mut pending: Query<(Entity, &mut Pending)>,
+    mut movers: Query<&mut Transform, With<Character>>,
 ) {
     let Some(sequences) = seqs.get(&data.sequences) else { return };
     for (e, mut p) in &mut pending {
@@ -470,6 +497,11 @@ fn run_pending(
                     .id();
                 if let Some(seq) = sequences.0.get(&def.loop_seq) {
                     play(&mut commands, seq.clone(), None, bullet, true);
+                }
+            }
+            PendingKind::Teleport { who, to } => {
+                if let Ok(mut tf) = movers.get_mut(*who) {
+                    tf.translation = *to;
                 }
             }
             PendingKind::Sequence { name, at } => {
@@ -522,10 +554,18 @@ fn play_sequences(
     transforms: Query<&GlobalTransform>,
     cameras: Query<&GlobalTransform, With<Camera3d>>,
     mut shake: ResMut<CameraShake>,
+    locals: Query<&LocalPlayer>,
+    remotes: Query<&RemotePlayer>,
 ) {
     let eye = cameras.iter().next().map(|c| c.translation());
     for (e, mut p) in &mut players {
-        let anchor_alive = exists.contains(p.anchor);
+        // Walking away interrupts the skill, as in the game: its effects go with it
+        // (they stayed on the running player for seconds otherwise).
+        let interrupted = p.actor.is_some_and(|a| {
+            locals.get(a).is_ok_and(|l| l.target.is_some() && l.casting <= 0.0)
+                || remotes.get(a).is_ok_and(|r| r.still_for <= 0.0)
+        }) && p.t > 0.1;
+        let anchor_alive = exists.contains(p.anchor) && !interrupted;
         p.t += time.delta_secs();
         let mut frame = p.t * FPS;
         let length = p.seq.length.max(1) as f32;
@@ -704,9 +744,19 @@ fn test_cast(
     tables: Res<Assets<SkillTable>>,
     seqs: Res<Assets<SequenceTable>>,
     time: Res<Time>,
-    demo: Query<(Entity, &Transform, &Character, &CharacterAnim), Without<LocalPlayer>>,
+    mut demo: Query<(Entity, &mut Transform, &Character, &CharacterAnim), Without<LocalPlayer>>,
     mut next: Local<f32>,
 ) {
+    // DSOR_TEST_RUN=<speed>: the demo character runs in a circle (reproducing a
+    // body left behind while moving).
+    if let Some(speed) = std::env::var("DSOR_TEST_RUN").ok().and_then(|v| v.parse::<f32>().ok()) {
+        if let Some((_, mut tf, _, _)) = demo.iter_mut().next() {
+            let a = time.elapsed_secs() * speed / 6.0;
+            let centre = Vec3::new(121.5, tf.translation.y, 75.4);
+            tf.translation = centre + Vec3::new(a.cos() * 6.0, 0.0, a.sin() * 6.0);
+            tf.rotation = Quat::from_rotation_y((-a.sin()).atan2(a.cos()) + std::f32::consts::FRAC_PI_2 * 0.0);
+        }
+    }
     let Ok(spec) = std::env::var("DSOR_CAST") else { return };
     let mut parts = spec.split(',');
     let name = parts.next().unwrap_or_default();
@@ -714,6 +764,7 @@ fn test_cast(
     let (Some(table), Some(sequences)) = (tables.get(&data.skills), seqs.get(&data.sequences)) else { return };
     let Some(skill) = data.by_id.get(name).and_then(|w| table.0.get(w)) else { return };
     let Some((e, tf, character, anim)) = demo.iter().next() else { return };
+    let tf = *tf;
     if !anim.is_ready() {
         return;
     }

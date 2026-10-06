@@ -184,7 +184,8 @@ header = cells(rows[0])
 for r in rows[1:]:
     c = cells(r)
     if c and c[0]:
-        mapping[c[0]] = {header[i]: c[i] for i in range(1, min(len(header), len(c))) if c[i]}
+        # A cell can end with ";" or list several sequences ("a;b"): the first.
+        mapping[c[0]] = {header[i]: c[i].split(";")[0].strip() for i in range(1, min(len(header), len(c))) if c[i].split(";")[0].strip()}
 
 
 def mapped(name):
@@ -194,7 +195,7 @@ def mapped(name):
         return {}
     if name in mapping:
         return mapping[name]
-    return {"*": name}
+    return {"*": name.split(";")[0].strip()}
 
 
 # -- skills ------------------------------------------------------------------------
@@ -214,6 +215,8 @@ for r in db.execute("select rowid, * from _Template_Skill order by rowid"):
         "motion_unblock": r["MotionUnblockFrame"] or 0,
         "range": r["AttackRange"] or 0.0,
         "cooldown": r["CoolDown"] or 0.0,
+        "cooldown_category": r["CoolDownCategory"] or "",
+        "resource_cost": r["ResourceCost"] or 0.0,
         "pre": mapped(r["PreExecuteSequenceMapping"]),
         "execute": mapped(r["ExecuteSequenceMapping"]),
         "post": mapped(r["PostExecuteSequenceMapping"]),

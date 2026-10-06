@@ -179,10 +179,11 @@ impl GltfExtensionHandler for NebulaStates {
 /// UNVERIFIED: Nebula's emissive intensity is 1.0 for these materials.
 const EMISSIVE_NITS: f32 = 400.0;
 
-/// Every material with an emissive map, once, as it is added.
+/// Every effect material with an emissive map, once, as it is added.
 fn scale_emissive(
     mut events: MessageReader<AssetEvent<StandardMaterial>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    assets: Res<AssetServer>,
     mut done: Local<std::collections::HashSet<AssetId<StandardMaterial>>>,
 ) {
     let added: Vec<AssetId<StandardMaterial>> = events
@@ -194,6 +195,13 @@ fn scale_emissive(
         .collect();
     for id in added {
         if !done.insert(id) {
+            continue;
+        }
+        // Effects only: a character's or the map's emissive maps keep their look
+        // (scaled, a mage's purple orb came out white -- "t'as change la couleur de
+        // ma baguette").
+        let effect = assets.get_path(id).is_some_and(|p| p.path().to_string_lossy().starts_with("effects"));
+        if !effect {
             continue;
         }
         let Some(mut m) = materials.get_mut(id) else { continue };

@@ -322,7 +322,7 @@ impl Plugin for CharacterPlugin {
             .register_asset_loader(AnimTableLoader)
             .register_asset_loader(PartListLoader)
             .add_systems(Startup, load_library)
-            .add_systems(Update, (build_characters, keep_parts_bound, drive_animations))
+            .add_systems(Update, (build_characters, keep_parts_bound, drive_animations, check_skins))
             .add_systems(
                 PostUpdate,
                 apply_variations.after(bevy::app::AnimationSystems).before(TransformSystems::Propagate),
@@ -695,7 +695,15 @@ fn drive_animations(
         let Some(&(node, looping)) = anim.nodes.get(&key).or_else(|| anim.nodes.get("Idle")) else {
             continue;
         };
-        let active = transitions.play(&mut p, node, BLEND);
+        // The same animation again: restart it in place. Through the transitions it
+        // was both fading out and the new main animation, and when the fade ended it
+        // stopped -- the body froze on its last frame ("reste bloque sur la derniere
+        // frame").
+        let active = if transitions.get_main_animation() == Some(node) && p.animation(node).is_some() {
+            p.animation_mut(node).unwrap()
+        } else {
+            transitions.play(&mut p, node, BLEND)
+        };
         active.set_speed(anim.speed);
         if looping {
             active.repeat();
@@ -731,4 +739,43 @@ pub fn redress(
     anim.player = None;
     anim.nodes.clear();
     anim.applied = None;
+}
+
+/// DSOR_CHECK_SKIN=1: every frame, every skinned mesh under a character must point
+/// at living joints of that same character; anything else is logged (a body left
+/// behind is a mesh skinned to joints that no longer move with it).
+fn check_skins(
+    characters: Query<Entity, With<Character>>,
+    children: Query<&Children>,
+    skins: Query<&SkinnedMesh>,
+    names: Query<&Name>,
+    exists: Query<()>,
+    mut reported: Local<std::collections::HashSet<(Entity, Entity)>>,
+) {
+    if std::env::var("DSOR_CHECK_SKIN").is_err() {
+        return;
+    }
+    for root in &characters {
+        let mine: std::collections::HashSet<Entity> = children.iter_descendants(root).collect();
+        for e in children.iter_descendants(root) {
+            let Ok(skin) = skins.get(e) else { continue };
+            for &j in &skin.joints {
+                let problem = if !exists.contains(j) {
+                    "dead"
+                } else if !mine.contains(&j) {
+                    "foreign"
+                } else {
+                    continue;
+                };
+                if reported.insert((e, j)) {
+                    warn!(
+                        "skin {:?} ({}) of character {root:?}: {problem} joint {j:?} ({})",
+                        e,
+                        names.get(e).map(|n| n.as_str()).unwrap_or("?"),
+                        names.get(j).map(|n| n.as_str()).unwrap_or("?")
+                    );
+                }
+            }
+        }
+    }
 }

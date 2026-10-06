@@ -95,6 +95,10 @@ pub struct Net {
     /// NPCs to place (NewNPCCommand) and actors gone, applied by crate::npc.
     pub npc_spawns: Vec<NpcSpawn>,
     pub npc_gone: Vec<u32>,
+    /// Our character's name, to recognise our own stale session (below).
+    pub local_name: Option<String>,
+    /// Our current skill resource (rage, mana...), from ActorStatsUpdate (132).
+    pub resource: Option<f32>,
     /// The first quick slot bar (QuickSlotsInfo 83): skill ids by wire slot.
     pub bar: Vec<Option<String>>,
     /// Skills other actors used, relayed by the server (73-77), for crate::skills.
@@ -221,6 +225,8 @@ fn connect(world: &mut World) {
         npc_gone: Vec::new(),
         bar: Vec::new(),
         skill_events: Vec::new(),
+        local_name: None,
+        resource: None,
     });
 }
 
@@ -375,6 +381,7 @@ fn on_command(net: &mut Net, command: ServerCommand, actor: Option<u32>) {
             };
             info!("I am {} ({}), actor {:?}, at {:?}", p.name, desc.animation_set(), actor, p.position);
             net.local_actor = actor;
+            net.local_name = Some(p.name.clone());
             // The third leading bool is the admin byte (OverheadAdminColor name).
             let admin = p.leading_flags[2];
             net.pending_local = Some((desc, Vec3::from(p.position), p.heading, p.name.clone(), admin));
@@ -398,6 +405,13 @@ fn on_command(net: &mut Net, command: ServerCommand, actor: Option<u32>) {
         }
         ServerCommand::NewRemotePlayer(p) => {
             let Some(actor) = actor else { return };
+            // Our own character from a previous session the server has not timed
+            // out yet (a page reload): it stood frozen where we had been.
+            // FAILURE (2026-10-06): "l'ancien corps reste stuck avec l'animation".
+            if net.local_name.as_deref() == Some(p.name.as_str()) {
+                info!("{} (actor {actor:#x}) is our own previous session; not drawn", p.name);
+                return;
+            }
             let desc = CharacterDesc {
                 class: p.parts[0],
                 gender: p.parts[1],
@@ -411,6 +425,11 @@ fn on_command(net: &mut Net, command: ServerCommand, actor: Option<u32>) {
             };
             info!("{} ({}) is here, actor {actor:#x}, {} worn slot(s)", p.name, desc.animation_set(), desc.equipment.len());
             net.remote_spawns.push((actor, desc, Vec3::from(p.position), p.heading, p.name, p.flags[2]));
+        }
+        ServerCommand::ActorStatsUpdate(v) => {
+            if actor.is_some() && actor == net.local_actor {
+                net.resource = Some(v.resource);
+            }
         }
         ServerCommand::QuickSlotsInfo(q) => {
             if let Some(first) = q.bars.first() {
