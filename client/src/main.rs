@@ -17,6 +17,7 @@ mod nameplate;
 mod net;
 mod npc;
 mod particles;
+mod skills;
 
 use bevy::camera_controller::free_camera::{FreeCamera, FreeCameraPlugin};
 use bevy::diagnostic::{EntityCountDiagnosticsPlugin, FrameTimeDiagnosticsPlugin};
@@ -207,6 +208,7 @@ fn main() {
             decals::DecalPlugin,
             particles::ParticlePlugin,
             npc::NpcPlugin,
+            skills::SkillsPlugin,
             nameplate::NameplatePlugin,
             MapPlugin,
             character::CharacterPlugin,

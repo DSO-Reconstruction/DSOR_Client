@@ -95,12 +95,25 @@ pub struct Net {
     /// NPCs to place (NewNPCCommand) and actors gone, applied by crate::npc.
     pub npc_spawns: Vec<NpcSpawn>,
     pub npc_gone: Vec<u32>,
+    /// The first quick slot bar (QuickSlotsInfo 83): skill ids by wire slot.
+    pub bar: Vec<Option<String>>,
+    /// Skills other actors used, relayed by the server (73-77), for crate::skills.
+    pub skill_events: Vec<SkillEvent>,
     remote_gone: Vec<u32>,
     remote_moves: Vec<(u32, Vec3, f32, bool)>,
     /// What this player wears, as the inventory names it: (slots, item template).
     local_worn: Option<Vec<(Vec<i8>, String)>>,
     /// Another player re-dressed (RemotePlayerInfo): actor, skins, armament.
     remote_redress: Vec<(u32, Vec<(u8, Vec<String>)>, i8)>,
+}
+
+/// A skill another actor used: its wire index, its aim (the command's radians) and,
+/// for 76/77, the points it aimed at (game frame).
+pub struct SkillEvent {
+    pub actor: u32,
+    pub wire: u16,
+    pub heading: f32,
+    pub points: Vec<[f32; 3]>,
 }
 
 /// One NewNPCCommand: the template, the level Guid (hex) and where.
@@ -134,7 +147,15 @@ pub struct LocalPlayer {
     /// Body facing, radians around +Y.
     pub facing: f32,
     last_sent_tick: u32,
+    /// Seconds the current skill still holds the player in place (its
+    /// MotionUnblockFrame); walking and the run/idle animation wait for it.
+    pub casting: f32,
 }
+
+/// The networking and local-player systems; crate::skills runs after them (its
+/// camera shake on top of the follow camera).
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct NetSystems;
 
 pub struct NetPlugin;
 
@@ -152,12 +173,13 @@ impl Plugin for NetPlugin {
                 Update,
                 (debug_hierarchy, spawn_local, dress, apply_remotes, move_remotes, click_to_move, walk_local, zoom_camera, follow_camera, send_moves)
                     .chain()
+                    .in_set(NetSystems)
                     .run_if(net_exists),
             );
     }
 }
 
-fn now_ms(time: &Time<Real>) -> u64 {
+pub fn now_ms(time: &Time<Real>) -> u64 {
     (time.elapsed_secs_f64() * 1000.0) as u64
 }
 
@@ -197,6 +219,8 @@ fn connect(world: &mut World) {
         remote_redress: Vec::new(),
         npc_spawns: Vec::new(),
         npc_gone: Vec::new(),
+        bar: Vec::new(),
+        skill_events: Vec::new(),
     });
 }
 
@@ -237,6 +261,14 @@ impl Net {
     }
 
     /// A game command to the map server, reliable ordered.
+    fn skill_event(&mut self, actor: Option<u32>, base: &dsor_proto::commands::combat::SkillBase, points: Vec<[f32; 3]>) {
+        let Some(actor) = actor else { return };
+        if Some(actor) == self.local_actor {
+            return;
+        }
+        self.skill_events.push(SkillEvent { actor, wire: base.skill_id, heading: base.heading, points });
+    }
+
     pub fn send(&mut self, command: &ClientCommand) {
         let (bytes, bits) = command.encode();
         self.session.send_command(&bytes, bits);
@@ -380,6 +412,18 @@ fn on_command(net: &mut Net, command: ServerCommand, actor: Option<u32>) {
             info!("{} ({}) is here, actor {actor:#x}, {} worn slot(s)", p.name, desc.animation_set(), desc.equipment.len());
             net.remote_spawns.push((actor, desc, Vec3::from(p.position), p.heading, p.name, p.flags[2]));
         }
+        ServerCommand::QuickSlotsInfo(q) => {
+            if let Some(first) = q.bars.first() {
+                net.bar = first.iter().map(|s| if s.kind == -1 { None } else { s.id.clone() }).collect();
+                info!("quick slots: {:?}", net.bar.iter().flatten().collect::<Vec<_>>());
+            }
+        }
+        // Skills the server relays from other actors (our own are played as cast).
+        ServerCommand::Skill(c) => net.skill_event(actor, &c.base, Vec::new()),
+        ServerCommand::TargetSkill(c) => net.skill_event(actor, &c.base, Vec::new()),
+        ServerCommand::BulletSkill(c) => net.skill_event(actor, &c.base, Vec::new()),
+        ServerCommand::TargetPointBulletSkill(c) => net.skill_event(actor, &c.base, c.points.clone()),
+        ServerCommand::ShiftedSkill(c) => net.skill_event(actor, &c.base, c.points.clone()),
         ServerCommand::NewNpc(n) => {
             let Some(actor) = actor else { return };
             let guid: String = n.guid.iter().map(|b| format!("{b:02X}")).collect();
@@ -523,7 +567,23 @@ fn spawn_local(
         target: None,
         facing: heading,
         last_sent_tick: 0,
+        casting: 0.0,
     });
+}
+
+/// Where the cursor points on the ground: the navigation mesh, or the plane at
+/// `fallback_height`.
+pub fn cursor_ground(
+    window: &Window,
+    camera: &Camera,
+    cam_tf: &GlobalTransform,
+    nav: Option<&NavMesh>,
+    fallback: Vec3,
+) -> Option<Vec3> {
+    let cursor = window.cursor_position()?;
+    let ray = camera.viewport_to_world(cam_tf, cursor).ok()?;
+    nav.and_then(|m| m.raycast(ray))
+        .or_else(|| ray.intersect_plane(fallback, InfinitePlane3d::new(Vec3::Y)).map(|d| ray.get_point(d)))
 }
 
 /// Left click on the ground: walk there. The ground is the navigation mesh -- stairs
@@ -531,13 +591,14 @@ fn spawn_local(
 #[allow(clippy::too_many_arguments)]
 fn click_to_move(
     buttons: Res<ButtonInput<MouseButton>>,
+    keys: Res<ButtonInput<KeyCode>>,
     windows: Query<&Window, With<PrimaryWindow>>,
     cameras: Query<(&Camera, &GlobalTransform)>,
     nav: Option<Res<CurrentNav>>,
     meshes: Res<Assets<NavMesh>>,
     mut players: Query<(&Transform, &mut LocalPlayer)>,
 ) {
-    if !buttons.pressed(MouseButton::Left) {
+    if !buttons.pressed(MouseButton::Left) || keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight) {
         return;
     }
     let Ok(window) = windows.single() else { return };
@@ -588,6 +649,11 @@ fn walk_local(
                     player.target = Some(tf.translation + Vec3::new(dx, 0.0, dz));
                 }
             }
+        }
+        if player.casting > 0.0 {
+            player.casting -= time.delta_secs();
+            tf.rotation = Quat::from_rotation_y(player.facing);
+            continue;
         }
         let mut moving = false;
         if let Some(target) = player.target {

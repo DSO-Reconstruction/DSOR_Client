@@ -285,6 +285,13 @@ pub struct Character {
     generation: u32,
 }
 
+impl Character {
+    /// A joint of this character's shared skeleton, by name (once it is in).
+    pub fn bone(&self, name: &str) -> Option<Entity> {
+        self.bones.as_ref()?.get(name).copied()
+    }
+}
+
 #[derive(Component)]
 struct SkeletonOf(Entity, u32);
 #[derive(Component)]

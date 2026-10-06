@@ -146,8 +146,22 @@ fn project_decals(
         (Without<DecalVolume>, Without<NotShadowCaster>, Without<SkinnedMesh>),
     >,
     mut settled: Local<u32>,
+    parents: Query<&ChildOf>,
+    map_roots: Query<(), With<crate::map::MapRoot>>,
 ) {
-    if pending.is_empty() {
+    // Only the map's own decals are projected here, once. A skill effect's decal box
+    // (a scorch under a fireball impact) must not rerun the whole projection, which
+    // indexes every ground surface; it stays hidden.
+    // UNVERIFIED: effect decals are not drawn yet.
+    let mut map_pending = 0;
+    for (e, ..) in &pending {
+        if parents.iter_ancestors(e).any(|a| map_roots.contains(a)) {
+            map_pending += 1;
+        } else {
+            commands.entity(e).insert(Projected);
+        }
+    }
+    if map_pending == 0 {
         *settled = 0;
         return;
     }
@@ -178,6 +192,9 @@ fn project_decals(
     let mut batches: HashMap<Look, (Option<Handle<DecalMaterial>>, Option<Handle<StandardMaterial>>, Batch)> =
         HashMap::new();
     for (entity, gt, volume, material) in &pending {
+        if !parents.iter_ancestors(entity).any(|a| map_roots.contains(a)) {
+            continue;
+        }
         commands.entity(entity).insert(Projected);
         let to_world = gt.affine();
         let to_box = to_world.inverse();
