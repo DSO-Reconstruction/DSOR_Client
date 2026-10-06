@@ -150,6 +150,108 @@ fn face_viewer(
     }
 }
 
+/// A node's texture animation: n3 UV animator keys (offset, scale, rotation of the
+/// texture layer) and/or the uvanimated shader's Velocity scroll. Applied as the
+/// material's uv_transform, per instance.
+/// EVIDENCE: uvanimated vs (shaders_sm30): uv = uv + c6 (an offset the engine
+///   advances); uvanimated2 vs: uv = (u, v, 1) . uvTransform rows.
+/// UNVERIFIED: the rotation's pivot (taken at 0.5, 0.5) and units (degrees).
+#[derive(Component, Reflect, Default, Clone)]
+#[reflect(Component, Default)]
+pub struct UvAnim {
+    looping: bool,
+    pos: Vec<[f32; 4]>,
+    scale: Vec<[f32; 4]>,
+    rot: Vec<[f32; 4]>,
+    velocity: Vec2,
+    t: f32,
+}
+
+fn keys_at(keys: &[[f32; 4]], t: f32, looping: bool, default: Vec3) -> Vec3 {
+    let (Some(first), Some(last)) = (keys.first(), keys.last()) else { return default };
+    let t = if looping && last[0] > 0.0 { t % last[0] } else { t.clamp(first[0], last[0]) };
+    for w in keys.windows(2) {
+        if t <= w[1][0] {
+            let k = ((t - w[0][0]) / (w[1][0] - w[0][0]).max(1e-6)).clamp(0.0, 1.0);
+            return Vec3::new(w[0][1], w[0][2], w[0][3]).lerp(Vec3::new(w[1][1], w[1][2], w[1][3]), k);
+        }
+    }
+    Vec3::new(last[1], last[2], last[3])
+}
+
+impl UvAnim {
+    fn from_extras(v: &serde_json::Value) -> Option<Self> {
+        let keys = |k: &str| -> Vec<[f32; 4]> {
+            v.get("dsor_uvanim")
+                .and_then(|u| u.get(k))
+                .and_then(|a| a.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|k| {
+                            let k = k.as_array()?;
+                            Some([0, 1, 2, 3].map(|i| k.get(i).and_then(|x| x.as_f64()).unwrap_or(0.0) as f32))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        let velocity = v
+            .get("dsor_vector")
+            .and_then(|d| d.get("Velocity"))
+            .and_then(|a| a.as_array())
+            .map(|a| Vec2::new(a.first().and_then(|x| x.as_f64()).unwrap_or(0.0) as f32, a.get(1).and_then(|x| x.as_f64()).unwrap_or(0.0) as f32))
+            .unwrap_or(Vec2::ZERO);
+        let uv = Self {
+            looping: v.get("dsor_uvanim").and_then(|u| u.get("loop")).and_then(|l| l.as_str()) != Some("clamp"),
+            pos: keys("pos"),
+            scale: keys("scale"),
+            rot: keys("rot"),
+            velocity,
+            t: 0.0,
+        };
+        (!uv.pos.is_empty() || !uv.scale.is_empty() || !uv.rot.is_empty() || uv.velocity != Vec2::ZERO).then_some(uv)
+    }
+
+    fn transform(&self) -> bevy::math::Affine2 {
+        let pos = keys_at(&self.pos, self.t, self.looping, Vec3::ZERO);
+        let scale = keys_at(&self.scale, self.t, self.looping, Vec3::ONE);
+        let rot = keys_at(&self.rot, self.t, self.looping, Vec3::ZERO);
+        let offset = Vec2::new(pos.x, pos.y) + self.velocity * self.t;
+        let offset = offset - offset.floor();
+        let pivot = Vec2::splat(0.5);
+        bevy::math::Affine2::from_translation(offset + pivot)
+            * bevy::math::Affine2::from_angle(rot.z.to_radians())
+            * bevy::math::Affine2::from_scale(Vec2::new(scale.x, scale.y).max(Vec2::splat(1e-4)))
+            * bevy::math::Affine2::from_translation(-pivot)
+    }
+}
+
+fn animate_uvs(
+    mut commands: Commands,
+    time: Res<Time>,
+    mut nodes: Query<(&mut UvAnim, &Children)>,
+    mut prims: Query<(Entity, &mut MeshMaterial3d<StandardMaterial>, Option<&AnimatedMaterial>)>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
+    for (mut uv, children) in &mut nodes {
+        uv.t += time.delta_secs();
+        let tf = uv.transform();
+        for c in children.iter() {
+            let Ok((e, mut handle, own)) = prims.get_mut(c) else { continue };
+            if own.is_none() {
+                let Some(m) = materials.get(&handle.0) else { continue };
+                let (base, emissive) = (m.base_color.to_linear(), m.emissive);
+                let copy = m.clone();
+                handle.0 = materials.add(copy);
+                commands.entity(e).insert(AnimatedMaterial { base, emissive });
+            }
+            if let Some(mut m) = materials.get_mut(&handle.0) {
+                m.uv_transform = tf;
+            }
+        }
+    }
+}
+
 /// A primitive whose material an animator drives: its own copy, and the values
 /// the animation scales.
 #[derive(Component)]
@@ -259,6 +361,11 @@ impl GltfExtensionHandler for NebulaStates {
         if raw.contains("\"dsor_sprite\":true") {
             entity.insert(FacesViewer);
         }
+        if raw.contains("dsor_uvanim") || raw.contains("dsor_vector") {
+            if let Some(uv) = serde_json::from_str::<serde_json::Value>(raw).ok().and_then(|v| UvAnim::from_extras(&v)) {
+                entity.insert(uv);
+            }
+        }
         if !raw.contains("dsor_anim") {
             return;
         }
@@ -324,12 +431,22 @@ impl GltfExtensionHandler for NebulaStates {
             }
             Some(State::Hidden) => return,
             None => {
-                // A lit surface with an emissive map, outside the characters: its
-                // emission at the node's intensity, in Bevy's luminance units.
-                if !(self.scale_lit && material_asset.emissive_texture.is_some()) {
+                let unlit = gltf_material.extras().as_ref().is_some_and(|e| e.get().contains("\"dsor_unlit\":true"));
+                let emissive = self.scale_lit && material_asset.emissive_texture.is_some();
+                if !unlit && !emissive {
                     return;
                 }
-                m.emissive = m.emissive * (intensity.unwrap_or(1.0) * EMISSIVE_NITS);
+                // Drawn without lighting, as its Nebula state or shader says
+                // (AlphaUnlit, PostAlphaUnlit, shd:unlit...): the sun no longer
+                // tints it.
+                if unlit {
+                    m.unlit = true;
+                }
+                // A lit surface with an emissive map, outside the characters: its
+                // emission at the node's intensity, in Bevy's luminance units.
+                if emissive {
+                    m.emissive = m.emissive * (intensity.unwrap_or(1.0) * EMISSIVE_NITS);
+                }
             }
         }
         load_context.add_labeled_asset(dsor_label(material_label), m);
@@ -393,7 +510,9 @@ impl Plugin for MaterialsPlugin {
             PostUpdate,
             face_viewer.after(bevy::app::AnimationSystems).before(TransformSystems::Propagate),
         );
-        app.add_systems(Update, animate_shader_vars);
+        app.register_type::<UvAnim>();
+        // Chained: the first to copy a material marks it, the second reuses the copy.
+        app.add_systems(Update, (animate_shader_vars, animate_uvs).chain());
         // After bevy_pbr's own handler, so the material it set is replaced.
         let handlers = app.world().resource::<GltfExtensionHandlers>().0.clone();
         #[cfg(target_family = "wasm")]

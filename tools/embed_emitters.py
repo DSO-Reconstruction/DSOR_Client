@@ -54,6 +54,10 @@ def envelope(e):
 
 stats = {"emitters": 0, "helpers": 0, "opaque": 0, "cutout": 0, "files": 0, "skipped": 0}
 OPAQUE = {"Solid", "DecalReceiveSolid"}
+# Render states and shaders drawn without lighting (their names say it; the unlit
+# shader's pixel shader samples DiffMap0 with fog only, no light sampler).
+UNLIT_STATES = {"AlphaUnlit", "PostAlphaUnlit", "PreAlphaUnlit", "Background"}
+UNLIT_SHADERS = {"unlit", "unlitalphavertexcolors", "sequenceadditive", "sequencealpha", "glow"}
 CUTOUT = {"AlphaTest", "DecalReceiveAlphaTest"}
 for root, _dirs, files in os.walk(assets):
     for name in files:
@@ -76,6 +80,11 @@ for root, _dirs, files in os.walk(assets):
             state = (e.get("emitter") or {}).get("type_name")
             shader = (e.get("shader") or "").removeprefix("shd:")
             m = materials.get(f"{e.get('node')}_{shader}")
+            if m is not None and (state in UNLIT_STATES or shader in UNLIT_SHADERS):
+                if not m.setdefault("extras", {}).get("dsor_unlit"):
+                    m["extras"]["dsor_unlit"] = True
+                    stats["unlit"] = stats.get("unlit", 0) + 1
+                    changed = True
             if m is not None and "dsor_state" not in m.get("extras", {}):
                 if state in OPAQUE and m.get("alphaMode", "OPAQUE") != "OPAQUE":
                     m.pop("alphaMode", None)

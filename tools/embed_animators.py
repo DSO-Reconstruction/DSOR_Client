@@ -63,6 +63,78 @@ def sprite_nodes(d):
         at = i
 
 
+UV_KEYS = {b"KPDA": "pos", b"KSDA": "scale", b"KEDA": "rot"}
+
+
+def uv_animators(d):
+    """[{path, loop, pos/scale/rot: [[t, x, y], ...]}]: n3 UV animators (texture
+    layer offset / scale / rotation keys: u32 count, then count x (u32 layer, f32
+    time, float4)). EVIDENCE: e_ks_infested_ranger_markshot_bullet static_0_3 (a
+    uvanimated2 swoosh): KPDA (0,0) at 0 s -> (1,0) at 0.24 s, looping; the
+    uvanimated2 vertex shader turns (u, v, 1) by its uvTransform rows (c6, c7)."""
+    out = []
+    at = 0
+    while True:
+        at = d.find(b"ONNA", at)
+        if at < 0:
+            return out
+        try:
+            path, i = string(d, at + 4)
+            if d[i:i + 4] != b"TPLS":
+                at += 4
+                continue
+            loop, i = string(d, i + 4)
+            entry = {"path": path, "loop": loop}
+            while d[i:i + 4] in UV_KEYS:
+                kind = UV_KEYS[d[i:i + 4]]
+                count = struct.unpack_from("<I", d, i + 4)[0]
+                i += 8
+                keys = []
+                for _ in range(count):
+                    _layer, t, x, y, z, _w = struct.unpack_from("<Iffff f".replace(" ", ""), d, i)
+                    keys.append([round(t, 4), round(x, 4), round(y, 4), round(z, 4)])
+                    i += 24
+                entry[kind] = keys
+            if len(entry) > 2:
+                out.append(entry)
+            at = i
+        except struct.error:
+            at += 4
+
+
+def shader_vectors(d):
+    """[(node name, {var: [x, y, z, w]})]: each node's n3 "CEVS" shader vectors
+    (Velocity: the uvanimated shader's texture scroll)."""
+    out = []
+    at = 0
+    while True:
+        at = d.find(b"DNM>", at)
+        if at < 0:
+            return out
+        try:
+            name, i = string(d, at + 8)
+        except (struct.error, UnicodeDecodeError):
+            at += 4
+            continue
+        end = d.find(b"DNM", i)
+        end = len(d) if end < 0 else end
+        vecs = {}
+        j = i
+        while True:
+            j = d.find(b"CEVS", j, end)
+            if j < 0:
+                break
+            try:
+                var, k = string(d, j + 4)
+                vecs[var] = [round(x, 4) for x in struct.unpack_from("<4f", d, k)]
+            except (struct.error, UnicodeDecodeError):
+                pass
+            j += 4
+        if vecs:
+            out.append((name, vecs))
+        at = i
+
+
 def shader_floats(d):
     """[(node name, {var: value})] in file order: each node's TLFS params."""
     out = []
@@ -146,7 +218,9 @@ for root, _dirs, files in os.walk(models):
         anims = animators(raw)
         floats = shader_floats(raw)
         sprites = sprite_nodes(raw)
-        if not anims and not floats and not sprites:
+        uvs = uv_animators(raw)
+        vectors = shader_vectors(raw)
+        if not anims and not floats and not sprites and not uvs and not vectors:
             continue
         try:
             doc, rest = read_glb(glb)
@@ -161,6 +235,8 @@ for root, _dirs, files in os.walk(models):
             nd.get("extras", {}).pop("dsor_anim", None)
             nd.get("extras", {}).pop("dsor_shader", None)
             nd.get("extras", {}).pop("dsor_sprite", None)
+            nd.get("extras", {}).pop("dsor_uvanim", None)
+            nd.get("extras", {}).pop("dsor_vector", None)
             if nd.get("name") in sprites:
                 nd.setdefault("extras", {})["dsor_sprite"] = True
                 stats["sprite nodes"] = stats.get("sprite nodes", 0) + 1
@@ -171,6 +247,21 @@ for root, _dirs, files in os.walk(models):
                     nd.setdefault("extras", {})["dsor_shader"] = params
                     shaded += 1
         stats["shader nodes"] = stats.get("shader nodes", 0) + shaded
+        for name, vecs in vectors:
+            for nd in nodes:
+                if nd.get("name") == name and any(any(v) for v in vecs.values()):
+                    nd.setdefault("extras", {})["dsor_vector"] = vecs
+                    shaded += 1
+        for u in uvs:
+            parts = u["path"].split("/")
+            leaf, up = parts[-1], (parts[-2] if len(parts) > 1 else None)
+            cands = [i for i, nd in enumerate(nodes) if nd.get("name") == leaf]
+            if len(cands) > 1 and up:
+                cands = [i for i in cands if parent.get(i) is not None and nodes[parent[i]].get("name") == up] or cands
+            if cands:
+                nodes[cands[0]].setdefault("extras", {})["dsor_uvanim"] = {k: v for k, v in u.items() if k != "path"}
+                stats["uv animated nodes"] = stats.get("uv animated nodes", 0) + 1
+                shaded += 1
         by_node = {}
         for a in anims:
             parts = a["path"].split("/")
