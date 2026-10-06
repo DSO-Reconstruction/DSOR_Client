@@ -39,10 +39,14 @@ fn update_hud(
     mut last_log: Local<f64>,
     time: Res<Time>,
     meshes: Query<&ViewVisibility, With<Mesh3d>>,
+    mut counted: Local<(f64, usize, usize)>,
 ) {
-    // Surfaces drawn this frame: what the renderer prepares, one by one, on the CPU.
-    let drawn = meshes.iter().filter(|v| v.get()).count();
-    let total = meshes.iter().count();
+    // Surfaces drawn: what the renderer prepares, one by one, on the CPU. Counted
+    // once a second (a full pass over every mesh each frame is a cost of its own).
+    if time.elapsed_secs_f64() - counted.0 > 1.0 {
+        *counted = (time.elapsed_secs_f64(), meshes.iter().filter(|v| v.get()).count(), meshes.iter().count());
+    }
+    let (_, drawn, total) = *counted;
     let fps = diagnostics
         .get(&FrameTimeDiagnosticsPlugin::FPS)
         .and_then(|d| d.smoothed())

@@ -14,6 +14,7 @@
 
 use bevy::asset::{io::Reader, AssetLoader, LoadContext, LoadState, RecursiveDependencyLoadState};
 use bevy::gltf::{Gltf, GltfMaterial, GltfMesh, GltfNode};
+use bevy::camera::primitives::MeshAabb;
 use bevy::prelude::*;
 use serde::Deserialize;
 
@@ -244,6 +245,7 @@ fn stream_models(
     nodes: Res<Assets<GltfNode>>,
     meshes: Res<Assets<GltfMesh>>,
     materials: Res<Assets<GltfMaterial>>,
+    mesh_assets: Res<Assets<Mesh>>,
 ) {
     let Some(root) = current.root else { return };
     if current.spawned {
@@ -261,7 +263,7 @@ fn stream_models(
                     continue;
                 };
                 let placements = current.by_model[m].clone();
-                let flat = flat_surfaces(gltf, &nodes, &meshes, &materials, &asset_server);
+                let flat = flat_surfaces(gltf, &nodes, &meshes, &materials, &mesh_assets, &asset_server);
                 for &i in &placements {
                     let inst = &manifest.instances[i];
                     let at = Transform {
@@ -281,7 +283,8 @@ fn stream_models(
                             for s in surfaces {
                                 let tf = Transform::from_matrix(Mat4::from(inst_affine * s.local));
                                 let mut e = commands.spawn((Mesh3d(s.mesh.clone()), MeshMaterial3d(s.material.clone()), tf, ChildOf(cell)));
-                                if s.no_shadow {
+                                let size = s.size * at.scale.abs().max_element();
+                                if s.no_shadow || size < MIN_SHADOW_CASTER {
                                     e.insert(bevy::light::NotShadowCaster);
                                 }
                             }
@@ -311,6 +314,11 @@ fn stream_models(
         info!("map {}: all {} models placed", manifest.map, manifest.models.len());
     }
 }
+
+/// Map surfaces smaller than this (largest extent, world units) cast no shadow:
+/// the shadow pass drew ~1 900 surfaces in Kingshill, 5 ms a frame in the
+/// browser, mostly barrels, crates and clutter whose shadows hardly show.
+const MIN_SHADOW_CASTER: f32 = 3.0;
 
 /// Culling cell size, world units.
 pub const CELL: f32 = 24.0;
@@ -371,6 +379,9 @@ struct FlatSurface {
     material: Handle<StandardMaterial>,
     local: bevy::math::Affine3A,
     no_shadow: bool,
+    /// Largest extent of the surface in the model's space (its mesh bounds
+    /// through `local`).
+    size: f32,
 }
 
 /// The visible surfaces of a model that can be spawned flat, or None when it needs
@@ -380,6 +391,7 @@ fn flat_surfaces(
     nodes: &Assets<GltfNode>,
     meshes: &Assets<GltfMesh>,
     materials: &Assets<GltfMaterial>,
+    mesh_assets: &Assets<Mesh>,
     asset_server: &AssetServer,
 ) -> Option<Vec<FlatSurface>> {
     if !gltf.animations.is_empty() || !gltf.skins.is_empty() {
@@ -426,7 +438,12 @@ fn flat_surfaces(
             let suffix = if additive { "dsor" } else { "std" };
             let material = asset_server.load::<StandardMaterial>(path.clone().with_label(format!("{label}/{suffix}")));
             let opaque = materials.get(gm).is_some_and(|m| matches!(m.alpha_mode, AlphaMode::Opaque | AlphaMode::Mask(_)));
-            out.push(FlatSurface { mesh: prim.mesh.clone(), material, local, no_shadow: additive || !opaque });
+            let size = mesh_assets
+                .get(&prim.mesh)
+                .and_then(|m| m.compute_aabb())
+                .map(|b| (local.matrix3 * Vec3A::from(b.half_extents * 2.0)).abs().max_element())
+                .unwrap_or(f32::MAX);
+            out.push(FlatSurface { mesh: prim.mesh.clone(), material, local, no_shadow: additive || !opaque, size });
         }
     }
     Some(out)
