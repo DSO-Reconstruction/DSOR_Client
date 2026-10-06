@@ -550,7 +550,13 @@ fn move_remotes(time: Res<Time>, mut remotes: Query<(&mut Transform, &mut Remote
         //   remote player reaches each one a little early, so without it the run
         //   restarted at every record ("les animations ne se jouent pas entierement").
         r.still_for = if moving { 0.0 } else { r.still_for + time.delta_secs() };
-        let wanted = if r.still_for < RUN_GRACE { AnimState::Run } else { AnimState::Idle };
+        let wanted = if r.still_for < RUN_GRACE {
+            AnimState::Run
+        } else if matches!(anim.state, AnimState::Named(_)) {
+            anim.state.clone()
+        } else {
+            AnimState::Idle
+        };
         if anim.state != wanted {
             anim.state = wanted;
         }
@@ -707,7 +713,15 @@ fn walk_local(
             }
         }
         tf.rotation = Quat::from_rotation_y(player.facing);
-        let wanted = if moving { AnimState::Run } else { AnimState::Idle };
+        // A skill's animation plays to its end unless the player walks off; forcing
+        // Idle as soon as the movement block lifted cut every cast short.
+        let wanted = if moving {
+            AnimState::Run
+        } else if matches!(anim.state, AnimState::Named(_)) {
+            anim.state.clone()
+        } else {
+            AnimState::Idle
+        };
         if anim.state != wanted {
             anim.state = wanted;
         }

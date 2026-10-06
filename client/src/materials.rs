@@ -95,6 +95,100 @@ fn standard_material(m: &GltfMaterial) -> StandardMaterial {
     }
 }
 
+/// A node's animated shader variables (n3 animator nodes, tools/embed_animators.py).
+#[derive(Component, Reflect, Default, Clone)]
+#[reflect(Component, Default)]
+pub struct ShaderAnim {
+    tracks: Vec<VarTrack>,
+    /// Seconds since the model was spawned.
+    t: f32,
+}
+
+#[derive(Reflect, Default, Clone)]
+struct VarTrack {
+    var: String,
+    looping: bool,
+    keys: Vec<[f32; 2]>,
+}
+
+impl VarTrack {
+    fn at(&self, t: f32) -> f32 {
+        let (Some(first), Some(last)) = (self.keys.first(), self.keys.last()) else { return 1.0 };
+        let t = if self.looping && last[0] > 0.0 { t % last[0] } else { t.clamp(first[0], last[0]) };
+        for w in self.keys.windows(2) {
+            if t <= w[1][0] {
+                let span = (w[1][0] - w[0][0]).max(1e-6);
+                return w[0][1] + (w[1][1] - w[0][1]) * ((t - w[0][0]) / span).clamp(0.0, 1.0);
+            }
+        }
+        last[1]
+    }
+}
+
+/// A primitive whose material an animator drives: its own copy, and the values
+/// the animation scales.
+#[derive(Component)]
+struct AnimatedMaterial {
+    base: LinearRgba,
+    emissive: LinearRgba,
+}
+
+/// n3 animators: per instance, MatEmissiveIntensity scales a glow (an unlit
+/// additive surface's colour, or a lit surface's emission); Intensity0/1/3 scale
+/// opacity (decals, blended cards) -- glows that fade, scorches that appear and go.
+/// UNVERIFIED: Intensity0..3 as opacity; Amplitude and Fresnel* are not applied.
+fn animate_shader_vars(
+    mut commands: Commands,
+    time: Res<Time>,
+    mut nodes: Query<(&mut ShaderAnim, &Children)>,
+    mut prims: Query<(Entity, &mut MeshMaterial3d<StandardMaterial>, Option<&AnimatedMaterial>)>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
+    for (mut anim, children) in &mut nodes {
+        anim.t += time.delta_secs();
+        let t = anim.t;
+        let glow = anim.tracks.iter().find(|k| k.var == "MatEmissiveIntensity").map(|k| k.at(t));
+        let fade = anim.tracks.iter().find(|k| k.var.starts_with("Intensity")).map(|k| k.at(t));
+        if glow.is_none() && fade.is_none() {
+            continue;
+        }
+        for c in children.iter() {
+            let Ok((e, mut handle, own)) = prims.get_mut(c) else { continue };
+            let Some(m) = materials.get(&handle.0) else { continue };
+            let (base, emissive) = match own {
+                Some(a) => (a.base, a.emissive),
+                None => {
+                    // This instance's own copy, so instances animate independently.
+                    let (base, emissive) = (m.base_color.to_linear(), m.emissive);
+                    let copy = m.clone();
+                    handle.0 = materials.add(copy);
+                    commands.entity(e).insert(AnimatedMaterial { base, emissive });
+                    (base, emissive)
+                }
+            };
+            let Some(mut m) = materials.get_mut(&handle.0) else { continue };
+            let mut b = base;
+            let mut em = emissive;
+            if let Some(g) = glow {
+                if m.unlit {
+                    b = LinearRgba::new(b.red * g, b.green * g, b.blue * g, b.alpha);
+                } else {
+                    em = em * g;
+                }
+            }
+            if let Some(f) = fade {
+                if matches!(m.alpha_mode, AlphaMode::Add) {
+                    b = LinearRgba::new(b.red * f, b.green * f, b.blue * f, b.alpha);
+                } else {
+                    b.alpha *= f;
+                }
+            }
+            m.base_color = b.into();
+            m.emissive = em;
+        }
+    }
+}
+
 #[derive(Default, Clone)]
 struct NebulaStates {
     /// This file's textures by glTF index (external images load by path, not as
@@ -105,6 +199,32 @@ struct NebulaStates {
 impl GltfExtensionHandler for NebulaStates {
     fn dyn_clone(&self) -> Box<dyn ErasedGltfExtensionHandler> {
         Box::new(self.clone())
+    }
+
+    fn on_gltf_node(&mut self, _: &mut LoadContext<'_>, gltf_node: &::gltf::Node, entity: &mut EntityWorldMut) {
+        let Some(extras) = gltf_node.extras() else { return };
+        let raw = extras.get();
+        if !raw.contains("dsor_anim") {
+            return;
+        }
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(raw) else { return };
+        let Some(list) = v.get("dsor_anim").and_then(|a| a.as_array()) else { return };
+        let tracks = list
+            .iter()
+            .filter_map(|a| {
+                Some(VarTrack {
+                    var: a.get("var")?.as_str()?.to_owned(),
+                    looping: a.get("loop").and_then(|l| l.as_str()) == Some("loop"),
+                    keys: a
+                        .get("keys")?
+                        .as_array()?
+                        .iter()
+                        .filter_map(|k| Some([k.get(0)?.as_f64()? as f32, k.get(1)?.as_f64()? as f32]))
+                        .collect(),
+                })
+            })
+            .collect();
+        entity.insert(ShaderAnim { tracks, t: 0.0 });
     }
 
     fn on_texture(&mut self, gltf_texture: &gltf::Texture, texture: Handle<Image>) {
@@ -220,7 +340,9 @@ impl Plugin for MaterialsPlugin {
     fn build(&self, app: &mut App) {
         // Scene components must be reflected to be instanced.
         app.register_type::<DecalVolume>().register_type::<DecalTiling>();
+        app.register_type::<ShaderAnim>().register_type::<VarTrack>();
         app.add_systems(PostUpdate, scale_emissive);
+        app.add_systems(Update, animate_shader_vars);
         // After bevy_pbr's own handler, so the material it set is replaced.
         let handlers = app.world().resource::<GltfExtensionHandlers>().0.clone();
         #[cfg(target_family = "wasm")]

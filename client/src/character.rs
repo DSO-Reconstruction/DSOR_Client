@@ -203,6 +203,25 @@ impl CharacterDesc {
                 }
             }
         }
+        // The class's base outfit fills what no worn item covers: a character with
+        // no chest piece wears <class>_torso_00, not its underwear.
+        // EVIDENCE: _Template_PlayerCharacter.CharacterSet (mage_male_body_00 ...)
+        //   lists the body parts plus mage_torso_00 and mage_boots_00 (rangers also
+        //   ranger_gloves_00) -- characters/uniskel/outfits.json.
+        // FAILURE (2026-10-06): "mon perso est en slibard".
+        for kind in ["torso", "boots", "gloves"] {
+            let covered = self.equipment.iter().flat_map(|(_, skins)| skins).any(|s| s.contains(kind));
+            if covered {
+                continue;
+            }
+            let base = format!("{class}_{kind}_00");
+            let female = format!("{base}_female");
+            if self.gender == 1 && exists(&female) {
+                out.push(female);
+            } else if exists(&base) {
+                out.push(base);
+            }
+        }
         for (_slot, skins) in &self.equipment {
             for skin in skins {
                 let female = format!("{skin}_female");
@@ -255,12 +274,15 @@ pub struct CharacterAnim {
     pub speed: f32,
     applied: Option<(AnimState, f32)>,
     player: Option<Entity>,
+    /// The animation playing at full weight, and those fading out.
+    current: Option<AnimationNodeIndex>,
+    fading: Vec<(AnimationNodeIndex, f32)>,
     nodes: HashMap<String, (AnimationNodeIndex, bool)>,
 }
 
 impl Default for CharacterAnim {
     fn default() -> Self {
-        Self { state: AnimState::Idle, speed: 1.0, applied: None, player: None, nodes: HashMap::new() }
+        Self { state: AnimState::Idle, speed: 1.0, applied: None, player: None, nodes: HashMap::new(), current: None, fading: Vec::new() }
     }
 }
 
@@ -322,7 +344,7 @@ impl Plugin for CharacterPlugin {
             .register_asset_loader(AnimTableLoader)
             .register_asset_loader(PartListLoader)
             .add_systems(Startup, load_library)
-            .add_systems(Update, (build_characters, keep_parts_bound, drive_animations, check_skins))
+            .add_systems(Update, (build_characters, revive_skeletons, keep_parts_bound, drive_animations, check_skins).chain())
             .add_systems(
                 PostUpdate,
                 apply_variations.after(bevy::app::AnimationSystems).before(TransformSystems::Propagate),
@@ -403,108 +425,166 @@ fn build_characters(
     }
 }
 
+/// The queries a skeleton is adopted with (on_instance_ready, revive_skeletons).
+#[derive(bevy::ecs::system::SystemParam)]
+struct SkeletonCtx<'w, 's> {
+    commands: Commands<'w, 's>,
+    parts: Query<'w, 's, &'static PartOf>,
+    children: Query<'w, 's, &'static Children>,
+    names: Query<'w, 's, &'static Name>,
+    players: Query<'w, 's, (), With<AnimationPlayer>>,
+    skinned: Query<'w, 's, (&'static SkinnedMesh, Option<&'static JointNames>)>,
+    characters: Query<'w, 's, (&'static mut Character, &'static mut CharacterAnim)>,
+    library: Option<Res<'w, CharacterLibrary>>,
+    tables: Res<'w, Assets<AnimTable>>,
+    gltfs: Res<'w, Assets<Gltf>>,
+    graphs: ResMut<'w, Assets<AnimationGraph>>,
+    joints: Query<'w, 's, (&'static Transform, Option<&'static ChildOf>)>,
+    parents: Query<'w, 's, &'static ChildOf>,
+}
+
+/// Take the skeleton instance `entity` as its character's: bones, animation
+/// player and graph, body variation, and every part of the dressing bound to it.
+fn adopt_skeleton(ctx: &mut SkeletonCtx, entity: Entity, owner: Entity, generation: u32) {
+    let commands = &mut ctx.commands;
+    let mut bones = HashMap::new();
+    let mut player = None;
+    for e in ctx.children.iter_descendants(entity) {
+        if let Ok(n) = ctx.names.get(e) {
+            bones.insert(n.as_str().to_owned(), e);
+        }
+        if player.is_none() && ctx.players.contains(e) {
+            player = Some(e);
+        }
+    }
+    let Ok((mut character, mut anim)) = ctx.characters.get_mut(owner) else { return };
+    if character.generation != generation {
+        return;
+    }
+    // Animations: one graph per character, every state of its set.
+    if let (Some(player), Some(library)) = (player, ctx.library.as_ref()) {
+        let set = character.desc.animation_set();
+        let gltf = library.skeletons.get(character.desc.skeleton()).and_then(|h| ctx.gltfs.get(h));
+        let table = ctx.tables.get(&library.anims).and_then(|t| t.0.get(&set));
+        if let (Some(gltf), Some(table)) = (gltf, table) {
+            let mut graph = AnimationGraph::new();
+            for (state, clip) in table {
+                if let Some(handle) = gltf.named_animations.get(clip.as_str()) {
+                    let node = graph.add_clip(handle.clone(), 1.0, graph.root);
+                    anim.nodes.insert(state.clone(), (node, clip.ends_with("-loop")));
+                }
+            }
+            commands
+                .entity(player)
+                .insert(AnimationGraphHandle(ctx.graphs.add(graph)));
+            anim.player = Some(player);
+            anim.current = None;
+            anim.fading.clear();
+            anim.applied = None;
+        } else {
+            warn!("no animation set {set} (or its skeleton is not loaded yet)");
+        }
+    }
+    let variation = character.desc.look.as_ref().map(|l| l.variation.clone()).unwrap_or_default();
+    if !variation.is_empty() {
+        let shape: HashMap<&str, (Vec3, Vec3)> = variation.iter().map(|(n, t, s)| (n.as_str(), (*t, *s))).collect();
+        let varied: HashMap<Entity, &str> =
+            bones.iter().filter(|(n, _)| shape.contains_key(n.as_str())).map(|(n, e)| (*e, n.as_str())).collect();
+        let mut scaled_bones = HashMap::new();
+        for (&joint, &name) in &varied {
+            let Ok((tf, parent)) = ctx.joints.get(joint) else { continue };
+            let (var_t, var_s) = shape[name];
+            let scaled = commands
+                .spawn((Name::new(format!("{name}#scaled")), VariedChild, Transform::from_scale(var_s), ChildOf(joint)))
+                .id();
+            commands.entity(joint).insert(VariedJoint {
+                var_t,
+                var_s,
+                bind_t: tf.translation,
+                parent: parent.map(|p| p.parent()).filter(|p| varied.contains_key(p)),
+                scaled,
+                raw: (tf.translation, tf.scale),
+                written: None,
+            });
+            scaled_bones.insert(name.to_owned(), scaled);
+        }
+        bones.extend(scaled_bones);
+    }
+    // Every part of this dressing, pending or already bound to a skeleton
+    // instance this one replaces.
+    character.pending_parts.clear();
+    if std::env::var("DSOR_CHECK_SKIN").is_ok() {
+        let n = ctx.children.get(owner).map(|c| c.iter().filter(|p| ctx.parts.get(*p).is_ok_and(|p| p.1 == generation)).count()).unwrap_or(0);
+        info!("adopt skeleton {entity:?} for {owner:?} gen {generation}: {} bones, {n} parts", bones.len());
+    }
+    for part in ctx.children.get(owner).into_iter().flatten() {
+        if ctx.parts.get(*part).is_ok_and(|p| p.1 == generation) {
+            rebind(commands, *part, &bones, &ctx.children, &ctx.names, &ctx.skinned, &ctx.parents);
+        }
+    }
+    character.bones = Some(bones);
+}
+
 #[allow(clippy::too_many_arguments)]
-fn on_instance_ready(
-    ready: On<WorldInstanceReady>,
-    mut commands: Commands,
-    skeletons: Query<&SkeletonOf>,
-    parts: Query<&PartOf>,
-    children: Query<&Children>,
-    names: Query<&Name>,
-    players: Query<(), With<AnimationPlayer>>,
-    skinned: Query<&SkinnedMesh>,
-    mut characters: Query<(&mut Character, &mut CharacterAnim)>,
-    library: Option<Res<CharacterLibrary>>,
-    tables: Res<Assets<AnimTable>>,
-    gltfs: Res<Assets<Gltf>>,
-    mut graphs: ResMut<Assets<AnimationGraph>>,
-    joints: Query<(&Transform, Option<&ChildOf>)>,
-    parents: Query<&ChildOf>,
-) {
+fn on_instance_ready(ready: On<WorldInstanceReady>, skeletons: Query<&SkeletonOf>, mut ctx: SkeletonCtx) {
     let entity = ready.entity;
     if let Ok(SkeletonOf(owner, generation)) = skeletons.get(entity) {
+        adopt_skeleton(&mut ctx, entity, *owner, *generation);
+        return;
+    }
+    if let Ok(PartOf(owner, generation)) = ctx.parts.get(entity) {
         let (owner, generation) = (*owner, *generation);
-        let mut bones = HashMap::new();
-        let mut player = None;
-        for e in children.iter_descendants(entity) {
-            if let Ok(n) = names.get(e) {
-                bones.insert(n.as_str().to_owned(), e);
-            }
-            if player.is_none() && players.contains(e) {
-                player = Some(e);
-            }
-        }
-        let Ok((mut character, mut anim)) = characters.get_mut(owner) else { return };
+        let Ok((mut character, _)) = ctx.characters.get_mut(owner) else { return };
         if character.generation != generation {
             return;
         }
-        // Animations: one graph per character, every state of its set.
-        if let (Some(player), Some(library)) = (player, library.as_ref()) {
-            let set = character.desc.animation_set();
-            let gltf = library.skeletons.get(character.desc.skeleton()).and_then(|h| gltfs.get(h));
-            let table = tables.get(&library.anims).and_then(|t| t.0.get(&set));
-            if let (Some(gltf), Some(table)) = (gltf, table) {
-                let mut graph = AnimationGraph::new();
-                for (state, clip) in table {
-                    if let Some(handle) = gltf.named_animations.get(clip.as_str()) {
-                        let node = graph.add_clip(handle.clone(), 1.0, graph.root);
-                        anim.nodes.insert(state.clone(), (node, clip.ends_with("-loop")));
-                    }
-                }
-                commands
-                    .entity(player)
-                    .insert((AnimationGraphHandle(graphs.add(graph)), AnimationTransitions::new()));
-                anim.player = Some(player);
-                anim.applied = None;
-            } else {
-                warn!("no animation set {set} (or its skeleton is not loaded yet)");
-            }
-        }
-        let variation = character.desc.look.as_ref().map(|l| l.variation.clone()).unwrap_or_default();
-        if !variation.is_empty() {
-            let shape: HashMap<&str, (Vec3, Vec3)> = variation.iter().map(|(n, t, s)| (n.as_str(), (*t, *s))).collect();
-            let varied: HashMap<Entity, &str> =
-                bones.iter().filter(|(n, _)| shape.contains_key(n.as_str())).map(|(n, e)| (*e, n.as_str())).collect();
-            let mut scaled_bones = HashMap::new();
-            for (&joint, &name) in &varied {
-                let Ok((tf, parent)) = joints.get(joint) else { continue };
-                let (var_t, var_s) = shape[name];
-                let scaled = commands
-                    .spawn((Name::new(format!("{name}#scaled")), VariedChild, Transform::from_scale(var_s), ChildOf(joint)))
-                    .id();
-                commands.entity(joint).insert(VariedJoint {
-                    var_t,
-                    var_s,
-                    bind_t: tf.translation,
-                    parent: parent.map(|p| p.parent()).filter(|p| varied.contains_key(p)),
-                    scaled,
-                    raw: (tf.translation, tf.scale),
-                    written: None,
-                });
-                scaled_bones.insert(name.to_owned(), scaled);
-            }
-            bones.extend(scaled_bones);
-        }
-        // Every part of this dressing, pending or already bound to a skeleton
-        // instance this one replaces.
-        character.pending_parts.clear();
-        for part in children.get(owner).into_iter().flatten() {
-            if parts.get(*part).is_ok_and(|p| p.1 == generation) {
-                rebind(&mut commands, *part, &bones, &children, &names, &skinned, &parents);
-            }
-        }
-        character.bones = Some(bones);
-        return;
-    }
-    if let Ok(PartOf(owner, generation)) = parts.get(entity) {
-        let Ok((mut character, _)) = characters.get_mut(*owner) else { return };
-        if character.generation != *generation {
-            return;
-        }
         match &character.bones {
-            Some(bones) => rebind(&mut commands, entity, bones, &children, &names, &skinned, &parents),
+            Some(bones) => {
+                let bones = bones.clone();
+                rebind(&mut ctx.commands, entity, &bones, &ctx.children, &ctx.names, &ctx.skinned, &ctx.parents)
+            }
             None => character.pending_parts.push(entity),
         }
+    }
+}
+
+/// A skeleton whose instance was replaced is adopted again.
+/// CONTRACT: the skeleton scene is instanced again when its assets finish loading
+///   (and WorldInstanceReady does not fire again): its old bones and animation
+///   player are despawned, and parts bound to them stayed where they were.
+/// FAILURE (2026-10-06): "si ca n'a pas fini de charger et que je me deplace tout
+///   reste a sa place"; after quick casts "l'anim ne marche plus" (the player was
+///   gone). Reproduced with DSOR_CHECK_SKIN: parts bound to a dead joint.
+fn revive_skeletons(
+    alive: Query<()>,
+    skeletons: Query<(Entity, &SkeletonOf, &Children)>,
+    mut ctx: SkeletonCtx,
+) {
+    let mut stale = Vec::new();
+    if std::env::var("DSOR_CHECK_SKIN").is_ok() {
+        for (owner, (c, a)) in ctx.characters.iter().enumerate() {
+            let dead = c.bones.as_ref().map(|b| b.values().filter(|b| !alive.contains(**b)).count());
+            let _ = (owner, a);
+            if dead.is_some_and(|d| d > 0) {
+                let sks: Vec<_> = skeletons.iter().map(|(e, s, k)| (e, s.0, s.1, k.len(), c.generation)).collect();
+                info!("revive check: {dead:?} dead bones; skeletons (entity, owner, gen, kids, char gen): {sks:?}");
+            }
+        }
+    }
+    for (sk, SkeletonOf(owner, generation), kids) in &skeletons {
+        let Ok((character, anim)) = ctx.characters.get(*owner) else { continue };
+        if character.generation != *generation || kids.is_empty() {
+            continue;
+        }
+        let bone_dead = character.bones.as_ref().is_some_and(|b| b.values().any(|b| !alive.contains(*b)));
+        let player_dead = anim.player.is_some_and(|p| !alive.contains(p));
+        if bone_dead || player_dead {
+            stale.push((sk, *owner, *generation));
+        }
+    }
+    for (sk, owner, generation) in stale {
+        info!("character {owner:?}: skeleton instance replaced, adopting it again");
+        adopt_skeleton(&mut ctx, sk, owner, generation);
     }
 }
 
@@ -516,13 +596,21 @@ fn rebind(
     bones: &HashMap<String, Entity>,
     children: &Query<&Children>,
     names: &Query<&Name>,
-    skinned: &Query<&SkinnedMesh>,
+    skinned: &Query<(&SkinnedMesh, Option<&JointNames>)>,
     parents: &Query<&ChildOf>,
 ) {
     for e in children.iter_descendants(part) {
-        let Ok(skin) = skinned.get(e) else { continue };
-        let joint_names: Option<Vec<String>> =
-            skin.joints.iter().map(|j| names.get(*j).ok().map(|n| n.as_str().to_owned())).collect();
+        let Ok((skin, known)) = skinned.get(e) else { continue };
+        // CONTRACT: the names remembered at the first binding. A part already bound
+        //   to a skeleton instance that has since been replaced points at dead
+        //   joints, whose names can no longer be read.
+        // FAILURE (2026-10-06): such parts were skipped and stayed bound to the dead
+        //   skeleton -- the body froze in place while the player moved ("si ca n'a
+        //   pas fini de charger et que je me deplace tout reste a sa place").
+        let joint_names: Option<Vec<String>> = match known {
+            Some(JointNames(n)) => Some(n.clone()),
+            None => skin.joints.iter().map(|j| names.get(*j).ok().map(|n| n.as_str().to_owned())).collect(),
+        };
         let Some(joint_names) = joint_names else { continue };
         bind(commands, e, skin, &joint_names, bones, parents);
         commands.entity(e).insert(JointNames(joint_names));
@@ -537,6 +625,9 @@ fn bind(
     bones: &HashMap<String, Entity>,
     parents: &Query<&ChildOf>,
 ) {
+    if std::env::var("DSOR_CHECK_SKIN").is_ok() {
+        info!("bind skin {e:?}: first joint {:?} -> {:?}", skin.joints.first(), joint_names.first().and_then(|n| bones.get(n.as_str())));
+    }
     drop_own_skeleton(commands, e, skin, bones, parents);
     let joints: Vec<Entity> = joint_names
         .iter()
@@ -580,6 +671,10 @@ fn drop_own_skeleton(
         let top = parents.get(j).map(|p| p.parent()).ok();
         if top.is_some_and(|p| own.contains(&p)) || mesh_ancestors.contains(&j) || j == mesh {
             continue;
+        }
+        if std::env::var("DSOR_CHECK_SKIN").is_ok() {
+            let under_shared = parents.iter_ancestors(j).any(|a| shared.contains(&a));
+            info!("drop own skeleton of skin {mesh:?}: despawn joint tree {j:?} (under shared bone: {under_shared}, {} own joints, {} shared)", own.len(), shared.len());
         }
         commands.entity(j).try_despawn();
     }
@@ -665,13 +760,16 @@ fn apply_variations(
 struct VariedChild;
 
 fn drive_animations(
+    time: Res<Time>,
     mut characters: Query<(&mut CharacterAnim, &GlobalTransform, &InheritedVisibility)>,
-    mut players: Query<(&mut AnimationPlayer, &mut AnimationTransitions)>,
+    mut players: Query<&mut AnimationPlayer>,
     cameras: Query<&GlobalTransform, With<Camera3d>>,
 ) {
     let eye = cameras.iter().next().map(|c| c.translation());
+    let fade_step = time.delta_secs() / BLEND.as_secs_f32();
     for (mut anim, at, shown) in &mut characters {
         let Some(player) = anim.player else { continue };
+        let Ok(mut p) = players.get_mut(player) else { continue };
         // Hidden (culled) or far characters: stopped, so their joints are not
         // evaluated at all -- a paused animation is still applied every frame
         // (7 ms a frame for Kingshill's NPCs, bevy trace_chrome). Played again
@@ -679,37 +777,52 @@ fn drive_animations(
         let far = !shown.get() || eye.is_some_and(|e| e.distance(at.translation()) > ANIMATION_DISTANCE);
         if far {
             if anim.applied.is_some() {
-                if let Ok((mut p, _)) = players.get_mut(player) {
-                    p.stop_all();
-                }
+                p.stop_all();
+                anim.current = None;
+                anim.fading.clear();
                 anim.applied = None;
             }
             continue;
         }
+        // Our own cross-fade. bevy's AnimationTransitions stopped an animation
+        // started again while its previous fade-out was still running: after two
+        // quick casts the character played nothing at all ("je le lance 2x l'anim
+        // marche apres ca marche plus").
+        let current = anim.current;
+        anim.fading.retain_mut(|(node, w)| {
+            if Some(*node) == current {
+                return false;
+            }
+            *w -= fade_step;
+            if *w <= 0.0 {
+                p.stop(*node);
+                return false;
+            }
+            if let Some(a) = p.animation_mut(*node) {
+                a.set_weight(*w);
+            }
+            true
+        });
         let wanted = (anim.state.clone(), anim.speed);
         if anim.applied.as_ref() == Some(&wanted) {
             continue;
         }
-        let Ok((mut p, mut transitions)) = players.get_mut(player) else { continue };
         let key = anim.state.key().to_owned();
         let Some(&(node, looping)) = anim.nodes.get(&key).or_else(|| anim.nodes.get("Idle")) else {
             continue;
         };
-        // The same animation again: restart it in place. Through the transitions it
-        // was both fading out and the new main animation, and when the fade ended it
-        // stopped -- the body froze on its last frame ("reste bloque sur la derniere
-        // frame").
-        let active = if transitions.get_main_animation() == Some(node) && p.animation(node).is_some() {
-            p.animation_mut(node).unwrap()
-        } else {
-            transitions.play(&mut p, node, BLEND)
-        };
-        active.set_speed(anim.speed);
+        if let Some(old) = anim.current.filter(|old| *old != node) {
+            anim.fading.push((old, 1.0));
+        }
+        anim.fading.retain(|(n, _)| *n != node);
+        let active = p.play(node);
+        active.set_weight(1.0).set_speed(anim.speed);
         if looping {
             active.repeat();
         } else {
             active.replay();
         }
+        anim.current = Some(node);
         anim.applied = Some(wanted);
     }
 }
@@ -739,6 +852,8 @@ pub fn redress(
     anim.player = None;
     anim.nodes.clear();
     anim.applied = None;
+    anim.current = None;
+    anim.fading.clear();
 }
 
 /// DSOR_CHECK_SKIN=1: every frame, every skinned mesh under a character must point

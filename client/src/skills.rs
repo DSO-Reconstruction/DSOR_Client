@@ -311,9 +311,15 @@ fn perform(
     let fire = skill.loop_start.max(skill.hit_frame) as f32 / FPS;
     match (skill.kind.as_str(), &skill.bullet) {
         ("Ranged" | "RangedTargetPoint" | "RangedTarget", Some(b)) => {
+            // The bullet leaves from the casting hand: StartOffset's height, a short
+            // way ahead. Its full 1.8 units ahead left a gap between the caster and
+            // the trail ("la trainee commence trop loin de moi").
+            // UNVERIFIED: how the client applies StartOffset's forward component.
+            let mut start = Vec3::from(b.start);
+            start.z = start.z.clamp(-0.6, 0.6);
             commands.spawn(Pending {
                 after: fire,
-                what: PendingKind::Bullet { from: at + entity_rotation(facing) * Vec3::from(b.start), dir, def: b.clone() },
+                what: PendingKind::Bullet { from: at + entity_rotation(facing) * start, dir, def: b.clone() },
             });
         }
         ("Shifted", Some(b)) => {
@@ -377,14 +383,17 @@ fn cast_input(
 ) {
     let Some(mut net) = net else { return };
     let shift = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
+    // One press, one cast (holding a key re-fired the skill as soon as it
+    // unblocked: "certains sorts se lancent 2x"); only the basic attack on
+    // Shift + left button repeats while held.
     let slot = if shift && buttons.pressed(MouseButton::Left) {
         Some(0)
-    } else if buttons.pressed(MouseButton::Right) {
+    } else if buttons.just_pressed(MouseButton::Right) {
         Some(1)
     } else {
         [KeyCode::Digit1, KeyCode::Digit2, KeyCode::Digit3, KeyCode::Digit4, KeyCode::Digit5]
             .iter()
-            .position(|k| keys.pressed(*k))
+            .position(|k| keys.just_pressed(*k))
             .map(|i| i + 2)
     };
     let Some(slot) = slot else { return };
@@ -528,7 +537,10 @@ fn fly_bullets(
     children: Query<&Children>,
     shown_parts: Query<(), Or<(With<Mesh3d>, With<PointLight>)>>,
     emitters: Query<(), With<crate::particles::Emitter>>,
+    nav: Option<Res<CurrentNav>>,
+    navmeshes: Res<Assets<NavMesh>>,
 ) {
+    let mesh = nav.as_ref().and_then(|n| navmeshes.get(&n.0));
     for (e, mut tf, mut b) in &mut bullets {
         let dt = time.delta_secs();
         if let Some(left) = b.dying.as_mut() {
@@ -540,6 +552,14 @@ fn fly_bullets(
         }
         tf.translation += b.velocity * dt;
         b.left -= dt;
+        // The ground rising into its path (stairs, a slope) stops it.
+        // UNVERIFIED: the server's own collision; walls off the navigation mesh
+        // are not detected.
+        let p = tf.translation;
+        let hit_ground = mesh.is_some_and(|m| m.heights(p.x, p.z).any(|h| h > p.y - 0.2 && h < p.y + 2.5));
+        if hit_ground {
+            b.left = 0.0;
+        }
         if b.left <= 0.0 {
             if !b.death.is_empty() {
                 commands.spawn(Pending {
