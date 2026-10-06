@@ -38,7 +38,11 @@ fn update_hud(
     mut text: Query<&mut Text, With<HudText>>,
     mut last_log: Local<f64>,
     time: Res<Time>,
+    meshes: Query<&ViewVisibility, With<Mesh3d>>,
 ) {
+    // Surfaces drawn this frame: what the renderer prepares, one by one, on the CPU.
+    let drawn = meshes.iter().filter(|v| v.get()).count();
+    let total = meshes.iter().count();
     let fps = diagnostics
         .get(&FrameTimeDiagnosticsPlugin::FPS)
         .and_then(|d| d.smoothed())
@@ -59,7 +63,7 @@ fn update_hud(
         None => ("-", 0, 0, 0),
     };
     let line = format!(
-        "{fps:.0} FPS ({ms:.2} ms)\nentities {entities:.0}\nmap {name}: {placed} placements, models {loaded}/{models}\nWASD/QE move, hold right mouse to look, shift run, wheel speed"
+        "{fps:.0} FPS ({ms:.2} ms)\nentities {entities:.0}, surfaces drawn {drawn}/{total}\nmap {name}: {placed} placements, models {loaded}/{models}\nWASD/QE move, hold right mouse to look, shift run, wheel speed"
     );
     if let Ok(mut t) = text.single_mut() {
         t.0 = line;
@@ -68,6 +72,6 @@ fn update_hud(
     let now = time.elapsed_secs_f64();
     if now - *last_log > 5.0 {
         *last_log = now;
-        info!("{fps:.0} FPS ({ms:.2} ms), {entities:.0} entities, {name}: {placed} placements, models {loaded}/{models}");
+        info!("{fps:.0} FPS ({ms:.2} ms), {entities:.0} entities, {drawn}/{total} surfaces drawn, {name}: {placed} placements, models {loaded}/{models}");
     }
 }

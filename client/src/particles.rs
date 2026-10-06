@@ -357,13 +357,14 @@ fn step(e: &Emitter, s: &mut EmitterState, at: &GlobalTransform, dt: f32) {
 fn simulate(
     time: Res<Time>,
     cameras: Query<&GlobalTransform, With<Camera3d>>,
-    mut emitters: Query<(&Emitter, &mut EmitterState, &GlobalTransform)>,
+    mut emitters: Query<(&Emitter, &mut EmitterState, &GlobalTransform, &InheritedVisibility)>,
 ) {
     let Ok(cam) = cameras.single() else { return };
     let eye = cam.translation();
     let dt = time.delta_secs().min(MAX_DT);
-    for (e, mut s, at) in &mut emitters {
-        let near = at.translation().distance_squared(eye) <= e.activity_distance * e.activity_distance;
+    for (e, mut s, at, shown) in &mut emitters {
+        // Culled with its map cell: no simulation either.
+        let near = shown.get() && at.translation().distance_squared(eye) <= e.activity_distance * e.activity_distance;
         if !near {
             if s.active {
                 s.active = false;

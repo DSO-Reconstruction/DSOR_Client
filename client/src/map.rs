@@ -109,6 +109,9 @@ pub struct CurrentMap {
     /// Placements per model, built once the manifest arrives.
     pub by_model: Vec<Vec<usize>>,
     pub root: Option<Entity>,
+    /// Culling cells (CELL units square) by grid key; every placement is a child
+    /// of its cell. SEE: cull_cells.
+    pub cells: std::collections::HashMap<(i32, i32), Entity>,
     /// True once every model has been requested and every placement spawned.
     pub spawned: bool,
     pub instances: usize,
@@ -123,6 +126,7 @@ impl CurrentMap {
             in_flight: Vec::new(),
             by_model: Vec::new(),
             root: None,
+            cells: Default::default(),
             spawned: false,
             instances: 0,
         }
@@ -161,7 +165,7 @@ impl Plugin for MapPlugin {
     fn build(&self, app: &mut App) {
         app.init_asset::<MapManifest>()
             .init_asset_loader::<MapManifestLoader>()
-            .add_systems(Update, (start_map, stream_models).chain().run_if(resource_exists::<CurrentMap>));
+            .add_systems(Update, (start_map, stream_models, cull_cells).chain().run_if(resource_exists::<CurrentMap>));
     }
 }
 
@@ -258,32 +262,36 @@ fn stream_models(
                 };
                 let placements = current.by_model[m].clone();
                 let flat = flat_surfaces(gltf, &nodes, &meshes, &materials, &asset_server);
-                commands.entity(root).with_children(|parent| {
-                    for &i in &placements {
-                        let inst = &manifest.instances[i];
-                        let at = Transform {
-                            translation: game_to_bevy(inst.p),
-                            rotation: Quat::from_xyzw(inst.r[0], inst.r[1], inst.r[2], inst.r[3]).normalize(),
-                            scale: Vec3::from_array(inst.s),
-                        };
-                        match &flat {
-                            Some(surfaces) => {
-                                let inst_affine = at.compute_affine();
-                                for s in surfaces {
-                                    let tf = Transform::from_matrix(Mat4::from(inst_affine * s.local));
-                                    let mut e = parent.spawn((Mesh3d(s.mesh.clone()), MeshMaterial3d(s.material.clone()), tf));
-                                    if s.no_shadow {
-                                        e.insert(bevy::light::NotShadowCaster);
-                                    }
+                for &i in &placements {
+                    let inst = &manifest.instances[i];
+                    let at = Transform {
+                        translation: game_to_bevy(inst.p),
+                        rotation: Quat::from_xyzw(inst.r[0], inst.r[1], inst.r[2], inst.r[3]).normalize(),
+                        scale: Vec3::from_array(inst.s),
+                    };
+                    let key = cell_of(at.translation);
+                    let cell = *current.cells.entry(key).or_insert_with(|| {
+                        commands
+                            .spawn((Name::new(format!("cell {key:?}")), Transform::default(), Visibility::default(), ChildOf(root)))
+                            .id()
+                    });
+                    match &flat {
+                        Some(surfaces) => {
+                            let inst_affine = at.compute_affine();
+                            for s in surfaces {
+                                let tf = Transform::from_matrix(Mat4::from(inst_affine * s.local));
+                                let mut e = commands.spawn((Mesh3d(s.mesh.clone()), MeshMaterial3d(s.material.clone()), tf, ChildOf(cell)));
+                                if s.no_shadow {
+                                    e.insert(bevy::light::NotShadowCaster);
                                 }
                             }
-                            None => {
-                                let scene = gltf.scenes.first().cloned().unwrap_or_default();
-                                parent.spawn((WorldAssetRoot(scene), at));
-                            }
+                        }
+                        None => {
+                            let scene = gltf.scenes.first().cloned().unwrap_or_default();
+                            commands.spawn((WorldAssetRoot(scene), at, ChildOf(cell)));
                         }
                     }
-                });
+                }
                 current.instances += placements.len();
             }
             Some(LoadState::Failed(_)) => {}
@@ -301,6 +309,59 @@ fn stream_models(
     if current.models.len() == manifest.models.len() && current.in_flight.is_empty() {
         current.spawned = true;
         info!("map {}: all {} models placed", manifest.map, manifest.models.len());
+    }
+}
+
+/// Culling cell size, world units.
+pub const CELL: f32 = 24.0;
+/// Cells farther than this from the point the camera looks at are hidden, from
+/// the view and from the shadow pass alike. The game camera at full zoom-out sees
+/// about 45 units around that point.
+pub const CULL_DISTANCE: f32 = 55.0;
+
+fn cell_of(p: Vec3) -> (i32, i32) {
+    ((p.x / CELL).floor() as i32, (p.z / CELL).floor() as i32)
+}
+
+/// Where the camera looks: the local player when there is one, else where the
+/// camera's axis meets the ground plane of the map (or a point ahead of it).
+pub fn camera_focus(cam: &GlobalTransform, player: Option<Vec3>, ground: f32) -> Vec3 {
+    if let Some(p) = player {
+        return p;
+    }
+    let (o, d) = (cam.translation(), cam.forward().as_vec3());
+    if d.y < -0.05 {
+        let t = (ground - o.y) / d.y;
+        if t > 0.0 {
+            return o + d * t.min(200.0);
+        }
+    }
+    o + d * 30.0
+}
+
+/// Culling: hide whole cells away from the camera's focus.
+/// CONTRACT: hidden for every view, the shadow cascade included -- frustum culling
+///   alone left the shadow pass ~12 700 surfaces in Kingshill (the camera drew
+///   1 840), each prepared on the CPU every frame: 30 FPS in the browser.
+pub fn cull_cells(
+    current: Res<CurrentMap>,
+    manifests: Res<Assets<MapManifest>>,
+    cameras: Query<&GlobalTransform, With<Camera3d>>,
+    players: Query<&GlobalTransform, With<crate::net::LocalPlayer>>,
+    mut cells: Query<&mut Visibility>,
+) {
+    let Ok(cam) = cameras.single() else { return };
+    let ground = manifests.get(&current.manifest).map(|m| m.center[1]).unwrap_or(0.0);
+    let focus = camera_focus(cam, players.iter().next().map(|p| p.translation()), ground);
+    for (&(x, z), &e) in &current.cells {
+        let min = Vec2::new(x as f32 * CELL, z as f32 * CELL);
+        let nearest = Vec2::new(focus.x, focus.z).clamp(min, min + Vec2::splat(CELL));
+        let near = nearest.distance(Vec2::new(focus.x, focus.z)) <= CULL_DISTANCE;
+        let Ok(mut v) = cells.get_mut(e) else { continue };
+        let wanted = if near { Visibility::Inherited } else { Visibility::Hidden };
+        if *v != wanted {
+            *v = wanted;
+        }
     }
 }
 

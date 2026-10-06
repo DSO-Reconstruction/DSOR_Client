@@ -172,7 +172,7 @@ impl Plugin for NpcPlugin {
             .register_asset_loader(NpcPlacementsLoader)
             .register_asset_loader(OutfitsLoader)
             .add_systems(Startup, load)
-            .add_systems(Update, (follow_map, offline_npcs, spawn_npcs, animate_models).chain());
+            .add_systems(Update, (follow_map, offline_npcs, spawn_npcs, animate_models, cull_actors).chain());
     }
 }
 
@@ -357,5 +357,28 @@ fn animate_models(
         let mut anim = AnimationPlayer::default();
         anim.play(node).repeat();
         commands.entity(player).insert((AnimationGraphHandle(graphs.add(graph)), anim));
+    }
+}
+
+/// Other actors away from the camera's focus are hidden, as map cells are
+/// (crate::map::cull_cells): not drawn, not in the shadow pass, no name.
+#[allow(clippy::type_complexity)]
+fn cull_actors(
+    current: Option<Res<CurrentMap>>,
+    manifests: Res<Assets<crate::map::MapManifest>>,
+    cameras: Query<&GlobalTransform, With<Camera3d>>,
+    players: Query<&GlobalTransform, With<crate::net::LocalPlayer>>,
+    mut actors: Query<(&GlobalTransform, &mut Visibility), Or<(With<Npc>, With<crate::net::RemotePlayer>)>>,
+) {
+    let Ok(cam) = cameras.single() else { return };
+    let ground = current.as_ref().and_then(|c| manifests.get(&c.manifest)).map(|m| m.center[1]).unwrap_or(0.0);
+    let focus = crate::map::camera_focus(cam, players.iter().next().map(|p| p.translation()), ground);
+    for (at, mut v) in &mut actors {
+        let p = at.translation();
+        let near = Vec2::new(p.x - focus.x, p.z - focus.z).length() <= crate::map::CULL_DISTANCE;
+        let wanted = if near { Visibility::Inherited } else { Visibility::Hidden };
+        if *v != wanted {
+            *v = wanted;
+        }
     }
 }

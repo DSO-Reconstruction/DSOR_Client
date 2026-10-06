@@ -257,7 +257,7 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>, opts: Res<Optio
         // at full zoom-out and cut the view in two ("la vision est coupee en 2").
         bevy::light::CascadeShadowConfigBuilder {
             num_cascades: 1,
-            maximum_distance: 70.0,
+            maximum_distance: 60.0,
             ..default()
         }
         .build(),

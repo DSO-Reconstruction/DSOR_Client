@@ -54,7 +54,12 @@ fn place(
     actors: Query<(Entity, &Nameplate, &GlobalTransform, &InheritedVisibility, Option<&Label>)>,
     mut labels: Query<(Entity, &mut Node, &mut Visibility, &mut TextColor, &mut Text), With<LabelOf>>,
     owners: Query<&LabelOf>,
+    assets: Res<AssetServer>,
+    mut font: Local<Option<Handle<Font>>>,
 ) {
+    // Bevy's built-in font is ASCII only ("F?lix"); Noto Sans Bold stands in for
+    // the game's Tahoma bold (assets/fonts, not shipped with the repository).
+    let font = font.get_or_insert_with(|| assets.load("fonts/NotoSans-Bold.ttf")).clone();
     let Ok((camera, cam_at)) = cameras.single() else { return };
     let height = windows.iter().next().map(|w| w.height()).unwrap_or(LAYOUT_HEIGHT);
     // Points to pixels at the layout height, then as a share of the window
@@ -68,7 +73,7 @@ fn place(
                     LabelOf(entity),
                     Node { position_type: PositionType::Absolute, width: Val::Px(BOX), justify_content: JustifyContent::Center, ..default() },
                     Text::new(plate.text.clone()),
-                    TextFont { font_size: FontSize::Vh(vh), ..default() },
+                    TextFont { font: font.clone().into(), font_size: FontSize::Vh(vh), ..default() },
                     TextColor(plate.color),
                     TextLayout::justify(Justify::Center),
                     TextShadow { offset: Vec2::splat(1.0), color: Color::BLACK },
