@@ -27,6 +27,7 @@ use dsor_transport::Transport;
 use crate::character::{redress, spawn_character, AnimState, Character, CharacterAnim, CharacterDesc, CharacterLibrary, ItemSkins};
 use crate::map::{CurrentMap, MapManifest, MapRoot};
 use crate::nav::{CurrentNav, NavMesh};
+use crate::nameplate::Nameplate;
 
 /// How far up or down one step may go (stairs, slopes).
 const MAX_STEP: f32 = 1.2;
@@ -86,17 +87,30 @@ pub struct Net {
     pub local_actor: Option<u32>,
     /// The map frame's centre (wire = (game - centre) * 128).
     pub centre: Option<Vec3>,
-    pending_local: Option<(CharacterDesc, Vec3, f32)>,
+    /// (look, position, heading, name, admin).
+    pending_local: Option<(CharacterDesc, Vec3, f32, String, bool)>,
     /// Actors already asked about (ActorRequest), so each is asked once.
     requested: std::collections::HashSet<u32>,
     /// Other players to spawn, despawn, or move, applied by `apply_remotes`.
-    remote_spawns: Vec<(u32, CharacterDesc, Vec3, f32, String)>,
+    remote_spawns: Vec<(u32, CharacterDesc, Vec3, f32, String, bool)>,
+    /// NPCs to place (NewNPCCommand) and actors gone, applied by crate::npc.
+    pub npc_spawns: Vec<NpcSpawn>,
+    pub npc_gone: Vec<u32>,
     remote_gone: Vec<u32>,
     remote_moves: Vec<(u32, Vec3, f32, bool)>,
     /// What this player wears, as the inventory names it: (slots, item template).
     local_worn: Option<Vec<(Vec<i8>, String)>>,
     /// Another player re-dressed (RemotePlayerInfo): actor, skins, armament.
     remote_redress: Vec<(u32, Vec<(u8, Vec<String>)>, i8)>,
+}
+
+/// One NewNPCCommand: the template, the level Guid (hex) and where.
+pub struct NpcSpawn {
+    pub actor: u32,
+    pub template: String,
+    pub guid: String,
+    pub position: Vec3,
+    pub visible: bool,
 }
 
 /// Another player, drawn from NewRemotePlayer and moved by their MoveCommands.
@@ -182,6 +196,8 @@ fn connect(world: &mut World) {
         remote_moves: Vec::new(),
         local_worn: None,
         remote_redress: Vec::new(),
+        npc_spawns: Vec::new(),
+        npc_gone: Vec::new(),
     });
 }
 
@@ -324,10 +340,13 @@ fn on_command(net: &mut Net, command: ServerCommand, actor: Option<u32>) {
                 // The client tracks its own armament from the inventory; 0 is what
                 // the server sends (dsor/newplayer.py DEFAULT_ARMAMENT).
                 armament: p.rank.max(0),
+                look: None,
             };
             info!("I am {} ({}), actor {:?}, at {:?}", p.name, desc.animation_set(), actor, p.position);
             net.local_actor = actor;
-            net.pending_local = Some((desc, Vec3::from(p.position), p.heading));
+            // The third leading bool is the admin byte (OverheadAdminColor name).
+            let admin = p.leading_flags[2];
+            net.pending_local = Some((desc, Vec3::from(p.position), p.heading, p.name.clone(), admin));
         }
         // The real client asks about every actor the vicinity names
         // (session-walk4: a burst of 8b/34 after each 0x85/125).
@@ -343,6 +362,7 @@ fn on_command(net: &mut Net, command: ServerCommand, actor: Option<u32>) {
             for a in v.actors {
                 net.requested.remove(&a);
                 net.remote_gone.push(a);
+                net.npc_gone.push(a);
             }
         }
         ServerCommand::NewRemotePlayer(p) => {
@@ -356,9 +376,22 @@ fn on_command(net: &mut Net, command: ServerCommand, actor: Option<u32>) {
                 variation: p.parts[5],
                 equipment: p.equipment.iter().map(|w| (w.slot, w.skin_parts.clone())).collect(),
                 armament: p.armament.max(0),
+                look: None,
             };
             info!("{} ({}) is here, actor {actor:#x}, {} worn slot(s)", p.name, desc.animation_set(), desc.equipment.len());
-            net.remote_spawns.push((actor, desc, Vec3::from(p.position), p.heading, p.name));
+            net.remote_spawns.push((actor, desc, Vec3::from(p.position), p.heading, p.name, p.flags[2]));
+        }
+        ServerCommand::NewNpc(n) => {
+            let Some(actor) = actor else { return };
+            let guid: String = n.guid.iter().map(|b| format!("{b:02X}")).collect();
+            debug!("npc {} ({guid}) actor {actor:#x} at {:?}", n.name, n.position);
+            net.npc_spawns.push(NpcSpawn {
+                actor,
+                template: n.name,
+                guid,
+                position: Vec3::from(n.position),
+                visible: n.visible,
+            });
         }
         ServerCommand::InventoryInfo(inv) => {
             let worn = inv
@@ -411,7 +444,7 @@ fn apply_remotes(
             }
         }
     }
-    for (actor, desc, at, heading, name) in std::mem::take(&mut net.remote_spawns) {
+    for (actor, desc, at, heading, name, admin) in std::mem::take(&mut net.remote_spawns) {
         for (e, r) in &remotes {
             if r.actor == actor {
                 commands.entity(e).despawn();
@@ -419,7 +452,10 @@ fn apply_remotes(
         }
         let at = mesh.and_then(|m| m.nearest(at, 4.0)).unwrap_or(at);
         let e = spawn_character(&mut commands, desc, Transform::from_translation(at).with_rotation(Quat::from_rotation_y(heading)));
-        commands.entity(e).insert(RemotePlayer { actor, name, target: at, facing: heading, still_for: 1.0 });
+        commands.entity(e).insert((
+            Nameplate::player(name.clone(), admin),
+            RemotePlayer { actor, name, target: at, facing: heading, still_for: 1.0 },
+        ));
     }
     for (actor, at, facing, _moving) in std::mem::take(&mut net.remote_moves) {
         for (_, mut r) in &mut remotes {
@@ -466,7 +502,7 @@ fn spawn_local(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    let Some((desc, at, heading)) = net.pending_local.take() else { return };
+    let Some((desc, at, heading, name, admin)) = net.pending_local.take() else { return };
     for e in &existing {
         commands.entity(e).despawn();
     }
@@ -482,6 +518,7 @@ fn spawn_local(
             .id();
         commands.entity(entity).add_child(marker);
     }
+    commands.entity(entity).insert(Nameplate::player(name, admin));
     commands.entity(entity).insert(LocalPlayer {
         actor: net.local_actor.unwrap_or(0),
         target: None,

@@ -116,6 +116,42 @@ pub struct CharacterDesc {
     /// ArmamentState: 0 empty, 1/2 one-hand small (+off hand), 3/4 one-hand large
     /// (+off hand), 5 two-hand.
     pub armament: i8,
+    /// An NPC: its outfit replaces class, gender and equipment (crate::npc).
+    pub look: Option<NpcLook>,
+}
+
+/// An NPC's fixed outfit: `_Template_NPC` Graphics, CharacterSet resolved through
+/// the skeleton's outfits.json, and AnimSet.
+#[derive(Clone, Debug, Default)]
+pub struct NpcLook {
+    /// "uniskel" or "uniskel_dwarf".
+    pub skeleton: String,
+    pub parts: Vec<String>,
+    pub anim_set: String,
+    /// The outfit's body shape (variations.json): (joint, translation, scale) for
+    /// every joint, or empty. SEE: apply_variations.
+    pub variation: Vec<(String, Vec3, Vec3)>,
+}
+
+/// A joint of a character with a body variation.
+///
+/// Nebula's joints do not pass their scale down: a joint's scale stretches its own
+/// vertices and where its children sit (their translation is multiplied by it),
+/// not the children themselves. Bevy's hierarchy would compound it, so the joint
+/// itself is left unscaled and its vertices are skinned to a child, `scaled`,
+/// carrying the scale. UNVERIFIED against the 2018 client: this is Nebula2's
+/// nCharJoint rule; the variation translation is used as the joint's bind
+/// translation (animation offsets from the bind pose are kept).
+#[derive(Component)]
+struct VariedJoint {
+    var_t: Vec3,
+    var_s: Vec3,
+    bind_t: Vec3,
+    parent: Option<Entity>,
+    scaled: Entity,
+    /// What the animation last wrote, and what this system then wrote.
+    raw: (Vec3, Vec3),
+    written: Option<(Vec3, Vec3)>,
 }
 
 impl CharacterDesc {
@@ -125,12 +161,19 @@ impl CharacterDesc {
     fn gender_name(&self) -> &'static str {
         if self.gender == 1 { "female" } else { "male" }
     }
-    fn skeleton(&self) -> &'static str {
-        if self.class == 3 { "uniskel_dwarf" } else { "uniskel" }
+    fn skeleton(&self) -> &str {
+        match &self.look {
+            Some(look) => &look.skeleton,
+            None if self.class == 3 => "uniskel_dwarf",
+            None => "uniskel",
+        }
     }
 
-    /// The animation set name, GamePlayer::GetAnimSet's rule.
+    /// The animation set name, GamePlayer::GetAnimSet's rule (an NPC's own AnimSet).
     pub fn animation_set(&self) -> String {
+        if let Some(look) = &self.look {
+            return look.anim_set.clone();
+        }
         let class = self.class_name();
         let suffix = if class == "ranger" {
             if self.armament >= 3 { "large_weapon" } else { "small_weapon" }
@@ -147,6 +190,9 @@ impl CharacterDesc {
 
     /// Every part to dress, resolved against the parts that exist.
     fn parts(&self, exists: &dyn Fn(&str) -> bool) -> Vec<String> {
+        if let Some(look) = &self.look {
+            return look.parts.iter().filter(|p| exists(p)).cloned().collect();
+        }
         let (class, gender) = (self.class_name(), self.gender_name());
         let mut out = Vec::new();
         for p in BODY_PARTS {
@@ -264,6 +310,10 @@ impl Plugin for CharacterPlugin {
             .register_asset_loader(PartListLoader)
             .add_systems(Startup, load_library)
             .add_systems(Update, (build_characters, keep_parts_bound, drive_animations))
+            .add_systems(
+                PostUpdate,
+                apply_variations.after(bevy::app::AnimationSystems).before(TransformSystems::Propagate),
+            )
             .add_observer(on_instance_ready);
     }
 }
@@ -308,7 +358,8 @@ fn build_characters(
         if character.built {
             continue;
         }
-        let skel = character.desc.skeleton();
+        let skel = character.desc.skeleton().to_owned();
+        let skel = skel.as_str();
         let Some(list) = library.parts.get(skel).and_then(|h| part_lists.get(h)) else { continue };
         let names: std::collections::HashSet<&str> = list.0.iter().map(String::as_str).collect();
         let parts = character.desc.parts(&|n| names.contains(n));
@@ -354,6 +405,7 @@ fn on_instance_ready(
     tables: Res<Assets<AnimTable>>,
     gltfs: Res<Assets<Gltf>>,
     mut graphs: ResMut<Assets<AnimationGraph>>,
+    joints: Query<(&Transform, Option<&ChildOf>)>,
 ) {
     let entity = ready.entity;
     if let Ok(SkeletonOf(owner, generation)) = skeletons.get(entity) {
@@ -393,6 +445,31 @@ fn on_instance_ready(
             } else {
                 warn!("no animation set {set} (or its skeleton is not loaded yet)");
             }
+        }
+        let variation = character.desc.look.as_ref().map(|l| l.variation.clone()).unwrap_or_default();
+        if !variation.is_empty() {
+            let shape: HashMap<&str, (Vec3, Vec3)> = variation.iter().map(|(n, t, s)| (n.as_str(), (*t, *s))).collect();
+            let varied: HashMap<Entity, &str> =
+                bones.iter().filter(|(n, _)| shape.contains_key(n.as_str())).map(|(n, e)| (*e, n.as_str())).collect();
+            let mut scaled_bones = HashMap::new();
+            for (&joint, &name) in &varied {
+                let Ok((tf, parent)) = joints.get(joint) else { continue };
+                let (var_t, var_s) = shape[name];
+                let scaled = commands
+                    .spawn((Name::new(format!("{name}#scaled")), VariedChild, Transform::from_scale(var_s), ChildOf(joint)))
+                    .id();
+                commands.entity(joint).insert(VariedJoint {
+                    var_t,
+                    var_s,
+                    bind_t: tf.translation,
+                    parent: parent.map(|p| p.parent()).filter(|p| varied.contains_key(p)),
+                    scaled,
+                    raw: (tf.translation, tf.scale),
+                    written: None,
+                });
+                scaled_bones.insert(name.to_owned(), scaled);
+            }
+            bones.extend(scaled_bones);
         }
         for part in std::mem::take(&mut character.pending_parts) {
             rebind(&mut commands, part, &bones, &children, &names, &skinned);
@@ -492,6 +569,37 @@ fn keep_parts_bound(
         }
     }
 }
+
+/// After the animation pose, before transforms propagate: every varied joint
+/// unscaled, its translation stretched by its parent's scale, its scale on its
+/// `scaled` child. SEE: VariedJoint.
+fn apply_variations(
+    mut joints: Query<(Entity, &mut Transform, &mut VariedJoint), Without<VariedChild>>,
+    mut scaled: Query<&mut Transform, With<VariedChild>>,
+) {
+    let mut scale: HashMap<Entity, Vec3> = HashMap::new();
+    for (e, tf, mut j) in &mut joints {
+        // A joint the animation did not write this frame still holds our output.
+        if j.written != Some((tf.translation, tf.scale)) {
+            j.raw = (tf.translation, tf.scale);
+        }
+        scale.insert(e, j.var_s * j.raw.1);
+    }
+    for (e, mut tf, mut j) in &mut joints {
+        let parent_scale = j.parent.and_then(|p| scale.get(&p)).copied().unwrap_or(Vec3::ONE);
+        let t = (j.raw.0 + j.var_t - j.bind_t) * parent_scale;
+        tf.translation = t;
+        tf.scale = Vec3::ONE;
+        j.written = Some((t, Vec3::ONE));
+        if let Ok(mut s) = scaled.get_mut(j.scaled) {
+            s.scale = scale[&e];
+        }
+    }
+}
+
+/// The scaled child of a varied joint.
+#[derive(Component)]
+struct VariedChild;
 
 fn drive_animations(
     mut characters: Query<&mut CharacterAnim>,

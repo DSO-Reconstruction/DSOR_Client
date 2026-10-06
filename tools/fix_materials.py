@@ -197,3 +197,40 @@ if "--n3" in sys.argv:
             if changed and not dry:
                 write_glb(path, doc, rest)
     print(dstats)
+
+# -- character vertex colours ---------------------------------------------------
+# The character and monster shaders read COLOR_0 as data (female_head carries
+# (0.2, 0.3, 0.0) on every vertex), not as a tint; a stock PBR material multiplies
+# it into the base colour and every skin came out dark green. The attribute is
+# dropped from those primitives (the buffer is left as is).
+# Usage: fix_materials.py <assets> --character-colors
+DATA_COLOUR_SHADERS = {"shd:character", "shd:characterfalloff", "shd:monster", "shd:monsterexp"}
+if "--character-colors" in sys.argv:
+    cstats = {"primitives": 0, "files": 0}
+    for root, _dirs, files in os.walk(assets):
+        if "/textures" in root:
+            continue
+        for name in files:
+            if not name.endswith(".glb"):
+                continue
+            path = os.path.join(root, name)
+            try:
+                doc, rest = read_glb(path)
+            except Exception:
+                continue
+            mats = doc.get("materials", [])
+            changed = False
+            for mesh in doc.get("meshes", []):
+                for prim in mesh.get("primitives", []):
+                    m = prim.get("material")
+                    if m is None or "COLOR_0" not in prim.get("attributes", {}):
+                        continue
+                    if mats[m].get("extras", {}).get("nebula_shader") in DATA_COLOUR_SHADERS:
+                        del prim["attributes"]["COLOR_0"]
+                        cstats["primitives"] += 1
+                        changed = True
+            if changed:
+                cstats["files"] += 1
+                if not dry:
+                    write_glb(path, doc, rest)
+    print(cstats)

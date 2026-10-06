@@ -13,7 +13,9 @@ mod hud;
 mod map;
 mod materials;
 mod nav;
+mod nameplate;
 mod net;
+mod npc;
 mod particles;
 
 use bevy::camera_controller::free_camera::{FreeCamera, FreeCameraPlugin};
@@ -37,6 +39,8 @@ struct Options {
     /// Camera position and look-at target, game frame.
     cam: Option<([f32; 3], [f32; 3])>,
     shadows: bool,
+    /// Map viewer: place every NPC the level has.
+    npcs: bool,
     /// Demo: spawn a dressed character (class, gender) at the map centre.
     character: Option<(u8, u8)>,
     /// Demo: the animation state to show it in.
@@ -52,7 +56,7 @@ fn parse_cam(s: &str) -> Option<([f32; 3], [f32; 3])> {
 
 #[cfg(not(target_arch = "wasm32"))]
 fn options() -> Options {
-    let mut o = Options { map: DEFAULT_MAP.into(), screenshot: None, cam: None, shadows: true, character: None, anim: None, net: None };
+    let mut o = Options { map: DEFAULT_MAP.into(), screenshot: None, cam: None, shadows: true, npcs: false, character: None, anim: None, net: None };
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -60,6 +64,7 @@ fn options() -> Options {
             "--screenshot-to" => o.screenshot = args.next(),
             "--cam" => o.cam = args.next().as_deref().and_then(parse_cam),
             "--no-shadows" => o.shadows = false,
+            "--npcs" => o.npcs = true,
             "--character" => {
                 let class = args.next().and_then(|c| c.parse().ok()).unwrap_or(0);
                 let gender = args.next().and_then(|g| g.parse().ok()).unwrap_or(0);
@@ -100,7 +105,7 @@ fn options() -> Options {
 
 #[cfg(target_arch = "wasm32")]
 fn options() -> Options {
-    let mut o = Options { map: DEFAULT_MAP.into(), screenshot: None, cam: None, shadows: true, character: None, anim: None, net: None };
+    let mut o = Options { map: DEFAULT_MAP.into(), screenshot: None, cam: None, shadows: true, npcs: false, character: None, anim: None, net: None };
     let search = web_sys::window()
         .and_then(|w| w.location().search().ok())
         .unwrap_or_default();
@@ -110,6 +115,7 @@ fn options() -> Options {
             "map" if !v.is_empty() => o.map = v.into(),
             "cam" => o.cam = parse_cam(&v.replace("%2C", ",")),
             "noshadows" => o.shadows = false,
+            "npcs" => o.npcs = true,
             "server" | "account" | "sid" | "relay" | "char" => {
                 let n = o.net.get_or_insert_with(|| net::NetConfig {
                     login: "127.0.0.1:2190".into(),
@@ -148,10 +154,29 @@ fn asset_root() -> String {
 }
 
 fn main() {
+    // CONTRACT: the IO pool is created here, before TaskPoolPlugin (which keeps an
+    //   existing pool), with a large stack. bevy_gltf's loader waits in a
+    //   TaskPool::scope, and a thread waiting there runs other queued loads on top
+    //   of its own stack: loads nest one inside another.
+    // FAILURE (2026-10-06): with Kingshill's NPCs (~100 part files requested at
+    //   once) "IO Task Pool has overflowed its stack" -- the core showed six nested
+    //   load_gltf frames. The stack is only reserved, not committed.
+    #[cfg(not(target_arch = "wasm32"))]
+    bevy::tasks::IoTaskPool::get_or_init(|| {
+        let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
+        bevy::tasks::TaskPoolBuilder::new()
+            .thread_name("IO Task Pool".into())
+            .num_threads((cores / 4).clamp(1, 4))
+            .stack_size(256 << 20)
+            .build()
+    });
     let opts = options();
     let mut app = App::new();
     if let Some(config) = &opts.net {
         app.insert_resource(config.clone());
+    }
+    if opts.npcs && opts.net.is_none() {
+        app.insert_resource(npc::OfflineNpcs::default());
     }
     app
         .add_plugins(
@@ -181,6 +206,8 @@ fn main() {
             materials::MaterialsPlugin,
             decals::DecalPlugin,
             particles::ParticlePlugin,
+            npc::NpcPlugin,
+            nameplate::NameplatePlugin,
             MapPlugin,
             character::CharacterPlugin,
             net::NetPlugin,
