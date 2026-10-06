@@ -472,8 +472,13 @@ fn on_instance_ready(
             }
             bones.extend(scaled_bones);
         }
-        for part in std::mem::take(&mut character.pending_parts) {
-            rebind(&mut commands, part, &bones, &children, &names, &skinned, &parents);
+        // Every part of this dressing, pending or already bound to a skeleton
+        // instance this one replaces.
+        character.pending_parts.clear();
+        for part in children.get(owner).into_iter().flatten() {
+            if parts.get(*part).is_ok_and(|p| p.1 == generation) {
+                rebind(&mut commands, *part, &bones, &children, &names, &skinned, &parents);
+            }
         }
         character.bones = Some(bones);
         return;
@@ -571,46 +576,47 @@ fn drop_own_skeleton(
 #[derive(Component)]
 struct JointNames(Vec<String>);
 
-/// Every frame: every part of every character is bound to its CURRENT skeleton.
+/// A skinned mesh that appears under a character after its skeleton is ready is
+/// bound to that skeleton.
 /// CONTRACT: a glTF scene can be instanced again (its textures finishing loading
 ///   re-spawns it), which recreates the part's entities with their own joints; a
 ///   one-time binding is then lost and the body stops following the character.
 /// FAILURE (2026-10-06): the player walked away from their own body.
+/// FAILURE (2026-10-06): this ran over every part of every character each frame,
+///   copying 69 joint names per part: 5.5 ms a frame with Kingshill's NPCs
+///   (bevy trace_chrome). It now only looks at skinned meshes just added.
 fn keep_parts_bound(
     mut commands: Commands,
-    characters: Query<(Entity, &Character)>,
-    children: Query<&Children>,
-    names: Query<&Name>,
-    skinned: Query<(&SkinnedMesh, Option<&JointNames>)>,
+    added: Query<(Entity, &SkinnedMesh, Option<&JointNames>), Added<SkinnedMesh>>,
+    characters: Query<&Character>,
     parents: Query<&ChildOf>,
+    names: Query<&Name>,
 ) {
-    for (root, character) in &characters {
+    for (e, skin, known) in &added {
+        let Some(owner) = parents.iter_ancestors(e).find(|a| characters.contains(*a)) else { continue };
+        let Ok(character) = characters.get(owner) else { continue };
+        // Not ready yet: on_instance_ready binds the parts once the skeleton is.
         let Some(bones) = &character.bones else { continue };
-        for e in children.iter_descendants(root) {
-            let Ok((skin, known)) = skinned.get(e) else { continue };
-            let joint_names: Vec<String> = match known {
-                Some(JointNames(n)) => n.clone(),
-                None => {
-                    let Some(n) = skin
-                        .joints
-                        .iter()
-                        .map(|j| names.get(*j).ok().map(|n| n.as_str().to_owned()))
-                        .collect::<Option<Vec<_>>>()
-                    else {
-                        continue;
-                    };
-                    commands.entity(e).insert(JointNames(n.clone()));
-                    n
-                }
-            };
-            let bound = joint_names
-                .iter()
-                .zip(skin.joints.iter())
-                .all(|(n, j)| bones.get(n.as_str()).is_none_or(|b| b == j));
-            if !bound {
-                bind(&mut commands, e, skin, &joint_names, bones, &parents);
-            }
+        let shared: std::collections::HashSet<Entity> = bones.values().copied().collect();
+        if skin.joints.iter().all(|j| shared.contains(j)) {
+            continue; // our own binding, re-inserted
         }
+        let joint_names: Vec<String> = match known {
+            Some(JointNames(n)) => n.clone(),
+            None => {
+                let Some(n) = skin
+                    .joints
+                    .iter()
+                    .map(|j| names.get(*j).ok().map(|n| n.as_str().to_owned()))
+                    .collect::<Option<Vec<_>>>()
+                else {
+                    continue;
+                };
+                commands.entity(e).insert(JointNames(n.clone()));
+                n
+            }
+        };
+        bind(&mut commands, e, skin, &joint_names, bones, &parents);
     }
 }
 
@@ -646,19 +652,26 @@ fn apply_variations(
 struct VariedChild;
 
 fn drive_animations(
-    mut characters: Query<(&mut CharacterAnim, &GlobalTransform)>,
+    mut characters: Query<(&mut CharacterAnim, &GlobalTransform, &InheritedVisibility)>,
     mut players: Query<(&mut AnimationPlayer, &mut AnimationTransitions)>,
     cameras: Query<&GlobalTransform, With<Camera3d>>,
 ) {
     let eye = cameras.iter().next().map(|c| c.translation());
-    for (mut anim, at) in &mut characters {
+    for (mut anim, at, shown) in &mut characters {
         let Some(player) = anim.player else { continue };
-        // Far characters: paused, not evaluated.
-        let far = eye.is_some_and(|e| e.distance(at.translation()) > ANIMATION_DISTANCE);
-        if let Ok((mut p, _)) = players.get_mut(player) {
-            if far != p.all_paused() {
-                if far { p.pause_all(); } else { p.resume_all(); }
+        // Hidden (culled) or far characters: stopped, so their joints are not
+        // evaluated at all -- a paused animation is still applied every frame
+        // (7 ms a frame for Kingshill's NPCs, bevy trace_chrome). Played again
+        // from their state once back in view.
+        let far = !shown.get() || eye.is_some_and(|e| e.distance(at.translation()) > ANIMATION_DISTANCE);
+        if far {
+            if anim.applied.is_some() {
+                if let Ok((mut p, _)) = players.get_mut(player) {
+                    p.stop_all();
+                }
+                anim.applied = None;
             }
+            continue;
         }
         let wanted = (anim.state.clone(), anim.speed);
         if anim.applied.as_ref() == Some(&wanted) {
