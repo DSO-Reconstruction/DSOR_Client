@@ -107,6 +107,9 @@ pub struct Emitter {
     randomize_rotation: bool,
     start_delay: f32,
     additive: bool,
+    /// The emitter node's MatEmissiveIntensity: the particle shader draws
+    /// texture x colour x (1 + it) (shaders_sm30 "particle" ps_3_0, c3).
+    emissive: f32,
 }
 
 impl Emitter {
@@ -140,6 +143,7 @@ impl Emitter {
             randomize_rotation: num("randomize_rotation") != 0.0,
             start_delay: num("start_delay"),
             additive: v.get("additive").and_then(|x| x.as_bool()).unwrap_or(false),
+            emissive: 0.0,
         })
     }
 }
@@ -159,7 +163,12 @@ impl GltfExtensionHandler for NodeEmitters {
             return;
         }
         let Ok(v) = serde_json::from_str::<serde_json::Value>(raw) else { return };
-        if let Some(e) = v.get("dsor_emitter").and_then(Emitter::from_json) {
+        if let Some(mut e) = v.get("dsor_emitter").and_then(Emitter::from_json) {
+            e.emissive = v
+                .get("dsor_shader")
+                .and_then(|s| s.get("MatEmissiveIntensity"))
+                .and_then(|i| i.as_f64())
+                .unwrap_or(0.0) as f32;
             entity.insert(e);
         }
     }
@@ -433,10 +442,11 @@ fn draw(
             let (sin, cos) = p.rot.sin_cos();
             let r = (r0 * cos + u0 * sin) * half;
             let u = (u0 * cos - r0 * sin) * half;
+            let glow = 1.0 + e.emissive;
             let c = [
-                sample(&e.envelopes[RED], a),
-                sample(&e.envelopes[GREEN], a),
-                sample(&e.envelopes[BLUE], a),
+                sample(&e.envelopes[RED], a) * glow,
+                sample(&e.envelopes[GREEN], a) * glow,
+                sample(&e.envelopes[BLUE], a) * glow,
                 sample(&e.envelopes[ALPHA], a).clamp(0.0, 1.0),
             ];
             let (v0, v1) = (p.frame as f32 / tile, (p.frame + 1) as f32 / tile);

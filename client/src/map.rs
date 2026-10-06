@@ -435,7 +435,10 @@ fn flat_surfaces(
             } else {
                 label
             };
-            let suffix = if additive { "dsor" } else { "std" };
+            // Ours (crate::materials) for glows and for lit surfaces with an emissive
+            // map, whose emission is scaled to the node's intensity.
+            let emissive = materials.get(gm).is_some_and(|m| m.emissive_texture.is_some());
+            let suffix = if additive || emissive { "dsor" } else { "std" };
             let material = asset_server.load::<StandardMaterial>(path.clone().with_label(format!("{label}/{suffix}")));
             let opaque = materials.get(gm).is_some_and(|m| matches!(m.alpha_mode, AlphaMode::Opaque | AlphaMode::Mask(_)));
             let size = mesh_assets

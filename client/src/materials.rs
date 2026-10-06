@@ -102,6 +102,9 @@ pub struct ShaderAnim {
     tracks: Vec<VarTrack>,
     /// Seconds since the model was spawned.
     t: f32,
+    /// The node's static MatEmissiveIntensity, already in its material: the
+    /// animated value replaces it.
+    base_emissive: f32,
 }
 
 #[derive(Reflect, Default, Clone)]
@@ -147,7 +150,8 @@ fn animate_shader_vars(
     for (mut anim, children) in &mut nodes {
         anim.t += time.delta_secs();
         let t = anim.t;
-        let glow = anim.tracks.iter().find(|k| k.var == "MatEmissiveIntensity").map(|k| k.at(t));
+        let base = if anim.base_emissive.abs() > 1e-3 { anim.base_emissive } else { 1.0 };
+        let glow = anim.tracks.iter().find(|k| k.var == "MatEmissiveIntensity").map(|k| k.at(t) / base);
         let fade = anim.tracks.iter().find(|k| k.var.starts_with("Intensity")).map(|k| k.at(t));
         if glow.is_none() && fade.is_none() {
             continue;
@@ -194,11 +198,37 @@ struct NebulaStates {
     /// This file's textures by glTF index (external images load by path, not as
     /// labelled sub-assets, so on_texture is the only way to their handles).
     textures: Vec<Option<Handle<Image>>>,
+    /// Node name -> its n3 MatEmissiveIntensity (extras.dsor_shader).
+    emissive: std::collections::HashMap<String, f32>,
+    /// Whether lit surfaces of this file get their emission scaled (effects and
+    /// the map; characters keep theirs).
+    scale_lit: bool,
+    /// Material labels given a material of ours ("<label>/dsor").
+    ours: std::collections::HashSet<String>,
+}
+
+/// A node's n3 MatEmissiveIntensity, from extras.dsor_shader.
+fn node_emissive(node: &::gltf::Node) -> Option<f32> {
+    let raw = node.extras().as_ref()?.get();
+    if !raw.contains("MatEmissiveIntensity") {
+        return None;
+    }
+    let v: serde_json::Value = serde_json::from_str(raw).ok()?;
+    Some(v.get("dsor_shader")?.get("MatEmissiveIntensity")?.as_f64()? as f32)
 }
 
 impl GltfExtensionHandler for NebulaStates {
     fn dyn_clone(&self) -> Box<dyn ErasedGltfExtensionHandler> {
         Box::new(self.clone())
+    }
+
+    fn on_root(&mut self, load_context: &mut LoadContext<'_>, gltf: &::gltf::Gltf, _: &bevy::gltf::GltfLoaderSettings) {
+        self.scale_lit = !load_context.path().path().to_string_lossy().starts_with("characters");
+        for node in gltf.nodes() {
+            if let (Some(name), Some(i)) = (node.name(), node_emissive(&node)) {
+                self.emissive.insert(name.to_owned(), i);
+            }
+        }
     }
 
     fn on_gltf_node(&mut self, _: &mut LoadContext<'_>, gltf_node: &::gltf::Node, entity: &mut EntityWorldMut) {
@@ -224,7 +254,8 @@ impl GltfExtensionHandler for NebulaStates {
                 })
             })
             .collect();
-        entity.insert(ShaderAnim { tracks, t: 0.0 });
+        let base_emissive = node_emissive(gltf_node).unwrap_or(1.0);
+        entity.insert(ShaderAnim { tracks, t: 0.0, base_emissive });
     }
 
     fn on_texture(&mut self, gltf_texture: &gltf::Texture, texture: Handle<Image>) {
@@ -243,21 +274,41 @@ impl GltfExtensionHandler for NebulaStates {
         material_asset: &GltfMaterial,
         material_label: &str,
     ) {
-        let Some(state) = state_of(gltf_material) else { return };
+        // The material's node: DSO_Godot names materials "<node>_<shader>".
+        let intensity = gltf_material
+            .name()
+            .and_then(|n| n.rsplit_once('_'))
+            .and_then(|(node, _)| self.emissive.get(node).copied());
+        let state = state_of(gltf_material);
         let mut m = standard_material(material_asset);
         match state {
-            State::Decal => {
+            Some(State::Decal) => {
                 m.alpha_mode = AlphaMode::Blend;
                 m.depth_bias = 50.0;
             }
-            State::Additive => {
+            Some(State::Additive) => {
                 m.alpha_mode = AlphaMode::Add;
                 m.unlit = true;
                 m.cull_mode = None;
+                // The glow is EmsvMap0 x MatEmissiveIntensity (the fireball's big
+                // halo is 0.1: a faint red haze, not a white disc).
+                if let Some(i) = intensity {
+                    let c = m.base_color.to_linear();
+                    m.base_color = LinearRgba::new(c.red * i, c.green * i, c.blue * i, c.alpha).into();
+                }
             }
-            State::Hidden => return,
+            Some(State::Hidden) => return,
+            None => {
+                // A lit surface with an emissive map, outside the characters: its
+                // emission at the node's intensity, in Bevy's luminance units.
+                if !(self.scale_lit && material_asset.emissive_texture.is_some()) {
+                    return;
+                }
+                m.emissive = m.emissive * (intensity.unwrap_or(1.0) * EMISSIVE_NITS);
+            }
         }
         load_context.add_labeled_asset(dsor_label(material_label), m);
+        self.ours.insert(material_label.to_owned());
     }
 
     fn on_spawn_mesh_and_material(
@@ -289,50 +340,22 @@ impl GltfExtensionHandler for NebulaStates {
                 let handle = load_context.get_label_handle::<StandardMaterial>(dsor_label(material_label));
                 entity.insert(MeshMaterial3d(handle));
             }
-            None => {}
+            None => {
+                if self.ours.contains(material_label) {
+                    let handle = load_context.get_label_handle::<StandardMaterial>(dsor_label(material_label));
+                    entity.insert(MeshMaterial3d(handle));
+                }
+            }
         }
     }
 }
 
-/// Nebula adds its emissive map (EmsvMap0) to the lit colour at display brightness;
-/// Bevy's emissive is a luminance in nits, and its default exposure (EV100 9.7)
-/// shows ~1000 nits as full white. glTF carries the map with factor 1.0, which in
-/// Bevy is nearly black: lit windows, lava cracks and the fireball's burning rock
-/// all came out dull ("le fx est pas affiche pareil").
-/// UNVERIFIED: Nebula's emissive intensity is 1.0 for these materials.
-const EMISSIVE_NITS: f32 = 400.0;
-
-/// Every effect material with an emissive map, once, as it is added.
-fn scale_emissive(
-    mut events: MessageReader<AssetEvent<StandardMaterial>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-    assets: Res<AssetServer>,
-    mut done: Local<std::collections::HashSet<AssetId<StandardMaterial>>>,
-) {
-    let added: Vec<AssetId<StandardMaterial>> = events
-        .read()
-        .filter_map(|e| match e {
-            AssetEvent::Added { id } => Some(*id),
-            _ => None,
-        })
-        .collect();
-    for id in added {
-        if !done.insert(id) {
-            continue;
-        }
-        // Effects only: a character's or the map's emissive maps keep their look
-        // (scaled, a mage's purple orb came out white -- "t'as change la couleur de
-        // ma baguette").
-        let effect = assets.get_path(id).is_some_and(|p| p.path().to_string_lossy().starts_with("effects"));
-        if !effect {
-            continue;
-        }
-        let Some(mut m) = materials.get_mut(id) else { continue };
-        if m.emissive_texture.is_some() && !m.unlit {
-            m.emissive = m.emissive * EMISSIVE_NITS;
-        }
-    }
-}
+/// Nebula adds EmsvMap0 x MatEmissiveIntensity to the lit colour at display
+/// brightness; Bevy's emissive is a luminance, and its default exposure (EV100
+/// 9.7: 1 / (1.2 x 2^9.7) ~ 1/1000) shows ~1000 nits as 1.0.
+/// EVIDENCE: shaders_sm30 "particle" ps_3_0: colour x (1 + MatEmissiveIntensity);
+///   the intensities themselves are the n3 nodes' (tools/embed_animators.py).
+const EMISSIVE_NITS: f32 = 1000.0;
 
 pub struct MaterialsPlugin;
 
@@ -341,7 +364,6 @@ impl Plugin for MaterialsPlugin {
         // Scene components must be reflected to be instanced.
         app.register_type::<DecalVolume>().register_type::<DecalTiling>();
         app.register_type::<ShaderAnim>().register_type::<VarTrack>();
-        app.add_systems(PostUpdate, scale_emissive);
         app.add_systems(Update, animate_shader_vars);
         // After bevy_pbr's own handler, so the material it set is replaced.
         let handlers = app.world().resource::<GltfExtensionHandlers>().0.clone();

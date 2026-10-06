@@ -46,8 +46,8 @@ fn update_hud(
     let vitals = net
         .as_ref()
         .map(|n| match (n.health, n.resource) {
-            (Some(h), Some(r)) => format!("\nvie {h:.0}, ressource {r:.1}"),
-            _ => "\nvie/ressource: pas encore recues du serveur".to_owned(),
+            (Some(h), Some(r)) => format!("\nhealth {h:.0}, resource {r:.1}"),
+            _ => "\nhealth/resource: not received from the server yet".to_owned(),
         })
         .unwrap_or_default();
     // Surfaces drawn: what the renderer prepares, one by one, on the CPU. Counted
@@ -76,7 +76,7 @@ fn update_hud(
         None => ("-", 0, 0, 0),
     };
     let line = format!(
-        "{fps:.0} FPS ({ms:.2} ms)\nentities {entities:.0}, surfaces drawn {drawn}/{total}{vitals}\nmap {name}: {placed} placements, models {loaded}/{models}\nWASD/QE move, hold right mouse to look, shift run, wheel speed"
+        "{fps:.0} FPS ({ms:.2} ms)\nentities {entities:.0}, surfaces drawn {drawn}/{total}{vitals}\nmap {name}: {placed} placements, models {loaded}/{models}"
     );
     if let Ok(mut t) = text.single_mut() {
         t.0 = line;

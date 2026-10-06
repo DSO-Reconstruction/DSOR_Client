@@ -16,6 +16,12 @@ n3 layout of one animated variable (FourCCs are stored reversed):
 EVIDENCE: 6 351 of 6 660 key lists in the 2018 models read with strictly ordered
   times this way (mage_fireball_charm bullet_glow1: 1 -> 0.1 -> 1 -> 0 over 0.72 s).
 
+It also copies each node's static shader floats (n3 "TLFS": u16 len, name, f32),
+MatEmissiveIntensity above all, into extras.dsor_shader = {name: value}.
+EVIDENCE: the particle pixel shader (shaders_sm30, effect "particle", ps_3_0 at
+  +22592, disassembled): colour = DiffMap0 x particle colour x (1 + c3), c3 being
+  MatEmissiveIntensity -- particles were drawn without it, dim on every skill.
+
 Each glb node named by the path's last component (its parent's name breaking ties)
 gets extras.dsor_anim = [{"var", "loop", "keys": [[t, v], ...]}]; the client
 applies them (client/src/materials.rs, ShaderAnim).
@@ -31,6 +37,38 @@ models, assets = sys.argv[1], sys.argv[2]
 def string(d, i):
     n = struct.unpack_from("<H", d, i)[0]
     return d[i + 2:i + 2 + n].decode("latin1"), i + 2 + n
+
+
+def shader_floats(d):
+    """[(node name, {var: value})] in file order: each node's TLFS params."""
+    out = []
+    at = 0
+    while True:
+        at = d.find(b"DNM>", at)
+        if at < 0:
+            return out
+        try:
+            name, i = string(d, at + 8)
+        except (struct.error, UnicodeDecodeError):
+            at += 4
+            continue
+        end = d.find(b"DNM", i)
+        end = len(d) if end < 0 else end
+        params = {}
+        j = i
+        while True:
+            j = d.find(b"TLFS", j, end)
+            if j < 0:
+                break
+            try:
+                var, k = string(d, j + 4)
+                params[var] = round(struct.unpack_from("<f", d, k)[0], 4)
+            except (struct.error, UnicodeDecodeError):
+                pass
+            j += 4
+        if params:
+            out.append((name, params))
+        at = i
 
 
 def animators(d):
@@ -80,8 +118,10 @@ for root, _dirs, files in os.walk(models):
         glb = os.path.join(assets, rel + ".glb")
         if not os.path.exists(glb):
             continue
-        anims = animators(open(n3, "rb").read())
-        if not anims:
+        raw = open(n3, "rb").read()
+        anims = animators(raw)
+        floats = shader_floats(raw)
+        if not anims and not floats:
             continue
         try:
             doc, rest = read_glb(glb)
@@ -94,6 +134,14 @@ for root, _dirs, files in os.walk(models):
                 parent[c] = i
         for nd in nodes:
             nd.get("extras", {}).pop("dsor_anim", None)
+            nd.get("extras", {}).pop("dsor_shader", None)
+        shaded = 0
+        for name, params in floats:
+            for nd in nodes:
+                if nd.get("name") == name:
+                    nd.setdefault("extras", {})["dsor_shader"] = params
+                    shaded += 1
+        stats["shader nodes"] = stats.get("shader nodes", 0) + shaded
         by_node = {}
         for a in anims:
             parts = a["path"].split("/")
@@ -110,7 +158,7 @@ for root, _dirs, files in os.walk(models):
         for i, lst in by_node.items():
             nodes[i].setdefault("extras", {})["dsor_anim"] = lst
             stats["animated nodes"] += 1
-        if by_node:
+        if by_node or shaded:
             write_glb(glb, doc, rest)
             stats["models"] += 1
 print(stats)
