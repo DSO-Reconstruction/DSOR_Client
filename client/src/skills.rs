@@ -37,8 +37,17 @@ use crate::net::{cursor_ground, now_ms, LocalPlayer, Net, RemotePlayer};
 
 /// The sequencer's frame rate.
 const FPS: f32 = 25.0;
-/// Bullets fly at chest height.
-const BULLET_HEIGHT: f32 = 1.2;
+/// A Nebula entity looks down its -Z; our character models look down +Z (players
+/// turn with from_rotation_y(atan2(dx, dz))). Everything a sequence places "on the
+/// entity" (effects, lights, bullet start offsets) is in the entity's frame.
+/// EVIDENCE: mage_fireball_bullet's StartOffset is (0.043, 1.49, -1.788): the hand,
+///   1.8 units AHEAD, on -Z; the skill command's aim is the facing less half a turn
+///   (dsor/combat.py); the NPCs' level matrices face -Z (crate::npc).
+/// FAILURE (2026-10-06): without it the fireball's trail streamed out in front of
+///   it and the cast effects sat behind the caster ("pas affiche au bon endroit").
+fn entity_rotation(facing: f32) -> Quat {
+    Quat::from_rotation_y(facing + std::f32::consts::PI)
+}
 
 #[derive(Deserialize, Debug, Clone)]
 pub struct BulletDef {
@@ -51,6 +60,8 @@ pub struct BulletDef {
     pub velocity: f32,
     pub lifetime: f32,
     pub radius: f32,
+    /// Where it leaves, in the caster's entity frame.
+    pub start: [f32; 3],
 }
 
 #[derive(Deserialize, Debug, Clone)]
@@ -289,14 +300,14 @@ fn perform(
         ("Ranged" | "RangedTargetPoint" | "RangedTarget", Some(b)) => {
             commands.spawn(Pending {
                 after: fire,
-                what: PendingKind::Bullet { from: at + Vec3::Y * BULLET_HEIGHT, dir, def: b.clone() },
+                what: PendingKind::Bullet { from: at + entity_rotation(facing) * Vec3::from(b.start), dir, def: b.clone() },
             });
         }
         ("Shifted", Some(b)) => {
             // A bolt falling on the aimed point (lightning strike, meteor).
             commands.spawn(Pending {
                 after: fire,
-                what: PendingKind::Sequence { name: b.loop_seq.clone(), at: Transform::from_translation(point) },
+                what: PendingKind::Sequence { name: b.loop_seq.clone(), at: Transform::from_translation(point).with_rotation(entity_rotation(facing)) },
             });
         }
         _ => {}
@@ -317,7 +328,7 @@ fn perform(
                 after,
                 what: PendingKind::Sequence {
                     name: skill.impact.clone(),
-                    at: Transform::from_translation(impact_at).with_rotation(Quat::from_rotation_y(facing)),
+                    at: Transform::from_translation(impact_at).with_rotation(entity_rotation(facing)),
                 },
             });
         }
@@ -453,7 +464,7 @@ fn run_pending(
                 let bullet = commands
                     .spawn((
                         Bullet { velocity: *dir * def.velocity, left: def.lifetime.max(0.05), death: def.death.clone() },
-                        Transform::from_translation(*from).with_rotation(Quat::from_rotation_y(dir.x.atan2(dir.z))),
+                        Transform::from_translation(*from).with_rotation(entity_rotation(dir.x.atan2(dir.z))),
                         Visibility::default(),
                     ))
                     .id();
@@ -540,6 +551,8 @@ fn play_sequences(
                         if let Some(Ok(mut a)) = p.actor.map(|a| anims.get_mut(a)) {
                             a.state = AnimState::Named(name.clone());
                             a.speed = *speed;
+                            // The same skill again restarts its animation.
+                            a.replay();
                         }
                     }
                     Track::Fx { graphics, joint, at, .. } => {
@@ -549,10 +562,15 @@ fn play_sequences(
                             p.actor.and_then(|a| characters.get(a).ok()).and_then(|c| c.bone(joint)).or(Some(p.anchor))
                         };
                         let path = format!("{graphics}.glb");
+                        // On a character (not a joint): into its entity frame.
+                        let mut place = track_transform(at);
+                        if joint.is_empty() && characters.contains(p.anchor) {
+                            place = Transform::from_rotation(entity_rotation(0.0)) * place;
+                        }
                         let mut fx = commands.spawn((
                             WorldAssetRoot(assets.load(GltfAssetLabel::Scene(0).from_asset(path.clone()))),
                             FxModel { gltf: assets.load(path), started: false },
-                            track_transform(at),
+                            place,
                             Visibility::default(),
                         ));
                         if let Some(parent) = parent.filter(|p| exists.contains(*p)) {
@@ -571,7 +589,11 @@ fn play_sequences(
                                     shadow_maps_enabled: false,
                                     ..default()
                                 },
-                                track_transform(at),
+                                if characters.contains(p.anchor) {
+                                    Transform::from_rotation(entity_rotation(0.0)) * track_transform(at)
+                                } else {
+                                    track_transform(at)
+                                },
                                 ChildOf(p.anchor),
                             ))
                             .id();

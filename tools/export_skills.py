@@ -227,6 +227,9 @@ for r in db.execute("select rowid, * from _Template_Skill order by rowid"):
             "velocity": b["Velocity"] or 0.0,
             "lifetime": b["LifeTime"] or 0.0,
             "radius": b["BulletRadius"] or 0.0,
+            # Where the bullet leaves, in the caster's entity frame (Nebula: -Z ahead):
+            # mage_fireball_bullet (0.043, 1.49, -1.788) -- the hand, 1.8 ahead.
+            "start": list(struct.unpack("<3f", b["StartOffset"][:12])) if b["StartOffset"] and len(b["StartOffset"]) >= 12 else [0.0, 1.2, 0.0],
         },
     }
 

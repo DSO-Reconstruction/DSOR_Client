@@ -265,6 +265,12 @@ impl Default for CharacterAnim {
 }
 
 impl CharacterAnim {
+    /// Play the current state again from its start, even if it is already playing
+    /// (a skill used twice in a row).
+    pub fn replay(&mut self) {
+        self.applied = None;
+    }
+
     /// Whether the character's skeleton and animations are ready.
     pub fn is_ready(&self) -> bool {
         self.player.is_some()

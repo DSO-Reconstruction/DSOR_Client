@@ -171,12 +171,45 @@ impl GltfExtensionHandler for NebulaStates {
     }
 }
 
+/// Nebula adds its emissive map (EmsvMap0) to the lit colour at display brightness;
+/// Bevy's emissive is a luminance in nits, and its default exposure (EV100 9.7)
+/// shows ~1000 nits as full white. glTF carries the map with factor 1.0, which in
+/// Bevy is nearly black: lit windows, lava cracks and the fireball's burning rock
+/// all came out dull ("le fx est pas affiche pareil").
+/// UNVERIFIED: Nebula's emissive intensity is 1.0 for these materials.
+const EMISSIVE_NITS: f32 = 400.0;
+
+/// Every material with an emissive map, once, as it is added.
+fn scale_emissive(
+    mut events: MessageReader<AssetEvent<StandardMaterial>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut done: Local<std::collections::HashSet<AssetId<StandardMaterial>>>,
+) {
+    let added: Vec<AssetId<StandardMaterial>> = events
+        .read()
+        .filter_map(|e| match e {
+            AssetEvent::Added { id } => Some(*id),
+            _ => None,
+        })
+        .collect();
+    for id in added {
+        if !done.insert(id) {
+            continue;
+        }
+        let Some(mut m) = materials.get_mut(id) else { continue };
+        if m.emissive_texture.is_some() && !m.unlit {
+            m.emissive = m.emissive * EMISSIVE_NITS;
+        }
+    }
+}
+
 pub struct MaterialsPlugin;
 
 impl Plugin for MaterialsPlugin {
     fn build(&self, app: &mut App) {
         // Scene components must be reflected to be instanced.
         app.register_type::<DecalVolume>().register_type::<DecalTiling>();
+        app.add_systems(PostUpdate, scale_emissive);
         // After bevy_pbr's own handler, so the material it set is replaced.
         let handlers = app.world().resource::<GltfExtensionHandlers>().0.clone();
         #[cfg(target_family = "wasm")]
