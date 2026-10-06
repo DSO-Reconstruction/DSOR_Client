@@ -148,6 +148,7 @@ fn project_decals(
     mut settled: Local<u32>,
     parents: Query<&ChildOf>,
     map_roots: Query<(), With<crate::map::MapRoot>>,
+    mut plane: Local<Option<Handle<Mesh>>>,
 ) {
     // Only the map's own decals are projected here, once. A skill effect's decal box
     // (a scorch under a fireball impact) must not rerun the whole projection, which
@@ -158,7 +159,10 @@ fn project_decals(
         if parents.iter_ancestors(e).any(|a| map_roots.contains(a)) {
             map_pending += 1;
         } else {
-            commands.entity(e).insert(Projected);
+            // An effect's decal (a scorch where a fireball was cast): drawn flat on
+            // its box's mid plane with the box's own merged colour+mask texture.
+            // UNVERIFIED: not projected onto uneven ground like the map's.
+            commands.entity(e).insert((Projected, Mesh3d(plane.get_or_insert_with(|| meshes.add(Plane3d::new(Vec3::Y, Vec2::splat(0.5)))).clone()), Visibility::Inherited));
         }
     }
     if map_pending == 0 {

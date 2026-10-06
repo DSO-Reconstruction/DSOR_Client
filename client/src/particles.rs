@@ -298,12 +298,17 @@ fn start_emitters(
     }
 }
 
-fn step(e: &Emitter, s: &mut EmitterState, at: &GlobalTransform, dt: f32) {
+/// An emitter that stops emitting; its particles live out their lives (a bullet's
+/// trail when the bullet dies).
+#[derive(Component)]
+pub struct StopEmitting;
+
+fn step(e: &Emitter, s: &mut EmitterState, at: &GlobalTransform, dt: f32, emitting: bool) {
     let env = &e.envelopes;
     // Emission, sampled over the emitter's duration.
     s.time += dt;
     let t = s.time - e.start_delay;
-    if t >= 0.0 && (e.looping || t <= e.duration) {
+    if emitting && t >= 0.0 && (e.looping || t <= e.duration) {
         let rel = if e.looping { (t % e.duration) / e.duration } else { t / e.duration };
         s.pending += sample(&env[FREQUENCY], rel).max(0.0) * dt;
         let rot = at.rotation();
@@ -357,12 +362,12 @@ fn step(e: &Emitter, s: &mut EmitterState, at: &GlobalTransform, dt: f32) {
 fn simulate(
     time: Res<Time>,
     cameras: Query<&GlobalTransform, With<Camera3d>>,
-    mut emitters: Query<(&Emitter, &mut EmitterState, &GlobalTransform, &InheritedVisibility)>,
+    mut emitters: Query<(&Emitter, &mut EmitterState, &GlobalTransform, &InheritedVisibility, Has<StopEmitting>)>,
 ) {
     let Ok(cam) = cameras.single() else { return };
     let eye = cam.translation();
     let dt = time.delta_secs().min(MAX_DT);
-    for (e, mut s, at, shown) in &mut emitters {
+    for (e, mut s, at, shown, stopped) in &mut emitters {
         // Culled with its map cell: no simulation either.
         let near = shown.get() && at.translation().distance_squared(eye) <= e.activity_distance * e.activity_distance;
         if !near {
@@ -378,11 +383,11 @@ fn simulate(
             s.time = 0.0;
             let mut warm = e.precalc_time.min(10.0);
             while warm > 0.0 {
-                step(e, &mut s, at, PRECALC_STEP);
+                step(e, &mut s, at, PRECALC_STEP, true);
                 warm -= PRECALC_STEP;
             }
         }
-        step(e, &mut s, at, dt);
+        step(e, &mut s, at, dt, !stopped);
     }
 }
 

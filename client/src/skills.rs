@@ -192,7 +192,13 @@ struct Bullet {
     velocity: Vec3,
     left: f32,
     death: String,
+    /// Once it has hit or run out: seconds its particles still have to fade.
+    dying: Option<f32>,
 }
+
+/// How long a dead bullet's trail particles live on (the longest particle
+/// lifetime of the player skills' bullets is under a second).
+const TRAIL_FADE: f32 = 1.0;
 
 /// Something to do a little later in a skill (a bullet leaving the hand, an impact).
 #[derive(Component)]
@@ -230,10 +236,11 @@ impl Plugin for SkillsPlugin {
             .register_asset_loader(SkillTableLoader)
             .register_asset_loader(SequenceTableLoader)
             .init_resource::<CameraShake>()
+            .init_resource::<TestCastClock>()
             .add_systems(Startup, load)
             .add_systems(
                 Update,
-                (index_skills, cast_input, remote_skills, test_cast, run_pending, fly_bullets, play_sequences, start_fx_animations, shake_camera)
+                (index_skills, cast_input, remote_skills, test_cast, run_pending, fly_bullets, play_sequences, start_fx_animations, shake_camera, test_shot, test_view)
                     .chain()
                     .after(crate::net::NetSystems),
             );
@@ -490,7 +497,7 @@ fn run_pending(
             PendingKind::Bullet { from, dir, def } => {
                 let bullet = commands
                     .spawn((
-                        Bullet { velocity: *dir * def.velocity, left: def.lifetime.max(0.05), death: def.death.clone() },
+                        Bullet { velocity: *dir * def.velocity, left: def.lifetime.max(0.05), death: def.death.clone(), dying: None },
                         Transform::from_translation(*from).with_rotation(entity_rotation(dir.x.atan2(dir.z))),
                         Visibility::default(),
                     ))
@@ -514,9 +521,23 @@ fn run_pending(
     }
 }
 
-fn fly_bullets(mut commands: Commands, time: Res<Time>, mut bullets: Query<(Entity, &mut Transform, &mut Bullet)>) {
+fn fly_bullets(
+    mut commands: Commands,
+    time: Res<Time>,
+    mut bullets: Query<(Entity, &mut Transform, &mut Bullet)>,
+    children: Query<&Children>,
+    shown_parts: Query<(), Or<(With<Mesh3d>, With<PointLight>)>>,
+    emitters: Query<(), With<crate::particles::Emitter>>,
+) {
     for (e, mut tf, mut b) in &mut bullets {
         let dt = time.delta_secs();
+        if let Some(left) = b.dying.as_mut() {
+            *left -= dt;
+            if *left <= 0.0 {
+                commands.entity(e).despawn();
+            }
+            continue;
+        }
         tf.translation += b.velocity * dt;
         b.left -= dt;
         if b.left <= 0.0 {
@@ -526,8 +547,17 @@ fn fly_bullets(mut commands: Commands, time: Res<Time>, mut bullets: Query<(Enti
                     what: PendingKind::Sequence { name: b.death.clone(), at: Transform::from_translation(tf.translation).with_rotation(tf.rotation) },
                 });
             }
-            // The bullet's loop sequence goes with it (play_sequences: anchor gone).
-            commands.entity(e).despawn();
+            // The ball and its light go; its trail stops growing and fades out
+            // instead of vanishing with it ("y'a plus la trainee").
+            for c in children.iter_descendants(e) {
+                if shown_parts.contains(c) {
+                    commands.entity(c).insert(Visibility::Hidden);
+                }
+                if emitters.contains(c) {
+                    commands.entity(c).insert(crate::particles::StopEmitting);
+                }
+            }
+            b.dying = Some(TRAIL_FADE);
         }
     }
 }
@@ -624,7 +654,7 @@ fn play_sequences(
                                 PointLight {
                                     color: Color::srgb(color[0], color[1], color[2]),
                                     // UNVERIFIED: Nebula's intensity (0..10) to lumens.
-                                    intensity: intensity * 400_000.0,
+                                    intensity: intensity * 40_000.0,
                                     range: *range,
                                     shadow_maps_enabled: false,
                                     ..default()
@@ -707,12 +737,20 @@ fn start_fx_animations(
         if m.started {
             continue;
         }
+        if std::env::var("DSOR_FX_DEBUG").is_ok() {
+            info!("fx {:?} pending, loaded: {}", m.gltf.path(), gltfs.get(&m.gltf).is_some());
+        }
         let Some(gltf) = gltfs.get(&m.gltf) else { continue };
+        if !m.started && std::env::var("DSOR_FX_DEBUG").is_ok() {
+            let n = children.iter_descendants(e).count();
+            info!("fx {:?}: {} descendants, {} with a player, {} clips", m.gltf.path(), n, children.iter_descendants(e).filter(|c| players.contains(*c)).count(), gltf.animations.len());
+        }
         if gltf.animations.is_empty() {
             m.started = true;
             continue;
         }
         let Some(player) = children.iter_descendants(e).find(|c| players.contains(*c)) else { continue };
+        debug!("fx {:?}: playing {} clip(s)", m.gltf.path(), gltf.animations.len());
         let (graph, node) = AnimationGraph::from_clip(gltf.animations[0].clone());
         let mut anim = AnimationPlayer::default();
         anim.play(node).repeat();
@@ -746,6 +784,8 @@ fn test_cast(
     time: Res<Time>,
     mut demo: Query<(Entity, &mut Transform, &Character, &CharacterAnim), Without<LocalPlayer>>,
     mut next: Local<f32>,
+    mut clock: ResMut<TestCastClock>,
+    mut count: Local<u32>,
 ) {
     // DSOR_TEST_RUN=<speed>: the demo character runs in a circle (reproducing a
     // body left behind while moving).
@@ -763,9 +803,16 @@ fn test_cast(
     let every: f32 = parts.next().and_then(|v| v.parse().ok()).unwrap_or(2.0);
     let (Some(table), Some(sequences)) = (tables.get(&data.skills), seqs.get(&data.sequences)) else { return };
     let Some(skill) = data.by_id.get(name).and_then(|w| table.0.get(w)) else { return };
-    let Some((e, tf, character, anim)) = demo.iter().next() else { return };
-    let tf = *tf;
+    let Some((e, mut tfm, character, anim)) = demo.iter_mut().next() else { return };
+    let tf = *tfm;
     if !anim.is_ready() {
+        return;
+    }
+    // DSOR_TEST_FACING=<degrees>: cast once, facing that way (0 = +Z, 90 = +X),
+    // and note when, for test_shot.
+    let fixed = std::env::var("DSOR_TEST_FACING").ok().and_then(|v| v.parse::<f32>().ok());
+    let wanted_casts: u32 = std::env::var("DSOR_SHOT_CAST").ok().and_then(|v| v.parse().ok()).unwrap_or(1);
+    if fixed.is_some() && *count >= wanted_casts {
         return;
     }
     *next -= time.delta_secs();
@@ -773,7 +820,86 @@ fn test_cast(
         return;
     }
     *next = every;
-    let facing = tf.rotation.to_euler(EulerRot::YXZ).0;
+    let facing = match fixed {
+        Some(deg) => {
+            let f = deg.to_radians();
+            tfm.rotation = Quat::from_rotation_y(f);
+            f
+        }
+        None => tf.rotation.to_euler(EulerRot::YXZ).0,
+    };
+    // DSOR_SHOT_CAST=<n>: test_shot times from the n-th cast (assets warm).
+    *count += 1;
+    let wanted: u32 = std::env::var("DSOR_SHOT_CAST").ok().and_then(|v| v.parse().ok()).unwrap_or(1);
+    if *count == wanted {
+        clock.0 = Some(time.elapsed_secs());
+    }
     let point = tf.translation + Quat::from_rotation_y(facing) * Vec3::Z * 8.0;
     perform(&mut commands, skill, sequences, e, Some(character), tf.translation, facing, point);
+}
+
+/// When test_cast cast (DSOR_TEST_FACING), for test_shot.
+#[derive(Resource, Default)]
+pub struct TestCastClock(Option<f32>);
+
+/// DSOR_SHOT_AFTER_CAST=<seconds>[,<file>]: one screenshot that long after the
+/// test cast, then quit -- frame counts depend on the frame rate, this does not.
+fn test_shot(
+    mut commands: Commands,
+    clock: Res<TestCastClock>,
+    time: Res<Time>,
+    mut taken: Local<Option<f32>>,
+) {
+    let Ok(spec) = std::env::var("DSOR_SHOT_AFTER_CAST") else { return };
+    let mut parts = spec.splitn(2, ',');
+    let after: f32 = parts.next().and_then(|v| v.parse().ok()).unwrap_or(0.5);
+    let file = parts.next().unwrap_or("/tmp/dsor-cast.png").to_owned();
+    let now = time.elapsed_secs();
+    if let Some(at) = *taken {
+        if now > at + 0.5 {
+            commands.write_message(AppExit::Success);
+        }
+        return;
+    }
+    let Some(cast) = clock.0 else { return };
+    if now >= cast + after {
+        commands
+            .spawn(bevy::render::view::screenshot::Screenshot::primary_window())
+            .observe(bevy::render::view::screenshot::save_to_disk(file));
+        *taken = Some(now);
+    }
+}
+
+/// DSOR_SEQ_VIEW=<sequence>[,<x>,<y>,<z>]: that sequence plays in a loop at a fixed
+/// point (default: the demo character's spot + 1.5 up), to look at an effect alone.
+fn test_view(
+    mut commands: Commands,
+    data: Res<SkillData>,
+    seqs: Res<Assets<SequenceTable>>,
+    playing: Query<(), With<SequencePlayer>>,
+    current: Option<Res<crate::map::CurrentMap>>,
+    manifests: Res<Assets<crate::map::MapManifest>>,
+    mut clock: ResMut<TestCastClock>,
+    time: Res<Time>,
+) {
+    let Ok(spec) = std::env::var("DSOR_SEQ_VIEW") else { return };
+    if !playing.is_empty() {
+        return;
+    }
+    let mut parts = spec.split(',');
+    let name = parts.next().unwrap_or_default();
+    let xyz: Vec<f32> = parts.filter_map(|v| v.parse().ok()).collect();
+    let Some(sequences) = seqs.get(&data.sequences) else { return };
+    let Some(seq) = sequences.0.get(name) else { return };
+    let at = if xyz.len() == 3 {
+        Vec3::new(xyz[0], xyz[1], xyz[2])
+    } else {
+        let Some(m) = current.and_then(|c| manifests.get(&c.manifest)) else { return };
+        Vec3::from(m.center) + Vec3::Y * 1.5
+    };
+    let anchor = commands.spawn((Transform::from_translation(at), Visibility::default())).id();
+    play(&mut commands, seq.clone(), None, anchor, true);
+    if clock.0.is_none() {
+            clock.0 = Some(time.elapsed_secs());
+    }
 }

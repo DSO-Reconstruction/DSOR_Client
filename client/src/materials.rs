@@ -150,7 +150,10 @@ impl GltfExtensionHandler for NebulaStates {
         material_label: &str,
     ) {
         let state = state_of(material);
-        if state.is_some() || format!("{:?}", material.alpha_mode()) != "Opaque" {
+        // Skill effects cast no shadow (the fireball's rock threw one on the ground;
+        // in the game its flight leaves none).
+        let effect = load_context.path().path().to_string_lossy().starts_with("effects");
+        if effect || state.is_some() || format!("{:?}", material.alpha_mode()) != "Opaque" {
             entity.insert(NotShadowCaster);
         }
         match state {
