@@ -105,12 +105,35 @@ pub struct Net {
     pub bar: Vec<Option<String>>,
     /// Skills other actors used, relayed by the server (73-77), for crate::skills.
     pub skill_events: Vec<SkillEvent>,
+    /// Status effects the server started on actors (82), and ground effects it
+    /// placed (64) or removed (65), for crate::skills.
+    pub status_events: Vec<StatusEvent>,
+    pub location_events: Vec<LocationEvent>,
+    pub location_gone: Vec<u32>,
     remote_gone: Vec<u32>,
     remote_moves: Vec<(u32, Vec3, f32, bool)>,
     /// What this player wears, as the inventory names it: (slots, item template).
     local_worn: Option<Vec<(Vec<i8>, String)>>,
     /// Another player re-dressed (RemotePlayerInfo): actor, skins, armament.
     remote_redress: Vec<(u32, Vec<(u8, Vec<String>)>, i8)>,
+}
+
+/// A status effect started on an actor (StatusEffectCommand 82): its
+/// _Template_StatusEffect index, the instance the client keys on, how long.
+pub struct StatusEvent {
+    pub holder: u32,
+    pub index: u16,
+    pub instance: u32,
+    pub seconds: f32,
+}
+
+/// A ground effect (NewLocationEffectCommand 64): it stays where it is placed.
+pub struct LocationEvent {
+    pub id: u32,
+    pub status: String,
+    pub position: Vec3,
+    pub heading: f32,
+    pub seconds: Option<f32>,
 }
 
 /// A skill another actor used: its wire index, its aim (the command's radians) and,
@@ -227,6 +250,9 @@ fn connect(world: &mut World) {
         npc_gone: Vec::new(),
         bar: Vec::new(),
         skill_events: Vec::new(),
+        status_events: Vec::new(),
+        location_events: Vec::new(),
+        location_gone: Vec::new(),
         local_name: None,
         resource: None,
         health: None,
@@ -442,6 +468,26 @@ fn on_command(net: &mut Net, command: ServerCommand, actor: Option<u32>) {
             }
         }
         // Skills the server relays from other actors (our own are played as cast).
+        ServerCommand::StatusEffect(c) => {
+            for e in &c.elements {
+                net.status_events.push(StatusEvent {
+                    holder: e.holder,
+                    index: e.index,
+                    instance: e.instance,
+                    seconds: e.duration as f32 / 25.0,
+                });
+            }
+        }
+        ServerCommand::NewLocationEffect(c) => {
+            net.location_events.push(LocationEvent {
+                id: c.effect_id,
+                status: c.status_effect.clone(),
+                position: Vec3::from(c.position),
+                heading: c.heading,
+                seconds: if c.endless { None } else { Some(c.end_tick.saturating_sub(c.start_tick) as f32 / 25.0) },
+            });
+        }
+        ServerCommand::DiscardLocationEffect(c) => net.location_gone.push(c.effect_id),
         ServerCommand::Skill(c) => net.skill_event(actor, &c.base, Vec::new()),
         ServerCommand::TargetSkill(c) => net.skill_event(actor, &c.base, Vec::new()),
         ServerCommand::BulletSkill(c) => net.skill_event(actor, &c.base, Vec::new()),

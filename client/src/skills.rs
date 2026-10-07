@@ -131,6 +131,10 @@ impl Track {
 #[derive(Deserialize, Debug, Clone)]
 pub struct Sequence {
     pub length: u32,
+    /// The sequencer's own "repeat" (GlobalParameter): loops for as long as its
+    /// owner lasts (stun_loop, burn_loop...).
+    #[serde(default)]
+    pub repeat: bool,
     pub tracks: Vec<Track>,
 }
 
@@ -157,12 +161,37 @@ macro_rules! json_loader {
         }
     };
 }
+/// _Template_StatusEffect by wire index (tools/export_skills.py).
+#[derive(Deserialize, Debug, Clone)]
+pub struct StatusDef {
+    pub id: String,
+    pub duration: f32,
+    pub start: HashMap<String, String>,
+    pub tick: HashMap<String, String>,
+    pub done: HashMap<String, String>,
+    pub stop: HashMap<String, String>,
+    #[serde(default)]
+    pub animation: String,
+}
+
+impl StatusDef {
+    fn first(m: &HashMap<String, String>) -> Option<&String> {
+        m.get("*").or_else(|| m.get("1h_weapon")).or_else(|| m.values().next())
+    }
+}
+
+#[derive(Asset, TypePath, Deserialize, Debug)]
+#[serde(transparent)]
+pub struct StatusTable(pub HashMap<u32, StatusDef>);
+
 json_loader!(SkillTableLoader, SkillTable, "skills.json");
+json_loader!(StatusTableLoader, StatusTable, "status_effects.json");
 json_loader!(SequenceTableLoader, SequenceTable, "sequences.json");
 
 #[derive(Resource)]
 pub struct SkillData {
     skills: Handle<SkillTable>,
+    status: Handle<StatusTable>,
     sequences: Handle<SequenceTable>,
     /// Skill id -> wire index, built once the table is in.
     by_id: HashMap<String, u32>,
@@ -181,6 +210,14 @@ pub struct SequencePlayer {
     anchor: Entity,
     /// Bullets loop their sequence for as long as they fly.
     looping: bool,
+    /// Effects follow the anchor (status effects on an actor, bullets, ground
+    /// effects). A skill's own sequence on its caster does not: the 2018
+    /// client's DrasaGraphicsObjectTrackBar has no attachment (only
+    /// AttachedGraphicsTrackBar::AddAttachment binds to the host), so those
+    /// effects stay where they were spawned while the caster walks on.
+    follow: bool,
+    /// Set to end the sequence now (its effects retire gracefully).
+    pub stop: bool,
     /// Per track: started, and what it spawned.
     started: Vec<bool>,
     spawned: Vec<Option<Entity>>,
@@ -261,6 +298,8 @@ impl Plugin for SkillsPlugin {
     fn build(&self, app: &mut App) {
         app.init_asset::<SkillTable>()
             .init_asset::<SequenceTable>()
+            .init_asset::<StatusTable>()
+            .register_asset_loader(StatusTableLoader)
             .register_asset_loader(SkillTableLoader)
             .register_asset_loader(SequenceTableLoader)
             .init_resource::<CameraShake>()
@@ -268,7 +307,7 @@ impl Plugin for SkillsPlugin {
             .add_systems(Startup, load)
             .add_systems(
                 Update,
-                (index_skills, cast_input, remote_skills, test_cast, run_pending, carry_casters, fly_bullets, play_sequences, start_fx_animations, retire_effects, shake_camera, test_shot, test_view, debug_fx_positions)
+                (index_skills, cast_input, remote_skills, status_visuals, test_cast, run_pending, carry_casters, fly_bullets, play_sequences, start_fx_animations, retire_effects, shake_camera, test_shot, test_view, debug_fx_positions)
                     .chain()
                     .after(crate::net::NetSystems),
             );
@@ -278,6 +317,7 @@ impl Plugin for SkillsPlugin {
 fn load(mut commands: Commands, assets: Res<AssetServer>) {
     commands.insert_resource(SkillData {
         skills: assets.load("skills/skills.json"),
+        status: assets.load("skills/status_effects.json"),
         sequences: assets.load("skills/sequences.json"),
         by_id: HashMap::new(),
     });
@@ -398,9 +438,16 @@ fn perform(
 }
 
 fn play(commands: &mut Commands, seq: Sequence, actor: Option<Entity>, anchor: Entity, looping: bool) -> Entity {
+    // A caster's own skill sequence leaves its effects in place; anything else
+    // (a bullet, a ground effect) carries them.
+    let follow = actor != Some(anchor);
+    play_with(commands, seq, actor, anchor, looping, follow)
+}
+
+fn play_with(commands: &mut Commands, seq: Sequence, actor: Option<Entity>, anchor: Entity, looping: bool, follow: bool) -> Entity {
     let n = seq.tracks.len();
     commands
-        .spawn(SequencePlayer { seq, t: 0.0, actor, anchor, looping, started: vec![false; n], spawned: vec![None; n] })
+        .spawn(SequencePlayer { seq, t: 0.0, actor, anchor, looping, follow, stop: false, started: vec![false; n], spawned: vec![None; n] })
         .id()
 }
 
@@ -669,7 +716,7 @@ fn play_sequences(
                 p.started[i] = false;
             }
         }
-        let done = !anchor_alive || (!p.looping && frame > length);
+        let done = p.stop || !anchor_alive || (!p.looping && frame > length);
         for i in 0..p.seq.tracks.len() {
             let track = p.seq.tracks[i].clone();
             let (start, end) = track.span();
@@ -703,7 +750,13 @@ fn play_sequences(
                             place,
                             Visibility::default(),
                         ));
-                        if let Some(parent) = parent.filter(|p| exists.contains(*p)) {
+                        let unattached = joint.is_empty() && !p.follow;
+                        if unattached {
+                            // Left where it was made: the anchor's world placement now.
+                            if let Ok(g) = transforms.get(p.anchor) {
+                                fx.insert(Transform::from_matrix(g.to_matrix() * place.to_matrix()));
+                            }
+                        } else if let Some(parent) = parent.filter(|p| exists.contains(*p)) {
                             fx.insert(ChildOf(parent));
                         }
                         p.spawned[i] = Some(fx.id());
@@ -1065,6 +1118,129 @@ fn carry_casters(
         tf.translation = p;
         if k >= 1.0 {
             commands.entity(e).remove::<SkillMove>();
+        }
+    }
+}
+
+/// What draws one status effect: its looping (start/tick) sequence, and what to
+/// play when it ends.
+#[derive(Component)]
+struct StatusVisual {
+    key: (u32, u32),
+    player: Entity,
+    anchor: Entity,
+    holder: Option<Entity>,
+    ends: Option<f32>,
+    end: Option<String>,
+}
+
+/// Status effects on actors (82) and ground effects (64/65): the sequences of
+/// _Template_StatusEffect, which the skills' own sequences do not contain --
+/// stuns, burns, ice cubes, auras, a banner left on the ground.
+#[allow(clippy::too_many_arguments)]
+fn status_visuals(
+    mut commands: Commands,
+    time: Res<Time>,
+    net: Option<NonSendMut<Net>>,
+    data: Res<SkillData>,
+    statuses: Res<Assets<StatusTable>>,
+    seqs: Res<Assets<SequenceTable>>,
+    actors: Query<(Entity, Option<&LocalPlayer>, Option<&RemotePlayer>, Option<&crate::npc::Npc>)>,
+    mut visuals: Query<(Entity, &StatusVisual)>,
+    mut players: Query<&mut SequencePlayer>,
+    mut by_name: Local<HashMap<String, u32>>,
+    mut tested: Local<bool>,
+    mut pending_test: Local<Vec<crate::net::LocationEvent>>,
+) {
+    let (Some(table), Some(sequences)) = (statuses.get(&data.status), seqs.get(&data.sequences)) else { return };
+    if by_name.is_empty() {
+        *by_name = table.0.iter().map(|(i, d)| (d.id.clone(), *i)).collect();
+    }
+    let now = time.elapsed_secs();
+    // Ended: stop the loop, play the end sequence once where it was.
+    for (e, v) in &mut visuals {
+        if v.ends.is_some_and(|t| now >= t) {
+            if let Ok(mut p) = players.get_mut(v.player) {
+                p.stop = true;
+            }
+            if let Some(seq) = v.end.as_ref().and_then(|n| sequences.0.get(n)) {
+                play_with(&mut commands, seq.clone(), v.holder, v.anchor, false, true);
+            }
+            commands.entity(e).despawn();
+        }
+    }
+    // DSOR_TEST_STATUS=<status id>[,x,y,z]: that status effect played once as a
+    // ground effect (offline checks; the server sends the real ones).
+    if let Ok(spec) = std::env::var("DSOR_TEST_STATUS") {
+        if !*tested && seqs.get(&data.sequences).is_some() {
+            *tested = true;
+            let mut it = spec.split(',');
+            let name = it.next().unwrap_or_default().to_owned();
+            let v: Vec<f32> = it.filter_map(|x| x.parse().ok()).collect();
+            let at = if v.len() == 3 { Vec3::new(v[0], v[1], v[2]) } else { Vec3::new(121.5, 12.0, 71.4) };
+            pending_test.push(crate::net::LocationEvent { id: 999_999, status: name, position: at, heading: 0.0, seconds: Some(6.0) });
+        }
+    }
+    let mut net_events = Vec::new();
+    let mut gone = Vec::new();
+    let mut status_events = Vec::new();
+    if let Some(mut net) = net {
+        net_events = std::mem::take(&mut net.location_events);
+        gone = std::mem::take(&mut net.location_gone);
+        status_events = std::mem::take(&mut net.status_events);
+    }
+    net_events.extend(pending_test.drain(..));
+    let actor_entity = |id: u32| {
+        actors.iter().find_map(|(e, l, r, n)| {
+            (l.is_some_and(|l| l.actor == id) || r.is_some_and(|r| r.actor == id) || n.is_some_and(|n| n.actor == id)).then_some(e)
+        })
+    };
+    let mut start = |commands: &mut Commands, def: &StatusDef, key: (u32, u32), holder: Option<Entity>, anchor: Entity, seconds: Option<f32>| {
+        // The same instance again: extended, not drawn twice.
+        for (e, v) in visuals.iter() {
+            if v.key == key {
+                if let Ok(mut p) = players.get_mut(v.player) {
+                    p.stop = true;
+                }
+                commands.entity(e).despawn();
+            }
+        }
+        let Some(seq) = StatusDef::first(&def.start).or_else(|| StatusDef::first(&def.tick)).and_then(|n| sequences.0.get(n)) else { return };
+        let player = play_with(commands, seq.clone(), holder, anchor, seq.repeat, true);
+        let ends = seconds.filter(|s| *s > 0.0).map(|s| now + s).or(if seq.repeat { Some(now + def.duration.max(0.5)) } else { None });
+        commands.spawn(StatusVisual {
+            key,
+            player,
+            anchor,
+            holder,
+            ends,
+            end: StatusDef::first(&def.done).or_else(|| StatusDef::first(&def.stop)).cloned(),
+        });
+    };
+    for ev in status_events {
+        let Some(def) = table.0.get(&(ev.index as u32)) else { continue };
+        let Some(holder) = actor_entity(ev.holder) else { continue };
+        start(&mut commands, def, (ev.holder, ev.instance), Some(holder), holder, Some(ev.seconds));
+    }
+    for ev in net_events {
+        let Some(def) = by_name.get(&ev.status).and_then(|i| table.0.get(i)) else { continue };
+        // A ground effect stays where it was placed.
+        let anchor = commands
+            .spawn((Transform::from_translation(ev.position).with_rotation(entity_rotation(aim_to_facing(ev.heading))), Visibility::default()))
+            .id();
+        start(&mut commands, def, (u32::MAX, ev.id), None, anchor, ev.seconds);
+    }
+    for id in gone {
+        for (e, v) in visuals.iter() {
+            if v.key == (u32::MAX, id) {
+                if let Ok(mut p) = players.get_mut(v.player) {
+                    p.stop = true;
+                }
+                if let Some(seq) = v.end.as_ref().and_then(|n| sequences.0.get(n)) {
+                    play_with(&mut commands, seq.clone(), None, v.anchor, false, true);
+                }
+                commands.entity(e).despawn();
+            }
         }
     }
 }

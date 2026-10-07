@@ -108,11 +108,12 @@ def transform(t):
 
 def sequence(layout):
     root = 0
-    tracks, length = [], 0
+    tracks, length, repeat = [], 0, False
     for i in range(len(layout.nodes)):
         tag = layout.tag(i)
         if tag == "GlobalParameter":
             length = int(num(layout.attrs(i).get("playLength")))
+            repeat = layout.attrs(i).get("repeat") == "True"
         if tag != "TrackBar":
             continue
         a = layout.attrs(i)
@@ -146,7 +147,7 @@ def sequence(layout):
         if t and (t.get("graphics", "x") not in ("", "empty")):
             t["start"], t["end"] = start, end
             tracks.append(t)
-    return {"length": length, "tracks": tracks}
+    return {"length": length, "repeat": repeat, "tracks": tracks}
 
 
 # -- sequences -------------------------------------------------------------------
@@ -236,7 +237,27 @@ for r in db.execute("select rowid, * from _Template_Skill order by rowid"):
         },
     }
 
+# -- status effects (what a skill puts on its caster, its victims or the ground) --
+# _Template_StatusEffect by wire index (row - 1): its Start / Tick / Done / Stop
+# sequences (or mappings) and the animation it plays on its holder. The server
+# applies them with StatusEffectCommand (82) and NewLocationEffectCommand (64).
+status = {}
+for r in db.execute("select rowid, * from _Template_StatusEffect order by rowid"):
+    status[r["rowid"] - 1] = {
+        "id": r["Id"],
+        "duration": r["StatusEffectDuration"] or 0.0,
+        "start": mapped(r["StartSequenceMapping"]) or mapped(r["StartSequence"]),
+        "tick": mapped(r["TickSequenceMapping"]) or mapped(r["TickSequence"]),
+        "done": mapped(r["DoneSequenceMapping"]) or mapped(r["DoneSequence"]),
+        "stop": mapped(r["StopSequenceMapping"]) or mapped(r["StopSequence"]),
+        "animation": r["StartAnimation"] or "",
+        "looped_animation": bool(r["LoopedStartAnimation"]),
+        "stop_animation": r["StopAnimation"] or "",
+    }
+
 os.makedirs(os.path.join(assets, "skills"), exist_ok=True)
+with open(os.path.join(assets, "skills", "status_effects.json"), "w") as f:
+    json.dump(status, f, separators=(",", ":"))
 with open(os.path.join(assets, "skills", "sequences.json"), "w") as f:
     json.dump(sequences, f, separators=(",", ":"))
 with open(os.path.join(assets, "skills", "skills.json"), "w") as f:
