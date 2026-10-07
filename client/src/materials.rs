@@ -332,6 +332,11 @@ struct NebulaStates {
     textures: Vec<Option<Handle<Image>>>,
     /// Node name -> its n3 MatEmissiveIntensity (extras.dsor_shader).
     emissive: std::collections::HashMap<String, f32>,
+    /// Node name -> (Intensity0, Intensity1, Velocity.xy) of its n3 shader
+    /// (extras.dsor_shader / dsor_vector), for refraction surfaces.
+    shader_params: std::collections::HashMap<String, (f32, f32, Vec2)>,
+    /// Material labels given a refraction material ("<label>/refr").
+    refractions: std::collections::HashSet<String>,
     /// Whether lit surfaces of this file get their emission scaled (effects and
     /// the map; characters keep theirs).
     scale_lit: bool,
@@ -359,6 +364,20 @@ impl GltfExtensionHandler for NebulaStates {
         for node in gltf.nodes() {
             if let (Some(name), Some(i)) = (node.name(), node_emissive(&node)) {
                 self.emissive.insert(name.to_owned(), i);
+            }
+            if let (Some(name), Some(extras)) = (node.name(), node.extras().as_ref()) {
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(extras.get()) {
+                    let f = |k: &str| v.get("dsor_shader").and_then(|s| s.get(k)).and_then(|x| x.as_f64()).map(|x| x as f32);
+                    let vel = v
+                        .get("dsor_vector")
+                        .and_then(|d| d.get("Velocity"))
+                        .and_then(|a| a.as_array())
+                        .map(|a| Vec2::new(a.first().and_then(|x| x.as_f64()).unwrap_or(0.0) as f32, a.get(1).and_then(|x| x.as_f64()).unwrap_or(0.0) as f32))
+                        .unwrap_or(Vec2::ZERO);
+                    if f("Intensity0").is_some() || f("Intensity1").is_some() || vel != Vec2::ZERO {
+                        self.shader_params.insert(name.to_owned(), (f("Intensity0").unwrap_or(1.0), f("Intensity1").unwrap_or(1.0), vel));
+                    }
+                }
             }
         }
     }
@@ -414,6 +433,25 @@ impl GltfExtensionHandler for NebulaStates {
         material_asset: &GltfMaterial,
         material_label: &str,
     ) {
+        // Refraction (shd:refraction): its own material, crate::refraction.
+        // CONTRACT: alphaBlendFactor = the node's Intensity0, the distortion (in
+        //   pixels) its Intensity1. UNVERIFIED: the shader names only
+        //   alphaBlendFactor (c1); the distortion constant c2 is not in its table.
+        let shader_name = gltf_material.extras().as_ref().map(|e| e.get().to_owned()).unwrap_or_default();
+        if shader_name.contains("shd:refraction") {
+            let node = gltf_material.name().and_then(|n| n.rsplit_once('_')).map(|(n, _)| n.to_owned()).unwrap_or_default();
+            let (alpha, strength, scroll) = self.shader_params.get(&node).copied().unwrap_or((1.0, 1.0, Vec2::ZERO));
+            let m = crate::refraction::RefractionMaterial {
+                base: crate::refraction::base(),
+                extension: crate::refraction::Refraction {
+                    params: Vec4::new(strength, alpha, scroll.x, scroll.y),
+                    dudv: material_asset.base_color_texture.clone(),
+                },
+            };
+            load_context.add_labeled_asset(format!("{material_label}/refr"), m);
+            self.refractions.insert(material_label.to_owned());
+            return;
+        }
         // The material's node: DSO_Godot names materials "<node>_<shader>".
         let intensity = gltf_material
             .name()
@@ -476,6 +514,12 @@ impl GltfExtensionHandler for NebulaStates {
         let effect = load_context.path().path().to_string_lossy().starts_with("effects");
         if effect || state.is_some() || format!("{:?}", material.alpha_mode()) != "Opaque" {
             entity.insert(NotShadowCaster);
+        }
+        if self.refractions.contains(material_label) {
+            let handle = load_context.get_label_handle::<crate::refraction::RefractionMaterial>(format!("{material_label}/refr"));
+            entity.remove::<MeshMaterial3d<StandardMaterial>>();
+            entity.insert((MeshMaterial3d(handle), Visibility::Inherited, NotShadowCaster));
+            return;
         }
         match state {
             Some(State::Hidden) => {

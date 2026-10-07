@@ -437,8 +437,12 @@ fn draw(
         }
         let b = &mut buffers[s.group];
         let tile = groups.list[s.group].tile as f32;
-        // Not billboarded: the quad lies in the emitter's own XY plane.
-        let (r0, u0) = if e.billboard { (right, up) } else { (at.right().as_vec3(), at.up().as_vec3()) };
+        // Not billboarded: the quad lies FLAT in the emitter's own XZ plane.
+        // EVIDENCE: shaders_sm30 "particle" vs_3_0 (+24308): with
+        //   isBillboardOriented false the rotated corner (x, y) is placed as
+        //   (x, 0, y) through the model matrix -- ground rings and shock waves
+        //   lie on the ground. Drawn upright (XY) they were edge-on from above.
+        let (r0, u0) = if e.billboard { (right, up) } else { (at.right().as_vec3(), at.back().as_vec3()) };
         for p in &s.particles {
             let a = p.age;
             let half = sample(&e.envelopes[SIZE], a) * p.size_var;
