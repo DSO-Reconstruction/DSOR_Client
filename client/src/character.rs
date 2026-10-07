@@ -23,6 +23,7 @@ use std::time::Duration;
 use bevy::asset::{io::Reader, AssetLoader, LoadContext};
 use bevy::gltf::{Gltf, GltfAssetLabel};
 use bevy::mesh::skinning::SkinnedMesh;
+use bevy::animation::AnimatedBy;
 use bevy::prelude::*;
 use bevy::world_serialization::WorldInstanceReady;
 use serde::Deserialize;
@@ -296,17 +297,29 @@ pub struct CharacterAnim {
     player: Option<Entity>,
     /// The animation playing at full weight, and those fading out.
     current: Option<AnimationNodeIndex>,
+    /// The skeleton's animation targets detached from their player while the
+    /// character is not animated: bevy's animate_targets visits every target of
+    /// every character each frame otherwise (16 % of a browser frame with
+    /// Kingshill's NPCs, most of them off screen).
+    parked: Vec<(Entity, AnimatedBy)>,
+    /// Asked to park this frame (done after the loop).
+    parking: bool,
     fading: Vec<(AnimationNodeIndex, f32)>,
     nodes: HashMap<String, (AnimationNodeIndex, bool)>,
 }
 
 impl Default for CharacterAnim {
     fn default() -> Self {
-        Self { state: AnimState::Idle, speed: 1.0, applied: None, player: None, nodes: HashMap::new(), current: None, fading: Vec::new() }
+        Self { state: AnimState::Idle, speed: 1.0, applied: None, player: None, nodes: HashMap::new(), current: None, fading: Vec::new(), parked: Vec::new(), parking: false }
     }
 }
 
 impl CharacterAnim {
+    /// Whether bevy evaluates this character's animation (playing, bones hooked).
+    pub fn is_animating(&self) -> bool {
+        self.current.is_some() && self.parked.is_empty()
+    }
+
     /// Play the current state again from its start, even if it is already playing
     /// (a skill used twice in a row).
     pub fn replay(&mut self) {
@@ -364,7 +377,7 @@ impl Plugin for CharacterPlugin {
             .register_asset_loader(AnimTableLoader)
             .register_asset_loader(PartListLoader)
             .add_systems(Startup, load_library)
-            .add_systems(Update, (build_characters, revive_skeletons, keep_parts_bound, drive_animations, check_skins).chain())
+            .add_systems(Update, (build_characters, revive_skeletons, keep_parts_bound, drive_animations, check_skins, prune_idle_targets).chain())
             .add_systems(
                 PostUpdate,
                 apply_variations.after(bevy::app::AnimationSystems).before(TransformSystems::Propagate),
@@ -496,7 +509,7 @@ fn adopt_skeleton(ctx: &mut SkeletonCtx, entity: Entity, owner: Entity, generati
             }
             commands
                 .entity(player)
-                .insert(AnimationGraphHandle(ctx.graphs.add(graph)));
+                .insert((AnimationGraphHandle(ctx.graphs.add(graph)), crate::anim_cull::ManagedAnimation));
             anim.player = Some(player);
             anim.current = None;
             anim.fading.clear();
@@ -816,8 +829,11 @@ struct VariedChild;
 fn drive_animations(
     time: Res<Time>,
     mut frame: Local<u32>,
-    mut characters: Query<(&mut CharacterAnim, &GlobalTransform, &InheritedVisibility, Option<&mut AnimLod>)>,
+    mut characters: Query<(&mut CharacterAnim, &GlobalTransform, &InheritedVisibility, Option<&mut AnimLod>, &Character)>,
+    targets: Query<(Entity, &AnimatedBy)>,
+    mut commands: Commands,
     mut players: Query<&mut AnimationPlayer>,
+    mut to_park: Local<Vec<Entity>>,
     cameras: Query<(&Camera, &GlobalTransform), With<Camera3d>>,
 ) {
     let cam = cameras.iter().next();
@@ -829,7 +845,7 @@ fn drive_animations(
     };
     let fade_step = time.delta_secs() / BLEND.as_secs_f32();
     *frame = frame.wrapping_add(1);
-    for (mut anim, at, shown, mut lod) in &mut characters {
+    for (mut anim, at, shown, mut lod, character) in &mut characters {
         let Some(player) = anim.player else { continue };
         let Ok(mut p) = players.get_mut(player) else { continue };
         // A lower-rate character between its frames: held still, unevaluated.
@@ -867,7 +883,8 @@ fn drive_animations(
         // evaluated at all -- a paused animation is still applied every frame
         // (7 ms a frame for Kingshill's NPCs, bevy trace_chrome). Played again
         // from their state once back in view.
-        let far = !shown.get()
+        let far = crate::flag("noanim")
+            || !shown.get()
             || eye.is_some_and(|e| e.distance(at.translation()) > ANIMATION_DISTANCE)
             || !on_screen(at.translation());
         if far {
@@ -877,6 +894,21 @@ fn drive_animations(
                 anim.fading.clear();
                 anim.applied = None;
             }
+            if anim.parked.is_empty() && !anim.parking {
+                // Detached after the loop, by player (targets of a re-instanced
+                // skeleton are not in `bones`).
+                anim.parking = true;
+                to_park.push(player);
+            }
+            continue;
+        }
+        // Back in view: its targets follow their player again (next frame).
+        anim.parking = false;
+        if !anim.parked.is_empty() {
+            for (b, by) in std::mem::take(&mut anim.parked) {
+                commands.entity(b).try_insert(by);
+            }
+            anim.applied = None;
             continue;
         }
         // Our own cross-fade. bevy's AnimationTransitions stopped an animation
@@ -920,6 +952,21 @@ fn drive_animations(
         anim.current = Some(node);
         anim.applied = Some(wanted);
     }
+    if !to_park.is_empty() {
+        let wanted: std::collections::HashSet<Entity> = to_park.drain(..).collect();
+        let mut found: HashMap<Entity, Vec<(Entity, AnimatedBy)>> = HashMap::new();
+        for (e, by) in &targets {
+            if wanted.contains(&by.0) {
+                found.entry(by.0).or_default().push((e, *by));
+                commands.entity(e).remove::<AnimatedBy>();
+            }
+        }
+        for (mut anim, ..) in &mut characters {
+            if let Some(p) = anim.player.filter(|p| wanted.contains(p)) {
+                anim.parked = found.remove(&p).unwrap_or_default();
+            }
+        }
+    }
 }
 
 /// Dress a character again with new equipment: its skeleton and parts are rebuilt,
@@ -949,6 +996,7 @@ pub fn redress(
     anim.applied = None;
     anim.current = None;
     anim.fading.clear();
+    anim.parked.clear();
 }
 
 /// DSOR_CHECK_SKIN=1: every frame, every skinned mesh under a character must point
@@ -986,6 +1034,58 @@ fn check_skins(
                     );
                 }
             }
+        }
+    }
+}
+
+/// Every second: animation targets whose player plays nothing (map decor whose
+/// animation is never started, finished effects) are detached, so bevy's
+/// animate_targets stops visiting them every frame. Characters park and restore
+/// their own (drive_animations).
+fn prune_idle_targets(
+    mut commands: Commands,
+    time: Res<Time>,
+    mut next: Local<f32>,
+    targets: Query<(Entity, &AnimatedBy)>,
+    players: Query<Ref<AnimationPlayer>>,
+    characters: Query<&CharacterAnim>,
+    parents: Query<&ChildOf>,
+    names: Query<&Name>,
+) {
+    *next -= time.delta_secs();
+    if *next > 0.0 {
+        return;
+    }
+    *next = 1.0;
+    if std::env::var("DSOR_ANIM_DEBUG").is_ok() {
+        let total = targets.iter().count();
+        let mut by_player: std::collections::HashMap<Entity, usize> = Default::default();
+        for (_, AnimatedBy(p)) in &targets {
+            *by_player.entry(*p).or_default() += 1;
+        }
+        let playing = by_player.keys().filter(|p| players.get(**p).is_ok_and(|p| p.playing_animations().next().is_some())).count();
+        let parked: usize = characters.iter().map(|a| a.parked.len()).sum();
+        let chars = characters.iter().count();
+        let active = characters.iter().filter(|a| a.parked.is_empty() && a.player.is_some()).count();
+        info!("anim: {total} targets on {} players ({playing} playing); {chars} characters, {active} not parked, {parked} targets parked", by_player.len());
+        if let Some((e, AnimatedBy(p))) = targets.iter().next() {
+            let chain: Vec<String> = std::iter::once(e).chain(parents.iter_ancestors(e)).take(6).map(|a| format!("{a:?}:{}", names.get(a).map(|n| n.as_str()).unwrap_or("-"))).collect();
+            info!("sample target {chain:?}, player {p:?} name {:?}", names.get(*p).map(|n| n.as_str()));
+        }
+    }
+    let character_players: std::collections::HashSet<Entity> = characters.iter().filter_map(|a| a.player).collect();
+    for (e, AnimatedBy(player)) in &targets {
+        if character_players.contains(player) {
+            continue;
+        }
+        // A player added since the last sweep may not have started yet (an
+        // effect's starts once its model is in): left for the next one.
+        let idle = players
+            .get(*player)
+            .map(|p| !p.is_added() && p.playing_animations().next().is_none())
+            .unwrap_or(true);
+        if idle {
+            commands.entity(e).remove::<AnimatedBy>();
         }
     }
 }

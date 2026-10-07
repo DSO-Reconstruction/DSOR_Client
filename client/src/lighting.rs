@@ -230,7 +230,7 @@ fn apply_lighting(
     for (mut sun, mut tf) in &mut suns {
         sun.illuminance = l.sun_illuminance;
         sun.color = Color::linear_rgb(l.sun_r, l.sun_g, l.sun_b);
-        sun.shadow_maps_enabled = l.shadows;
+        sun.shadow_maps_enabled = l.shadows && !crate::flag("noshadows");
         *tf = Transform::default().looking_to(from_sun, Vec3::Y);
     }
     ambient.brightness = l.ambient;

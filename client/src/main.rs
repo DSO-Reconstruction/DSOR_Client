@@ -10,6 +10,7 @@
 mod character;
 mod decals;
 mod hud;
+mod anim_cull;
 mod lighting;
 mod map;
 mod materials;
@@ -119,6 +120,10 @@ fn options() -> Options {
             "cam" => o.cam = parse_cam(&v.replace("%2C", ",")),
             "noshadows" => o.shadows = false,
             "npcs" => o.npcs = true,
+            // Diagnostics: ?flag=name switches one cost off (crate::flag).
+            "flag" => {
+                let _ = FLAGS.set(v.split(',').map(str::to_owned).collect());
+            }
             "server" | "account" | "sid" | "relay" | "char" => {
                 let n = o.net.get_or_insert_with(|| net::NetConfig {
                     login: "127.0.0.1:2190".into(),
@@ -154,6 +159,16 @@ fn asset_root() -> String {
     {
         "assets".to_string()
     }
+}
+
+/// Diagnostic switches: the web page's `flag=a,b` or DSOR_FLAGS=a,b natively.
+/// noanim (no character animation), noshadows, nonpcs-shadow, noparticles.
+pub static FLAGS: std::sync::OnceLock<std::collections::HashSet<String>> = std::sync::OnceLock::new();
+
+pub fn flag(name: &str) -> bool {
+    FLAGS
+        .get_or_init(|| std::env::var("DSOR_FLAGS").map(|v| v.split(',').map(str::to_owned).collect()).unwrap_or_default())
+        .contains(name)
 }
 
 fn main() {
@@ -235,6 +250,7 @@ fn main() {
             nav::NavPlugin,
             hud::HudPlugin,
         ))
+        .add_plugins(anim_cull::AnimCullPlugin)
         .insert_resource(ClearColor(Color::srgb(0.05, 0.06, 0.08)))
         .insert_resource(GlobalAmbientLight {
             color: Color::WHITE,

@@ -60,6 +60,9 @@ fn place(
     // Bevy's built-in font is ASCII only ("F?lix"); Noto Sans Bold stands in for
     // the game's Tahoma bold (assets/fonts, not shipped with the repository).
     let font = font.get_or_insert_with(|| assets.load("fonts/NotoSans-Bold.ttf")).clone();
+    if crate::flag("nonames") {
+        return;
+    }
     let Ok((camera, cam_at)) = cameras.single() else { return };
     let height = windows.iter().next().map(|w| w.height()).unwrap_or(LAYOUT_HEIGHT);
     // Points to pixels at the layout height, then as a share of the window

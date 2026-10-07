@@ -11,3 +11,4 @@
 *.nax3
 /client/dist
 __pycache__/
+/client/dist-profile

@@ -375,6 +375,9 @@ fn simulate(
 ) {
     let Ok(cam) = cameras.single() else { return };
     let eye = cam.translation();
+    if crate::flag("noparticles") {
+        return;
+    }
     let dt = time.delta_secs().min(MAX_DT);
     for (e, mut s, at, shown, stopped) in &mut emitters {
         // Culled with its map cell: no simulation either.

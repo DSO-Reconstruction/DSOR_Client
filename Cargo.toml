@@ -31,5 +31,15 @@ opt-level = 3
 # the client's index.html data-cargo-profile).
 [profile.wasm-release]
 inherits = "release"
-opt-level = "s"
+# Speed, not size: "s" kept bevy's hot loops (animation, queries, render
+# preparation) from being inlined -- the browser runs one thread, every
+# millisecond counts.
+opt-level = 3
+codegen-units = 1
+lto = "fat"
 strip = "debuginfo"
+
+# Profiling the browser build: same code as wasm-release, symbol names kept.
+[profile.wasm-profile]
+inherits = "wasm-release"
+strip = "none"

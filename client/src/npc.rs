@@ -23,7 +23,7 @@ use serde::Deserialize;
 
 use crate::character::{spawn_character, AnimState, AnimTable, CharacterAnim, CharacterDesc, CharacterLibrary, NpcLook};
 use crate::map::CurrentMap;
-use crate::nameplate::Nameplate;
+
 use crate::net::Net;
 
 #[derive(Deserialize, Debug, Clone)]
@@ -172,7 +172,7 @@ impl Plugin for NpcPlugin {
             .register_asset_loader(NpcPlacementsLoader)
             .register_asset_loader(OutfitsLoader)
             .add_systems(Startup, load)
-            .add_systems(Update, (follow_map, offline_npcs, spawn_npcs, animate_models, cull_actors).chain());
+            .add_systems(Update, (follow_map, offline_npcs, spawn_npcs, animate_models, cull_actors, npc_no_shadow).chain());
     }
 }
 
@@ -317,10 +317,13 @@ fn spawn_npcs(
         };
         commands.entity(entity).insert((
             Npc { actor: spawn.actor, template: spawn.template.clone() },
-            Nameplate::npc(template.title.clone()),
+            // No name over NPCs: the game draws names over players only.
             // NPCs idle at a third of the frame rate (crate::character::AnimLod).
             crate::character::AnimLod::new(3, spawn.actor % 3),
         ));
+        if crate::flag("nonpcs-shadow") {
+            commands.entity(entity).insert(NpcNoShadow);
+        }
     }
 }
 
@@ -382,6 +385,25 @@ fn cull_actors(
         let wanted = if near { Visibility::Inherited } else { Visibility::Hidden };
         if *v != wanted {
             *v = wanted;
+        }
+    }
+}
+
+/// Diagnostics (flag nonpcs-shadow): NPC surfaces cast no shadow.
+#[derive(Component)]
+struct NpcNoShadow;
+
+fn npc_no_shadow(
+    mut commands: Commands,
+    npcs: Query<Entity, With<NpcNoShadow>>,
+    children: Query<&Children>,
+    meshes: Query<(), (With<Mesh3d>, Without<bevy::light::NotShadowCaster>)>,
+) {
+    for n in &npcs {
+        for c in children.iter_descendants(n) {
+            if meshes.contains(c) {
+                commands.entity(c).insert(bevy::light::NotShadowCaster);
+            }
         }
     }
 }

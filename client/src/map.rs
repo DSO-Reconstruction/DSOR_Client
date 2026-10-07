@@ -370,7 +370,7 @@ pub const CELL: f32 = 24.0;
 /// Cells farther than this from the point the camera looks at are hidden, from
 /// the view and from the shadow pass alike. The game camera at full zoom-out sees
 /// about 45 units around that point.
-pub const CULL_DISTANCE: f32 = 55.0;
+pub const CULL_DISTANCE: f32 = 35.0;
 
 fn cell_of(p: Vec3) -> (i32, i32) {
     ((p.x / CELL).floor() as i32, (p.z / CELL).floor() as i32)

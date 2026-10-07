@@ -229,12 +229,15 @@ impl UvAnim {
 fn animate_uvs(
     mut commands: Commands,
     time: Res<Time>,
-    mut nodes: Query<(&mut UvAnim, &Children)>,
+    mut nodes: Query<(&mut UvAnim, &Children, &InheritedVisibility)>,
     mut prims: Query<(Entity, &mut MeshMaterial3d<StandardMaterial>, Option<&AnimatedMaterial>)>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    for (mut uv, children) in &mut nodes {
+    for (mut uv, children, shown) in &mut nodes {
         uv.t += time.delta_secs();
+        if !shown.get() {
+            continue;
+        }
         let tf = uv.transform();
         for c in children.iter() {
             let Ok((e, mut handle, own)) = prims.get_mut(c) else { continue };
@@ -267,12 +270,17 @@ struct AnimatedMaterial {
 fn animate_shader_vars(
     mut commands: Commands,
     time: Res<Time>,
-    mut nodes: Query<(&mut ShaderAnim, &Children)>,
+    mut nodes: Query<(&mut ShaderAnim, &Children, &InheritedVisibility)>,
     mut prims: Query<(Entity, &mut MeshMaterial3d<StandardMaterial>, Option<&AnimatedMaterial>)>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    for (mut anim, children) in &mut nodes {
+    for (mut anim, children, shown) in &mut nodes {
         anim.t += time.delta_secs();
+        // Not seen: its materials are left alone (every material change makes bevy
+        // re-check every mesh entity).
+        if !shown.get() {
+            continue;
+        }
         let t = anim.t;
         let base = if anim.base_emissive.abs() > 1e-3 { anim.base_emissive } else { 1.0 };
         let glow = anim.tracks.iter().find(|k| k.var == "MatEmissiveIntensity").map(|k| k.at(t) / base);
