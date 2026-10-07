@@ -152,6 +152,8 @@ struct VariedJoint {
     /// What the animation last wrote, and what this system then wrote.
     raw: (Vec3, Vec3),
     written: Option<(Vec3, Vec3)>,
+    /// var_s x the animation's scale: what its children's translations stretch by.
+    scale: Vec3,
 }
 
 impl CharacterDesc {
@@ -264,6 +266,24 @@ impl AnimState {
             AnimState::Stunned => "Stunned",
             AnimState::Named(s) => s,
         }
+    }
+}
+
+/// A character animated at a lower rate (NPCs): its pose is evaluated one frame in
+/// `stride`; between, its animation is stopped (not evaluated at all) and resumed
+/// at the right time. bevy evaluates paused animations every frame, stopped ones
+/// not at all.
+#[derive(Component)]
+pub struct AnimLod {
+    pub stride: u32,
+    pub phase: u32,
+    /// The current clip's time when it was last stopped, and the time since.
+    held: Option<(f32, f32)>,
+}
+
+impl AnimLod {
+    pub fn new(stride: u32, phase: u32) -> Self {
+        Self { stride: stride.max(1), phase, held: None }
     }
 }
 
@@ -505,6 +525,7 @@ fn adopt_skeleton(ctx: &mut SkeletonCtx, entity: Entity, owner: Entity, generati
                 scaled,
                 raw: (tf.translation, tf.scale),
                 written: None,
+                scale: var_s * tf.scale,
             });
             scaled_bones.insert(name.to_owned(), scaled);
         }
@@ -640,10 +661,15 @@ fn bind(
     //   wherever the shared skeleton draws it.
     // FAILURE (2026-10-06): with NoFrustumCulling every part of every NPC was drawn
     //   off screen too -- ~11 skinned meshes per NPC, 20 FPS in the browser.
-    commands.entity(e).insert((
-        SkinnedMesh { inverse_bindposes: skin.inverse_bindposes.clone(), joints },
-        bevy::camera::primitives::Aabb::from_min_max(CHARACTER_BOUNDS.0, CHARACTER_BOUNDS.1),
-    ));
+    commands
+        .entity(e)
+        .insert((
+            SkinnedMesh { inverse_bindposes: skin.inverse_bindposes.clone(), joints },
+            bevy::camera::primitives::Aabb::from_min_max(CHARACTER_BOUNDS.0, CHARACTER_BOUNDS.1),
+        ))
+        // Our fixed character box replaces bevy's per-frame skinned bounds
+        // (0.6 ms a frame for Kingshill's NPCs, single-threaded).
+        .remove::<bevy::camera::visibility::DynamicSkinnedMeshBounds>();
 }
 
 /// A box around any posed character (weapons and capes included), in its own space.
@@ -732,25 +758,53 @@ fn keep_parts_bound(
 /// unscaled, its translation stretched by its parent's scale, its scale on its
 /// `scaled` child. SEE: VariedJoint.
 fn apply_variations(
-    mut joints: Query<(Entity, &mut Transform, &mut VariedJoint), Without<VariedChild>>,
-    mut scaled: Query<&mut Transform, With<VariedChild>>,
+    mut set: ParamSet<(
+        Query<(Entity, Ref<Transform>, &mut VariedJoint), Without<VariedChild>>,
+        Query<&mut Transform, Without<VariedChild>>,
+    )>,
+    mut scaled_tf: Query<&mut Transform, With<VariedChild>>,
+    mut dirty: Local<Vec<(Entity, Vec3, Entity, Vec3)>>,
 ) {
-    let mut scale: HashMap<Entity, Vec3> = HashMap::new();
-    for (e, tf, mut j) in &mut joints {
-        // A joint the animation did not write this frame still holds our output.
-        if j.written != Some((tf.translation, tf.scale)) {
+    // Only joints the animation moved since the last run (a frozen or off-screen
+    // character costs nothing): raw pose and scale first, so a child reads its
+    // parent's scale of this frame.
+    dirty.clear();
+    {
+        let mut joints = set.p0();
+        let mut moved = Vec::new();
+        for (e, tf, mut j) in &mut joints {
+            if !tf.is_changed() || j.written == Some((tf.translation, tf.scale)) {
+                continue;
+            }
             j.raw = (tf.translation, tf.scale);
+            j.scale = j.var_s * j.raw.1;
+            moved.push(e);
         }
-        scale.insert(e, j.var_s * j.raw.1);
+        for e in moved {
+            let Ok((_, _, j)) = joints.get(e) else { continue };
+            let parent_scale = j.parent.and_then(|p| joints.get(p).ok()).map(|(_, _, p)| p.scale).unwrap_or(Vec3::ONE);
+            let t = (j.raw.0 + j.var_t - j.bind_t) * parent_scale;
+            let (scaled, scale) = (j.scaled, j.scale);
+            if let Ok((_, _, mut j)) = joints.get_mut(e) {
+                j.written = Some((t, Vec3::ONE));
+            }
+            dirty.push((e, t, scaled, scale));
+        }
     }
-    for (e, mut tf, mut j) in &mut joints {
-        let parent_scale = j.parent.and_then(|p| scale.get(&p)).copied().unwrap_or(Vec3::ONE);
-        let t = (j.raw.0 + j.var_t - j.bind_t) * parent_scale;
-        tf.translation = t;
-        tf.scale = Vec3::ONE;
-        j.written = Some((t, Vec3::ONE));
-        if let Ok(mut s) = scaled.get_mut(j.scaled) {
-            s.scale = scale[&e];
+    // CONTRACT: write only what changes: every write marks the joint changed and
+    //   makes bevy re-propagate the skeleton.
+    let mut tfs = set.p1();
+    for &(e, t, scaled, scale) in dirty.iter() {
+        if let Ok(mut tf) = tfs.get_mut(e) {
+            if tf.translation != t || tf.scale != Vec3::ONE {
+                tf.translation = t;
+                tf.scale = Vec3::ONE;
+            }
+        }
+        if let Ok(mut sc) = scaled_tf.get_mut(scaled) {
+            if sc.scale != scale {
+                sc.scale = scale;
+            }
         }
     }
 }
@@ -761,20 +815,61 @@ struct VariedChild;
 
 fn drive_animations(
     time: Res<Time>,
-    mut characters: Query<(&mut CharacterAnim, &GlobalTransform, &InheritedVisibility)>,
+    mut frame: Local<u32>,
+    mut characters: Query<(&mut CharacterAnim, &GlobalTransform, &InheritedVisibility, Option<&mut AnimLod>)>,
     mut players: Query<&mut AnimationPlayer>,
-    cameras: Query<&GlobalTransform, With<Camera3d>>,
+    cameras: Query<(&Camera, &GlobalTransform), With<Camera3d>>,
 ) {
-    let eye = cameras.iter().next().map(|c| c.translation());
+    let cam = cameras.iter().next();
+    let eye = cam.map(|(_, g)| g.translation());
+    // On screen: the character's middle inside the view, with a margin for its
+    // size. Off screen it is not animated at all (it is not seen).
+    let on_screen = |p: Vec3| {
+        cam.and_then(|(c, g)| c.world_to_ndc(g, p + Vec3::Y)).is_some_and(|n| n.x.abs() < 1.3 && n.y.abs() < 1.3 && n.z > 0.0)
+    };
     let fade_step = time.delta_secs() / BLEND.as_secs_f32();
-    for (mut anim, at, shown) in &mut characters {
+    *frame = frame.wrapping_add(1);
+    for (mut anim, at, shown, mut lod) in &mut characters {
         let Some(player) = anim.player else { continue };
         let Ok(mut p) = players.get_mut(player) else { continue };
+        // A lower-rate character between its frames: held still, unevaluated.
+        if let Some(lod) = lod.as_mut() {
+            let mine = (*frame + lod.phase) % lod.stride == 0;
+            let steady = anim.fading.is_empty() && anim.applied.as_ref() == Some(&(anim.state.clone(), anim.speed));
+            if let (true, Some(node)) = (steady, anim.current) {
+                if !mine {
+                    match lod.held.as_mut() {
+                        Some((_, since)) => *since += time.delta_secs(),
+                        None => {
+                            let at = p.animation(node).map(|a| a.seek_time()).unwrap_or(0.0);
+                            p.stop(node);
+                            lod.held = Some((at, time.delta_secs()));
+                        }
+                    }
+                    continue;
+                }
+                if let Some((at, since)) = lod.held.take() {
+                    let speed = anim.speed;
+                    let a = p.play(node);
+                    a.set_weight(1.0).set_speed(speed).repeat();
+                    a.seek_to(at + since * speed);
+                }
+            } else if let Some((at, since)) = lod.held.take() {
+                if let Some(node) = anim.current {
+                    let speed = anim.speed;
+                    let a = p.play(node);
+                    a.set_weight(1.0).set_speed(speed).repeat();
+                    a.seek_to(at + since * speed);
+                }
+            }
+        }
         // Hidden (culled) or far characters: stopped, so their joints are not
         // evaluated at all -- a paused animation is still applied every frame
         // (7 ms a frame for Kingshill's NPCs, bevy trace_chrome). Played again
         // from their state once back in view.
-        let far = !shown.get() || eye.is_some_and(|e| e.distance(at.translation()) > ANIMATION_DISTANCE);
+        let far = !shown.get()
+            || eye.is_some_and(|e| e.distance(at.translation()) > ANIMATION_DISTANCE)
+            || !on_screen(at.translation());
         if far {
             if anim.applied.is_some() {
                 p.stop_all();

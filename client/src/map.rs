@@ -113,6 +113,12 @@ pub struct CurrentMap {
     /// Culling cells (CELL units square) by grid key; every placement is a child
     /// of its cell. SEE: cull_cells.
     pub cells: std::collections::HashMap<(i32, i32), Entity>,
+    /// Static surfaces waiting to be merged (crate::merge), baked once every
+    /// model is placed.
+    pub batches: crate::merge::Batches,
+    /// Materials by what they look like (textures, colours, states): the many
+    /// identical materials of different models share one, so their surfaces merge.
+    pub canonical: std::collections::HashMap<String, Handle<StandardMaterial>>,
     /// True once every model has been requested and every placement spawned.
     pub spawned: bool,
     pub instances: usize,
@@ -128,6 +134,8 @@ impl CurrentMap {
             by_model: Vec::new(),
             root: None,
             cells: Default::default(),
+            batches: Default::default(),
+            canonical: Default::default(),
             spawned: false,
             instances: 0,
         }
@@ -245,8 +253,10 @@ fn stream_models(
     nodes: Res<Assets<GltfNode>>,
     meshes: Res<Assets<GltfMesh>>,
     materials: Res<Assets<GltfMaterial>>,
-    mesh_assets: Res<Assets<Mesh>>,
+    mut mesh_assets_mut: ResMut<Assets<Mesh>>,
+    std_materials: Res<Assets<StandardMaterial>>,
 ) {
+    let mesh_assets = &*mesh_assets_mut;
     let Some(root) = current.root else { return };
     if current.spawned {
         return;
@@ -263,7 +273,7 @@ fn stream_models(
                     continue;
                 };
                 let placements = current.by_model[m].clone();
-                let flat = flat_surfaces(gltf, &nodes, &meshes, &materials, &mesh_assets, &asset_server);
+                let flat = flat_surfaces(gltf, &nodes, &meshes, &materials, mesh_assets, &asset_server);
                 for &i in &placements {
                     let inst = &manifest.instances[i];
                     let at = Transform {
@@ -281,11 +291,29 @@ fn stream_models(
                         Some(surfaces) => {
                             let inst_affine = at.compute_affine();
                             for s in surfaces {
-                                let tf = Transform::from_matrix(Mat4::from(inst_affine * s.local));
-                                let mut e = commands.spawn((Mesh3d(s.mesh.clone()), MeshMaterial3d(s.material.clone()), tf, ChildOf(cell)));
+                                let world = inst_affine * s.local;
                                 let size = s.size * at.scale.abs().max_element();
-                                if s.no_shadow || size < MIN_SHADOW_CASTER {
-                                    e.insert(bevy::light::NotShadowCaster);
+                                let casts_shadow = !(s.no_shadow || size < MIN_SHADOW_CASTER);
+                                // Merged with its cell's like surfaces (crate::merge);
+                                // alone when its layout cannot be.
+                                let material = match std_materials.get(&s.material) {
+                                    Some(m) => {
+                                        let sig = material_signature(m);
+                                        current.canonical.entry(sig).or_insert_with(|| s.material.clone()).clone()
+                                    }
+                                    None => s.material.clone(),
+                                };
+                                let merged = mesh_assets.get(&s.mesh).and_then(|mesh| {
+                                    let layout = crate::merge::layout_of(mesh)?;
+                                    let key = crate::merge::BatchKey { cell: key, material: material.id(), casts_shadow, layout };
+                                    current.batches.batch(key, &material).push(mesh, &world, layout).then_some(())
+                                });
+                                if merged.is_none() {
+                                    let tf = Transform::from_matrix(Mat4::from(world));
+                                    let mut e = commands.spawn((Mesh3d(s.mesh.clone()), MeshMaterial3d(s.material.clone()), tf, ChildOf(cell)));
+                                    if !casts_shadow {
+                                        e.insert(bevy::light::NotShadowCaster);
+                                    }
                                 }
                             }
                         }
@@ -310,15 +338,32 @@ fn stream_models(
         current.in_flight.push(m);
     }
     if current.models.len() == manifest.models.len() && current.in_flight.is_empty() {
+        // Bake the merged surfaces into their cells.
+        let batches = std::mem::take(&mut current.batches);
+        let mut draws = 0;
+        for (key, batch) in batches.open.into_iter().chain(batches.ready) {
+            let Some(&cell) = current.cells.get(&key.cell) else { continue };
+            let material = batch.material.clone();
+            let Some(mesh) = batch.build() else { continue };
+            let mut e = commands.spawn((Mesh3d(mesh_assets_mut.add(mesh)), MeshMaterial3d(material), Transform::IDENTITY, ChildOf(cell)));
+            if !key.casts_shadow {
+                e.insert(bevy::light::NotShadowCaster);
+            }
+            draws += 1;
+        }
+        info!("map {}: static surfaces merged into {draws} meshes", manifest.map);
         current.spawned = true;
         info!("map {}: all {} models placed", manifest.map, manifest.models.len());
     }
 }
 
-/// Map surfaces smaller than this (largest extent, world units) cast no shadow:
+/// Map surfaces smaller than this (largest extent, world units) cast no shadow.
+/// 0 since the static surfaces are merged (crate::merge): every object casts one
+/// again, as in the game, for a few hundred shadow draws.
+/// Before the merge:
 /// the shadow pass drew ~1 900 surfaces in Kingshill, 5 ms a frame in the
 /// browser, mostly barrels, crates and clutter whose shadows hardly show.
-const MIN_SHADOW_CASTER: f32 = 3.0;
+const MIN_SHADOW_CASTER: f32 = 0.0;
 
 /// Culling cell size, world units.
 pub const CELL: f32 = 24.0;
@@ -371,6 +416,31 @@ pub fn cull_cells(
             *v = wanted;
         }
     }
+}
+
+/// What a material looks like, as a key: two materials with the same signature
+/// draw the same.
+fn material_signature(m: &StandardMaterial) -> String {
+    let t = |h: &Option<Handle<Image>>| h.as_ref().map(|h| format!("{:?}", h.id())).unwrap_or_default();
+    let c = m.base_color.to_linear();
+    format!(
+        "{}|{}|{}|{}|{}|{:?}|{}|{}|{:?}|{:.3},{:.3},{:.3},{:.3}|{:.3},{:.3},{:.3}|{:.3}|{:.3}|{:?}|{:?}",
+        t(&m.base_color_texture),
+        t(&m.normal_map_texture),
+        t(&m.metallic_roughness_texture),
+        t(&m.emissive_texture),
+        t(&m.occlusion_texture),
+        m.alpha_mode,
+        m.unlit,
+        m.double_sided,
+        m.cull_mode,
+        c.red, c.green, c.blue, c.alpha,
+        m.emissive.red, m.emissive.green, m.emissive.blue,
+        m.perceptual_roughness,
+        m.metallic,
+        m.uv_transform,
+        m.depth_bias,
+    )
 }
 
 /// One visible surface of a static model, in the model's space.
@@ -429,16 +499,14 @@ fn flat_surfaces(
             let Some(gm) = prim.material.as_ref() else { return None };
             let Some(path) = gm.path() else { return None };
             let label = path.label()?.to_owned();
-            // Mirrored nodes use the loader's inverted (cull-flipped) material.
-            let label = if local.matrix3.determinant() < 0.0 && !label.ends_with("(inverted)") {
-                format!("{label} (inverted)")
-            } else {
-                label
-            };
+            // Mirroring is undone in the merged mesh itself (crate::merge reverses
+            // its winding), so the plain material, never the "(inverted)" one.
+            let label = label.trim_end_matches(" (inverted)").to_owned();
             // Ours (crate::materials) for glows and for lit surfaces with an emissive
             // map, whose emission is scaled to the node's intensity.
             let emissive = materials.get(gm).is_some_and(|m| m.emissive_texture.is_some());
-            let suffix = if additive || emissive { "dsor" } else { "std" };
+            let unlit = state.contains("\"dsor_unlit\":true");
+            let suffix = if additive || emissive || unlit { "dsor" } else { "std" };
             let material = asset_server.load::<StandardMaterial>(path.clone().with_label(format!("{label}/{suffix}")));
             let opaque = materials.get(gm).is_some_and(|m| matches!(m.alpha_mode, AlphaMode::Opaque | AlphaMode::Mask(_)));
             let size = mesh_assets

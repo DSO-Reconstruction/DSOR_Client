@@ -10,8 +10,10 @@
 mod character;
 mod decals;
 mod hud;
+mod lighting;
 mod map;
 mod materials;
+mod merge;
 mod nav;
 mod nameplate;
 mod net;
@@ -181,7 +183,23 @@ fn main() {
     }
     app
         .add_plugins(
-            DefaultPlugins
+            {
+                let plugins = DefaultPlugins.build();
+                // DSOR_LIKE_WEB=1 (native): run as the browser does -- one thread,
+                // logic and rendering one after the other -- to measure a frame's
+                // cost where it matters.
+                #[cfg(not(target_arch = "wasm32"))]
+                let plugins = if std::env::var("DSOR_LIKE_WEB").is_ok() {
+                    plugins
+                        .disable::<bevy::render::pipelined_rendering::PipelinedRenderingPlugin>()
+                        .set(bevy::app::TaskPoolPlugin {
+                            task_pool_options: bevy::app::TaskPoolOptions::with_num_threads(1),
+                        })
+                } else {
+                    plugins
+                };
+                plugins
+            }
                 .set(AssetPlugin {
                     file_path: asset_root(),
                     // The converted tree has no .meta files: asking for one per model
@@ -210,6 +228,7 @@ fn main() {
             npc::NpcPlugin,
             skills::SkillsPlugin,
             nameplate::NameplatePlugin,
+            lighting::LightingPlugin,
             MapPlugin,
             character::CharacterPlugin,
             net::NetPlugin,

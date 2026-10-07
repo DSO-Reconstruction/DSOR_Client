@@ -315,9 +315,12 @@ fn spawn_npcs(
             ));
             e
         };
-        commands
-            .entity(entity)
-            .insert((Npc { actor: spawn.actor, template: spawn.template.clone() }, Nameplate::npc(template.title.clone())));
+        commands.entity(entity).insert((
+            Npc { actor: spawn.actor, template: spawn.template.clone() },
+            Nameplate::npc(template.title.clone()),
+            // NPCs idle at a third of the frame rate (crate::character::AnimLod).
+            crate::character::AnimLod::new(3, spawn.actor % 3),
+        ));
     }
 }
 
