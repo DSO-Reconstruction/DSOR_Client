@@ -94,6 +94,44 @@ def values(layout, i):
     return out
 
 
+def splines(layout, attr):
+    """An animated Attribute's curve: its Graph's BezierSpline segments, each as
+    [x0, y0, cx0, cy0, cx1, cy1, x1, y1] with x in sequence frames."""
+    segs = []
+    for g in layout.kids(attr):
+        if layout.tag(g) != "Graph":
+            continue
+        for b in layout.kids(g):
+            a = layout.attrs(b)
+            pts = []
+            for k in ("startPoint", "startCP", "endCP", "endPoint"):
+                pts += [float(x) for x in (a.get(k) or "0, 0").split(",")]
+            segs.append(pts)
+    return segs
+
+
+def curves(layout, i):
+    """Every animated value of a TrackBar (isAnimated="True"), by name: "intensity",
+    "lighttrans.ty", "graphicstrans.sx"..."""
+    out = {}
+    for c in layout.kids(i):
+        a = layout.attrs(c)
+        name = a.get("name")
+        if not name:
+            continue
+        if a.get("isAnimated") == "True":
+            segs = splines(layout, c)
+            if segs:
+                out[name] = segs
+        for sub in layout.kids(c):
+            sa = layout.attrs(sub)
+            if sa.get("isAnimated") == "True" and sa.get("name"):
+                segs = splines(layout, sub)
+                if segs:
+                    out[f"{name}.{sa['name']}"] = segs
+    return out
+
+
 def num(v, default=0.0):
     try:
         return float(v)
@@ -146,6 +184,10 @@ def sequence(layout):
             t = {"kind": "sound", "name": v.get("soundname", ""), "volume": num(v.get("volume"), 100)}
         if t and (t.get("graphics", "x") not in ("", "empty")):
             t["start"], t["end"] = start, end
+            # Values that change over the track (a light dimming, an effect moving).
+            c = curves(layout, i)
+            if c:
+                t["curves"] = c
             tracks.append(t)
     return {"length": length, "repeat": repeat, "tracks": tracks}
 

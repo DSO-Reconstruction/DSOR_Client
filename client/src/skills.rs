@@ -106,9 +106,27 @@ pub struct SkillTable(pub HashMap<u32, SkillDef>);
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum Track {
     Anim { name: String, speed: f32, start: i32, end: i32 },
-    Fx { graphics: String, #[serde(default)] joint: String, at: [f32; 9], start: i32, end: i32 },
+    Fx {
+        graphics: String,
+        #[serde(default)]
+        joint: String,
+        at: [f32; 9],
+        start: i32,
+        end: i32,
+        #[serde(default)]
+        curves: HashMap<String, Vec<[f32; 8]>>,
+    },
     Phase { start: i32, end: i32 },
-    Light { color: [f32; 3], intensity: f32, range: f32, at: [f32; 9], start: i32, end: i32 },
+    Light {
+        color: [f32; 3],
+        intensity: f32,
+        range: f32,
+        at: [f32; 9],
+        start: i32,
+        end: i32,
+        #[serde(default)]
+        curves: HashMap<String, Vec<[f32; 8]>>,
+    },
     Shake { intensity: f32, range: f32, start: i32, end: i32 },
     Hide { start: i32, end: i32 },
     Sound { start: i32, end: i32 },
@@ -221,6 +239,9 @@ pub struct SequencePlayer {
     /// Per track: started, and what it spawned.
     started: Vec<bool>,
     spawned: Vec<Option<Entity>>,
+    /// Per track: what its local placement is multiplied by (the world placement
+    /// it was left at, or the character's entity frame), for animated placements.
+    bases: Vec<Mat4>,
 }
 
 /// A bullet in flight.
@@ -233,9 +254,6 @@ struct Bullet {
     dying: Option<f32>,
 }
 
-/// How long a dead bullet's trail particles live on (the longest particle
-/// lifetime of the player skills' bullets is under a second).
-const TRAIL_FADE: f32 = 1.0;
 
 /// A caster carried by its skill (Jump, Charge): from `from` to `to` between the
 /// skill's LoopStartFrame and HitFrame, in an arc for a jump.
@@ -447,7 +465,7 @@ fn play(commands: &mut Commands, seq: Sequence, actor: Option<Entity>, anchor: E
 fn play_with(commands: &mut Commands, seq: Sequence, actor: Option<Entity>, anchor: Entity, looping: bool, follow: bool) -> Entity {
     let n = seq.tracks.len();
     commands
-        .spawn(SequencePlayer { seq, t: 0.0, actor, anchor, looping, follow, stop: false, started: vec![false; n], spawned: vec![None; n] })
+        .spawn(SequencePlayer { seq, t: 0.0, actor, anchor, looping, follow, stop: false, started: vec![false; n], spawned: vec![None; n], bases: vec![Mat4::IDENTITY; n] })
         .id()
 }
 
@@ -654,20 +672,71 @@ fn fly_bullets(
                     what: PendingKind::Sequence { name: b.death.clone(), at: Transform::from_translation(tf.translation).with_rotation(tf.rotation) },
                 });
             }
-            // The ball and its light go; its trail stops growing and fades out
-            // instead of vanishing with it ("y'a plus la trainee").
-            for c in children.iter_descendants(e) {
-                if shown_parts.contains(c) {
-                    commands.entity(c).insert(Visibility::Hidden);
-                }
-                if emitters.contains(c) {
-                    commands.entity(c).insert(crate::particles::StopEmitting);
-                }
-            }
-            b.dying = Some(TRAIL_FADE);
+            // The bullet and everything its loop sequence drew go at once (the
+            // client's track exit removes graphics entities); its death sequence
+            // takes over where it ended.
+            let _ = (&children, &shown_parts, &emitters);
+            commands.entity(e).despawn();
         }
     }
 }
+
+fn curves_of(t: &Track) -> HashMap<String, Vec<[f32; 8]>> {
+    match t {
+        Track::Fx { curves, .. } | Track::Light { curves, .. } => curves.clone(),
+        _ => HashMap::new(),
+    }
+}
+
+/// A track's bezier curve at a sequence frame: segments [x0,y0,cx0,cy0,cx1,cy1,x1,y1],
+/// held constant before the first and after the last (preInfinity / postInfinity
+/// "Constant").
+fn eval_curve(segs: Option<&Vec<[f32; 8]>>, frame: f32) -> Option<f32> {
+    let segs = segs?;
+    let first = segs.first()?;
+    let last = segs.last()?;
+    if frame <= first[0] {
+        return Some(first[1]);
+    }
+    if frame >= last[6] {
+        return Some(last[7]);
+    }
+    let s = segs.iter().find(|s| frame >= s[0] && frame <= s[6])?;
+    let bez = |t: f32, a: f32, b: f32, c: f32, d: f32| {
+        let u = 1.0 - t;
+        u * u * u * a + 3.0 * u * u * t * b + 3.0 * u * t * t * c + t * t * t * d
+    };
+    // x(t) = frame, by bisection (x is monotonic along a segment).
+    let (mut lo, mut hi) = (0.0f32, 1.0f32);
+    for _ in 0..24 {
+        let mid = (lo + hi) * 0.5;
+        if bez(mid, s[0], s[2], s[4], s[6]) < frame {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    let t = (lo + hi) * 0.5;
+    Some(bez(t, s[1], s[3], s[5], s[7]))
+}
+
+/// A track's 9 placement values (tx..sz) with its animated components applied.
+fn curved(at: &[f32; 9], curves: &HashMap<String, Vec<[f32; 8]>>, prefix: &str, frame: f32) -> [f32; 9] {
+    let mut out = *at;
+    if curves.is_empty() {
+        return out;
+    }
+    for (k, name) in ["tx", "ty", "tz", "rx", "ry", "rz", "sx", "sy", "sz"].iter().enumerate() {
+        if let Some(v) = eval_curve(curves.get(&format!("{prefix}.{name}")), frame) {
+            out[k] = v;
+        }
+    }
+    out
+}
+
+/// A sequence point light's intensity (Nebula 0..10) in bevy lumens.
+/// UNVERIFIED: the scale; chosen so the fireball's light does not burn its rock white.
+const LIGHT_LUMENS: f32 = 40_000.0;
 
 /// An effect transform from a track: translation, rotation in degrees, scale.
 fn track_transform(at: &[f32; 9]) -> Transform {
@@ -693,8 +762,10 @@ fn play_sequences(
     mut shake: ResMut<CameraShake>,
     locals: Query<&LocalPlayer>,
     remotes: Query<&RemotePlayer>,
+    mut point_lights: Query<(&mut PointLight, &mut Transform), Without<Character>>,
 ) {
     let eye = cameras.iter().next().map(|c| c.translation());
+    let mut lights_to_set: Vec<(Entity, f32, f32, Transform)> = Vec::new();
     for (e, mut p) in &mut players {
         // Walking away interrupts the skill, as in the game: its effects go with it
         // (they stayed on the running player for seconds otherwise).
@@ -740,9 +811,11 @@ fn play_sequences(
                         };
                         let path = format!("{graphics}.glb");
                         // On a character (not a joint): into its entity frame.
-                        let mut place = track_transform(at);
+                        let mut place = track_transform(&curved(at, &curves_of(&track), "graphicstrans", frame));
+                        let mut base = Mat4::IDENTITY;
                         if joint.is_empty() && characters.contains(p.anchor) {
-                            place = Transform::from_rotation(entity_rotation(0.0)) * place;
+                            base = Transform::from_rotation(entity_rotation(0.0)).to_matrix();
+                            place = Transform::from_matrix(base * place.to_matrix());
                         }
                         let mut fx = commands.spawn((
                             WorldAssetRoot(assets.load(GltfAssetLabel::Scene(0).from_asset(path.clone()))),
@@ -754,12 +827,14 @@ fn play_sequences(
                         if unattached {
                             // Left where it was made: the anchor's world placement now.
                             if let Ok(g) = transforms.get(p.anchor) {
+                                base = g.to_matrix() * base;
                                 fx.insert(Transform::from_matrix(g.to_matrix() * place.to_matrix()));
                             }
                         } else if let Some(parent) = parent.filter(|p| exists.contains(*p)) {
                             fx.insert(ChildOf(parent));
                         }
                         p.spawned[i] = Some(fx.id());
+                        p.bases[i] = base;
                     }
                     Track::Light { color, intensity, range, at, .. } => {
                         let light = commands
@@ -767,7 +842,7 @@ fn play_sequences(
                                 PointLight {
                                     color: Color::srgb(color[0], color[1], color[2]),
                                     // UNVERIFIED: Nebula's intensity (0..10) to lumens.
-                                    intensity: intensity * 40_000.0,
+                                    intensity: intensity * LIGHT_LUMENS,
                                     range: *range,
                                     shadow_maps_enabled: false,
                                     ..default()
@@ -800,13 +875,29 @@ fn play_sequences(
                     Track::Phase { .. } | Track::Sound { .. } => {}
                 }
             }
-            if p.started[i] && ending {
-                if let Some(s) = p.spawned[i].take() {
-                    if matches!(track, Track::Fx { .. }) {
-                        commands.entity(s).try_insert(Retiring { left: TRAIL_FADE, started: false });
-                    } else {
-                        commands.entity(s).try_despawn();
+            // Animated values (bezier curves over the sequence's frames).
+            if let (true, Some(spawned)) = (p.started[i] && !ending, p.spawned[i]) {
+                match &track {
+                    Track::Fx { at, curves, .. } if !curves.is_empty() => {
+                        let place = track_transform(&curved(at, curves, "graphicstrans", frame));
+                        commands.entity(spawned).try_insert(Transform::from_matrix(p.bases[i] * place.to_matrix()));
                     }
+                    Track::Light { intensity, range, at, curves, .. } if !curves.is_empty() => {
+                        let k = eval_curve(curves.get("intensity"), frame).unwrap_or(*intensity);
+                        let r = eval_curve(curves.get("range"), frame).unwrap_or(*range);
+                        let place = track_transform(&curved(at, curves, "lighttrans", frame));
+                        lights_to_set.push((spawned, k, r, place));
+                    }
+                    _ => {}
+                }
+            }
+            if p.started[i] && ending {
+                // CONTRACT: gone at once, as the client's track exit does
+                //   (GraphicsObjectTrackBar OnExit 0x8B2C72 -> 0x8B27C3 removes the
+                //   graphics entity): fading out is the track's own business (its
+                //   n3 intensity animators, its end frame).
+                if let Some(s) = p.spawned[i].take() {
+                    commands.entity(s).try_despawn();
                 }
                 match &track {
                     Track::Anim { name, .. } => {
@@ -830,13 +921,20 @@ fn play_sequences(
         }
         if done {
             for s in p.spawned.iter_mut().filter_map(|s| s.take()) {
-                commands.entity(s).try_insert(Retiring { left: TRAIL_FADE, started: false });
+                commands.entity(s).try_despawn();
             }
             // A standalone anchor (a point on the ground) goes with its sequence.
             if p.actor.is_none() && anchor_alive && !p.looping {
                 commands.entity(p.anchor).try_despawn();
             }
             commands.entity(e).despawn();
+        }
+    }
+    for (light, k, r, place) in lights_to_set {
+        if let Ok((mut l, mut tf)) = point_lights.get_mut(light) {
+            l.intensity = k * LIGHT_LUMENS;
+            l.range = r;
+            *tf = place;
         }
     }
 }
