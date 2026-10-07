@@ -236,6 +236,9 @@ pub struct SequencePlayer {
     follow: bool,
     /// Set to end the sequence now (its effects retire gracefully).
     pub stop: bool,
+    /// A newer skill sequence took over the same actor's animation: this one
+    /// neither starts nor ends an animation any more.
+    superseded: bool,
     /// Per track: started, and what it spawned.
     started: Vec<bool>,
     spawned: Vec<Option<Entity>>,
@@ -465,7 +468,7 @@ fn play(commands: &mut Commands, seq: Sequence, actor: Option<Entity>, anchor: E
 fn play_with(commands: &mut Commands, seq: Sequence, actor: Option<Entity>, anchor: Entity, looping: bool, follow: bool) -> Entity {
     let n = seq.tracks.len();
     commands
-        .spawn(SequencePlayer { seq, t: 0.0, actor, anchor, looping, follow, stop: false, started: vec![false; n], spawned: vec![None; n], bases: vec![Mat4::IDENTITY; n] })
+        .spawn(SequencePlayer { seq, t: 0.0, actor, anchor, looping, follow, stop: false, superseded: false, started: vec![false; n], spawned: vec![None; n], bases: vec![Mat4::IDENTITY; n] })
         .id()
 }
 
@@ -766,6 +769,21 @@ fn play_sequences(
 ) {
     let eye = cameras.iter().next().map(|c| c.translation());
     let mut lights_to_set: Vec<(Entity, f32, f32, Transform)> = Vec::new();
+    // A new skill sequence on an actor takes its animation over from the older
+    // ones (their effects play on): an older one's ending animation track reset
+    // the actor to Idle in the middle of the second cast of the same skill.
+    let newest: HashMap<Entity, Entity> = players
+        .iter()
+        .filter(|(_, p)| p.t == 0.0 && p.actor.is_some() && p.actor == Some(p.anchor) && p.seq.tracks.iter().any(|t| matches!(t, Track::Anim { .. })))
+        .map(|(e, p)| (p.anchor, e))
+        .collect();
+    for (e, mut p) in &mut players {
+        if let Some(&new) = p.actor.and_then(|a| newest.get(&a)) {
+            if new != e && p.t > 0.0 && p.actor == Some(p.anchor) {
+                p.superseded = true;
+            }
+        }
+    }
     for (e, mut p) in &mut players {
         // Walking away interrupts the skill, as in the game: its effects go with it
         // (they stayed on the running player for seconds otherwise).
@@ -795,7 +813,7 @@ fn play_sequences(
             if !p.started[i] && frame >= start as f32 && !ending {
                 p.started[i] = true;
                 match &track {
-                    Track::Anim { name, speed, .. } => {
+                    Track::Anim { name, speed, .. } if !p.superseded => {
                         if let Some(Ok(mut a)) = p.actor.map(|a| anims.get_mut(a)) {
                             a.state = AnimState::Named(name.clone());
                             a.speed = *speed;
@@ -872,7 +890,7 @@ fn play_sequences(
                             *v = Visibility::Hidden;
                         }
                     }
-                    Track::Phase { .. } | Track::Sound { .. } => {}
+                    Track::Phase { .. } | Track::Sound { .. } | Track::Anim { .. } => {}
                 }
             }
             // Animated values (bezier curves over the sequence's frames).
@@ -900,7 +918,7 @@ fn play_sequences(
                     commands.entity(s).try_despawn();
                 }
                 match &track {
-                    Track::Anim { name, .. } => {
+                    Track::Anim { name, .. } if !p.superseded => {
                         if let Some(Ok(mut a)) = p.actor.map(|a| anims.get_mut(a)) {
                             if a.state == AnimState::Named(name.clone()) {
                                 a.state = AnimState::Idle;

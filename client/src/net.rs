@@ -410,6 +410,11 @@ fn on_command(net: &mut Net, command: ServerCommand, actor: Option<u32>) {
             };
             info!("I am {} ({}), actor {:?}, at {:?}", p.name, desc.animation_set(), actor, p.position);
             net.local_actor = actor;
+            // Health and skill resource from the start (+212 / +216), so a skill
+            // the character cannot pay for is never cast -- before this, rage that
+            // no blow had changed yet was unknown and every cast went out.
+            net.health = Some(p.words_212[0] as f32);
+            net.resource = Some(p.words_212[1] as f32);
             net.local_name = Some(p.name.clone());
             // The third leading bool is the admin byte (OverheadAdminColor name).
             let admin = p.leading_flags[2];
