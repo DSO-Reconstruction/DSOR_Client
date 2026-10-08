@@ -9,6 +9,7 @@
 
 mod character;
 mod decals;
+mod exits;
 mod hud;
 mod anim_cull;
 mod refraction;
@@ -251,7 +252,7 @@ fn main() {
             nav::NavPlugin,
             hud::HudPlugin,
         ))
-        .add_plugins((anim_cull::AnimCullPlugin, refraction::RefractionPlugin))
+        .add_plugins((anim_cull::AnimCullPlugin, refraction::RefractionPlugin, exits::ExitsPlugin))
         .insert_resource(ClearColor(Color::srgb(0.05, 0.06, 0.08)))
         .insert_resource(GlobalAmbientLight {
             color: Color::WHITE,

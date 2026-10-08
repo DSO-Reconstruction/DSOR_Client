@@ -176,6 +176,8 @@ pub struct LocalPlayer {
     /// Body facing, radians around +Y.
     pub facing: f32,
     last_sent_tick: u32,
+    /// Stood on the navigation mesh since arriving on this map.
+    snapped: bool,
     /// Seconds the current skill still holds the player in place (its
     /// MotionUnblockFrame); walking and the run/idle animation wait for it.
     pub casting: f32,
@@ -319,6 +321,7 @@ fn pump(
     roots: Query<Entity, With<MapRoot>>,
     assets: Res<AssetServer>,
     manifests: Res<Assets<MapManifest>>,
+    left_behind: Query<Entity, Or<(With<crate::npc::Npc>, With<RemotePlayer>)>>,
 ) {
     let now = now_ms(&time);
     let net = &mut *net;
@@ -360,6 +363,21 @@ fn pump(
                 for root in &roots {
                     commands.entity(root).despawn();
                 }
+                // The old map's NPCs and players go with it: the new map server has
+                // its own actors, and nobody would ever say these had left.
+                for e in &left_behind {
+                    commands.entity(e).despawn();
+                }
+                net.requested.clear();
+                net.remote_spawns.clear();
+                net.remote_moves.clear();
+                net.remote_gone.clear();
+                net.remote_redress.clear();
+                net.npc_spawns.clear();
+                net.npc_gone.clear();
+                // Nothing may stand on the old map's ground (the new player snaps to
+                // the first mesh it sees); crate::nav loads the new one.
+                commands.remove_resource::<CurrentNav>();
                 net.centre = None;
                 commands.insert_resource(CurrentMap::new(name.clone(), assets.load(format!("maps/{name}.map.json"))));
             }
@@ -647,6 +665,7 @@ fn spawn_local(
         target: None,
         facing: heading,
         last_sent_tick: 0,
+        snapped: false,
         casting: 0.0,
     });
 }
@@ -706,20 +725,19 @@ fn walk_local(
     nav: Option<Res<CurrentNav>>,
     meshes: Res<Assets<NavMesh>>,
     mut players: Query<(&mut Transform, &mut LocalPlayer, &mut CharacterAnim)>,
-    mut snapped: Local<bool>,
     mut autowalked: Local<bool>,
 ) {
     let mesh = nav.as_ref().and_then(|n| meshes.get(&n.0));
     for (mut tf, mut player, mut anim) in &mut players {
         // On arrival, stand on the ground nearest where the server put us.
-        if let (Some(mesh), false) = (mesh, *snapped) {
+        if let (Some(mesh), false) = (mesh, player.snapped) {
             if let Some(p) = mesh.nearest(tf.translation, 4.0) {
                 tf.translation = p;
             }
-            *snapped = true;
+            player.snapped = true;
         }
         // DSOR_AUTOWALK=dx,dz: walk that far once, on arrival (testing without a mouse).
-        if *snapped && player.target.is_none() && player.last_sent_tick > 0 {
+        if player.snapped && player.target.is_none() && player.last_sent_tick > 0 {
             if let Some((dx, dz)) = std::env::var("DSOR_AUTOWALK").ok().and_then(|v| {
                 let mut it = v.split(',').filter_map(|x| x.trim().parse::<f32>().ok());
                 Some((it.next()?, it.next()?))
