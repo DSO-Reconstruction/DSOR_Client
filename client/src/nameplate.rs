@@ -30,9 +30,6 @@ impl Nameplate {
     pub fn player(name: String, admin: bool) -> Self {
         Self { text: name, color: if admin { ADMIN } else { Color::WHITE } }
     }
-    pub fn npc(title: String) -> Self {
-        Self { text: title, color: Color::WHITE }
-    }
 }
 
 /// The UI node drawing an actor's name.

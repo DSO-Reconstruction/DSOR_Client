@@ -87,8 +87,9 @@ struct Batch {
 /// What a batch is drawn with.
 #[derive(Clone, PartialEq, Eq, Hash)]
 enum Look {
-    /// Colour repeated at a scale, mask over the box.
-    Tiled(AssetId<Image>, AssetId<Image>, u32),
+    /// Colour repeated at a scale, mask over the box, and the box material's
+    /// opacity (the node's static Intensity0).
+    Tiled(AssetId<Image>, AssetId<Image>, u32, u32),
     /// The box material's merged texture over the box (no dsor_decal extras).
     Stretched(AssetId<StandardMaterial>),
 }
@@ -148,6 +149,7 @@ fn project_decals(
     asset_server: Res<AssetServer>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut decal_materials: ResMut<Assets<DecalMaterial>>,
+    std_materials: Res<Assets<StandardMaterial>>,
     pending: Query<(Entity, &GlobalTransform, &DecalVolume, &MeshMaterial3d<StandardMaterial>), Without<Projected>>,
     ground: Query<
         (&Mesh3d, &GlobalTransform, &Aabb),
@@ -158,7 +160,7 @@ fn project_decals(
     map_roots: Query<(), With<crate::map::MapRoot>>,
     mut plane: Local<Option<Handle<Mesh>>>,
 ) {
-    if std::env::var("DSOR_NO_DECALS").is_ok() {
+    if std::env::var("DSOR_NO_DECALS").is_ok() || crate::flag("nodecals") {
         return;
     }
     // Only the map's own decals are projected here, once. A skill effect's decal box
@@ -216,15 +218,20 @@ fn project_decals(
         let (lo, hi) = world_aabb(&to_world, Vec3::splat(-0.5), Vec3::splat(0.5));
         let mut seen = HashSet::new();
         let (look, scale) = match &volume.tiling {
-            Some(t) => (Look::Tiled(t.color.id(), t.mask.id(), t.scale.to_bits()), Some(t.scale)),
+            Some(t) => {
+                let alpha = std_materials.get(&material.0).map(|m| m.base_color.alpha()).unwrap_or(1.0);
+                (Look::Tiled(t.color.id(), t.mask.id(), t.scale.to_bits(), alpha.to_bits()), Some(t.scale))
+            }
             None => (Look::Stretched(material.0.id()), None),
         };
         let batch = &mut batches
             .entry(look)
             .or_insert_with(|| match &volume.tiling {
                 Some(t) => {
+                    let alpha = std_materials.get(&material.0).map(|m| m.base_color.alpha()).unwrap_or(1.0);
                     let m = decal_materials.add(DecalMaterial {
                         base: StandardMaterial {
+                            base_color: Color::srgba(1.0, 1.0, 1.0, alpha),
                             base_color_texture: Some(t.color.clone()),
                             alpha_mode: AlphaMode::Blend,
                             depth_bias: DECAL_DEPTH_BIAS,

@@ -30,10 +30,11 @@ use std::collections::HashMap;
 use bevy::asset::{LoadContext, RenderAssetUsages};
 use bevy::camera::visibility::NoFrustumCulling;
 use bevy::gltf::extensions::{ErasedGltfExtensionHandler, GltfExtensionHandler, GltfExtensionHandlers};
-use bevy::gltf::gltf;
 use bevy::light::NotShadowCaster;
 use bevy::mesh::{Indices, PrimitiveTopology, VertexAttributeValues};
 use bevy::prelude::*;
+
+use crate::surfaces::{Kind, NebulaMaterial, NebulaSurface, SurfaceParams};
 
 /// Envelope curve: 4 values, 2 key positions, then sine modulation (freq, amp, mode).
 type Envelope = [f32; 9];
@@ -108,8 +109,21 @@ pub struct Emitter {
     start_delay: f32,
     additive: bool,
     /// The emitter node's MatEmissiveIntensity: the particle shader draws
-    /// texture x colour x (1 + it) (shaders_sm30 "particle" ps_3_0, c3).
+    /// texture x colour x (1 + it), alpha included (shaders_sm30 "particle"
+    /// AlphaUnlit ps_3_0, c3); its Additive technique leaves it out.
     emissive: f32,
+    /// Seconds of travel a particle is drawn across: its quad's v = 0 edge sits
+    /// where it was `stretch` seconds ago (the particle vs_3_0 places those corners
+    /// at the second position stream).
+    stretch: f32,
+    /// Sprite sheet frames side by side (the node's AlphaRef, `numAnimPhases`),
+    /// stepped `fps` times a second on the scene clock (Intensity1,
+    /// `animFramesPerSecond`; vs_3_0 preshader: u / phases + frac(floor(t x fps) / phases)).
+    phases: u32,
+    fps: f32,
+    /// The soft edge against what is behind (Intensity0, `depthDensity`):
+    /// alpha x sat(depth behind / (density + 0.05)), with the depth prepass.
+    depth_density: f32,
 }
 
 impl Emitter {
@@ -144,6 +158,10 @@ impl Emitter {
             start_delay: num("start_delay"),
             additive: v.get("additive").and_then(|x| x.as_bool()).unwrap_or(false),
             emissive: 0.0,
+            stretch: num("stretch").max(0.0),
+            phases: 1,
+            fps: 0.0,
+            depth_density: 1.0,
         })
     }
 }
@@ -164,11 +182,11 @@ impl GltfExtensionHandler for NodeEmitters {
         }
         let Ok(v) = serde_json::from_str::<serde_json::Value>(raw) else { return };
         if let Some(mut e) = v.get("dsor_emitter").and_then(Emitter::from_json) {
-            e.emissive = v
-                .get("dsor_shader")
-                .and_then(|s| s.get("MatEmissiveIntensity"))
-                .and_then(|i| i.as_f64())
-                .unwrap_or(0.0) as f32;
+            let shader = |k: &str| v.get("dsor_shader").and_then(|s| s.get(k)).and_then(|i| i.as_f64()).map(|x| x as f32);
+            e.emissive = shader("MatEmissiveIntensity").unwrap_or(0.0);
+            e.fps = shader("Intensity1").unwrap_or(0.0);
+            e.depth_density = shader("Intensity0").unwrap_or(1.0).max(0.0);
+            e.phases = v.get("dsor_ints").and_then(|i| i.get("AlphaRef")).and_then(|x| x.as_u64()).unwrap_or(1).clamp(1, 64) as u32;
             entity.insert(e);
         }
     }
@@ -210,15 +228,18 @@ impl EmitterState {
     }
 }
 
-/// One draw: every particle with the same texture and blend mode.
+/// One draw: every particle with the same texture, blend mode, frame layout and
+/// soft edge.
 struct Group {
     mesh: Handle<Mesh>,
     tile: u32,
 }
 
+type GroupKey = (Option<AssetId<Image>>, bool, u32, u32, u32);
+
 #[derive(Resource, Default)]
 struct Groups {
-    by_key: HashMap<(Option<AssetId<Image>>, bool, u32), usize>,
+    by_key: HashMap<GroupKey, usize>,
     list: Vec<Group>,
 }
 
@@ -243,7 +264,8 @@ fn start_emitters(
     mut commands: Commands,
     mut groups: ResMut<Groups>,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
+    materials: Res<Assets<StandardMaterial>>,
+    mut particle_materials: ResMut<Assets<NebulaMaterial>>,
     new: Query<(Entity, &Emitter, &Children), Without<EmitterState>>,
     surfaces: Query<(&Mesh3d, &MeshMaterial3d<StandardMaterial>, &Transform)>,
     mut seed: Local<u32>,
@@ -267,17 +289,32 @@ fn start_emitters(
             continue;
         }
         let texture = materials.get(&material.0).and_then(|m| m.base_color_texture.clone());
-        let key = (texture.as_ref().map(|t| t.id()), emitter.additive, emitter.texture_tile);
+        let key = (texture.as_ref().map(|t| t.id()), emitter.additive, emitter.texture_tile, emitter.phases, emitter.depth_density.to_bits());
         let group = match groups.by_key.get(&key) {
             Some(&g) => g,
             None => {
-                let mat = materials.add(StandardMaterial {
-                    base_color_texture: texture,
-                    alpha_mode: if emitter.additive { AlphaMode::Add } else { AlphaMode::Blend },
-                    unlit: true,
-                    cull_mode: None,
-                    double_sided: true,
-                    ..default()
+                let mat = particle_materials.add(NebulaMaterial {
+                    base: StandardMaterial {
+                        base_color_texture: texture,
+                        alpha_mode: if emitter.additive { AlphaMode::Add } else { AlphaMode::Blend },
+                        unlit: true,
+                        cull_mode: None,
+                        double_sided: true,
+                        // Additive particles fade out in the fog (crate::surfaces): bevy's
+                        // fog would add its colour to them.
+                        fog_enabled: !emitter.additive,
+                        ..default()
+                    },
+                    extension: NebulaSurface {
+                        params: SurfaceParams {
+                            p0: Vec4::new(Kind::Particle as u32 as f32, 0.0, 0.0, 0.0),
+                            p2: Vec4::new(emitter.depth_density, emitter.additive as u32 as f32, 0.0, 0.0),
+                            ..default()
+                        },
+                        cube: None,
+                        layer: None,
+                        mask: None,
+                    },
                 });
                 let mesh = meshes.add(empty_mesh());
                 commands.spawn((
@@ -422,6 +459,7 @@ struct Buffers {
 }
 
 fn draw(
+    time: Res<Time>,
     groups: Res<Groups>,
     mut meshes: ResMut<Assets<Mesh>>,
     cameras: Query<&GlobalTransform, With<Camera3d>>,
@@ -443,23 +481,29 @@ fn draw(
         //   (x, 0, y) through the model matrix -- ground rings and shock waves
         //   lie on the ground. Drawn upright (XY) they were edge-on from above.
         let (r0, u0) = if e.billboard { (right, up) } else { (at.right().as_vec3(), at.back().as_vec3()) };
+        let phases = e.phases as f32;
+        let frame = if e.phases > 1 { ((time.elapsed_secs_wrapped() * e.fps).floor() / phases).fract() } else { 0.0 };
+        // Alpha: texture x colour x (1 + emissive); Additive: texture x colour.
+        let glow = if e.additive { 1.0 } else { 1.0 + e.emissive };
         for p in &s.particles {
             let a = p.age;
             let half = sample(&e.envelopes[SIZE], a) * p.size_var;
             let (sin, cos) = p.rot.sin_cos();
             let r = (r0 * cos + u0 * sin) * half;
             let u = (u0 * cos - r0 * sin) * half;
-            let glow = 1.0 + e.emissive;
             let c = [
                 sample(&e.envelopes[RED], a) * glow,
                 sample(&e.envelopes[GREEN], a) * glow,
                 sample(&e.envelopes[BLUE], a) * glow,
-                sample(&e.envelopes[ALPHA], a).clamp(0.0, 1.0),
+                (sample(&e.envelopes[ALPHA], a) * glow).clamp(0.0, 1.0),
             ];
             let (v0, v1) = (p.frame as f32 / tile, (p.frame + 1) as f32 / tile);
+            let (ul, ur) = (frame, frame + 1.0 / phases);
+            // The v = 0 edge trails where the particle was `stretch` seconds ago.
+            let trail = p.pos - p.vel * e.stretch;
             let base = b.pos.len() as u32;
-            for (corner, uv) in [(-r - u, [0.0, v1]), (r - u, [1.0, v1]), (r + u, [1.0, v0]), (-r + u, [0.0, v0])] {
-                b.pos.push((p.pos + corner).into());
+            for (corner, from, uv) in [(-r - u, p.pos, [ul, v1]), (r - u, p.pos, [ur, v1]), (r + u, trail, [ur, v0]), (-r + u, trail, [ul, v0])] {
+                b.pos.push((from + corner).into());
                 b.uv.push(uv);
                 b.color.push(c);
             }

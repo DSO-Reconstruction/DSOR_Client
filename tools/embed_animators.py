@@ -167,6 +167,51 @@ def shader_floats(d):
         at = i
 
 
+def node_states(d):
+    """{node name: {"pass": PTNM, "ints": {var: value}}}: each shape node's Nebula
+    render state (the frame shader's node filter: Solid, AlphaTest, Additive...)
+    and its integer shader params (n3 "TNIS": u16 len, name, i32) -- CullMode
+    (1 none, 2 back faces: D3DCULL_CW with Nebula's counter-clockwise fronts),
+    AlphaRef (the particle shader's numAnimPhases).
+    EVIDENCE: 16 004 standard Solid and 1 578 AlphaTest surfaces of the 2018 models
+      carry CullMode 2; DSO_Godot wrote every material double-sided, so leaves
+      modelled with a reversed copy of each face drew both copies over each other."""
+    out = {}
+    at = 0
+    while True:
+        at = d.find(b"DNM>", at)
+        if at < 0:
+            return out
+        try:
+            name, i = string(d, at + 8)
+        except (struct.error, UnicodeDecodeError):
+            at += 4
+            continue
+        end = d.find(b"DNM", i)
+        end = len(d) if end < 0 else end
+        ints, state = {}, None
+        j = i
+        while True:
+            j = d.find(b"TNIS", j, end)
+            if j < 0:
+                break
+            try:
+                var, k = string(d, j + 4)
+                ints[var] = struct.unpack_from("<i", d, k)[0]
+            except (struct.error, UnicodeDecodeError):
+                pass
+            j += 4
+        j = d.find(b"PTNM", i, end)
+        if j >= 0:
+            try:
+                state = string(d, j + 4)[0]
+            except (struct.error, UnicodeDecodeError):
+                state = None
+        if state or ints:
+            out[name] = {"pass": state, "ints": ints}
+        at = i
+
+
 def animators(d):
     out = []
     at = 0
@@ -220,7 +265,8 @@ for root, _dirs, files in os.walk(models):
         sprites = sprite_nodes(raw)
         uvs = uv_animators(raw)
         vectors = shader_vectors(raw)
-        if not anims and not floats and not sprites and not uvs and not vectors:
+        states = node_states(raw)
+        if not anims and not floats and not sprites and not uvs and not vectors and not states:
             continue
         try:
             doc, rest = read_glb(glb)
@@ -237,6 +283,8 @@ for root, _dirs, files in os.walk(models):
             nd.get("extras", {}).pop("dsor_sprite", None)
             nd.get("extras", {}).pop("dsor_uvanim", None)
             nd.get("extras", {}).pop("dsor_vector", None)
+            nd.get("extras", {}).pop("dsor_pass", None)
+            nd.get("extras", {}).pop("dsor_ints", None)
             if nd.get("name") in sprites:
                 nd.setdefault("extras", {})["dsor_sprite"] = True
                 stats["sprite nodes"] = stats.get("sprite nodes", 0) + 1
@@ -247,6 +295,29 @@ for root, _dirs, files in os.walk(models):
                     nd.setdefault("extras", {})["dsor_shader"] = params
                     shaded += 1
         stats["shader nodes"] = stats.get("shader nodes", 0) + shaded
+        # The render state of each surface, and its faces: a material is drawn
+        # single-sided when every node using it culls back faces (CullMode 2).
+        culls = {}
+        for nd in nodes:
+            st = states.get(nd.get("name"))
+            if not st:
+                continue
+            ex = nd.setdefault("extras", {})
+            if st["pass"]:
+                ex["dsor_pass"] = st["pass"]
+            if st["ints"]:
+                ex["dsor_ints"] = st["ints"]
+            if "mesh" in nd:
+                for prim in doc["meshes"][nd["mesh"]].get("primitives", []):
+                    if "material" in prim:
+                        culls.setdefault(prim["material"], set()).add(st["ints"].get("CullMode", 2))
+            shaded += 1
+        for mi, cs in culls.items():
+            single = cs == {2}
+            m = doc["materials"][mi]
+            if m.get("doubleSided", False) == single:
+                m["doubleSided"] = not single
+                stats["single-sided" if single else "double-sided"] = stats.get("single-sided" if single else "double-sided", 0) + 1
         for name, vecs in vectors:
             for nd in nodes:
                 if nd.get("name") == name and any(any(v) for v in vecs.values()):
@@ -278,6 +349,36 @@ for root, _dirs, files in os.walk(models):
         for i, lst in by_node.items():
             nodes[i].setdefault("extras", {})["dsor_anim"] = lst
             stats["animated nodes"] += 1
+        # What a material needs from its node, where both client paths (scene and
+        # flat map surfaces) can read it: the static alpha factor (Intensity0,
+        # `mayaAnimableAlpha` of standard / unlit / uvanimated / decal: alpha x it)
+        # and the uvanimated texture scroll (Velocity, `uvVelocity`: uv + it x t).
+        # EVIDENCE: shaders_sm30 "uvanimated" AlphaUnlit: vs uv + uvVelocity x
+        #   time, ps alpha x alphaBlendFactor x mayaAnimableAlpha (preshader c1).
+        ALPHA_SHADERS = {"shd:standard", "shd:unlit", "shd:uvanimated", "shd:uvanimated2", "shd:decal", "shd:simplelayer"}
+        SCROLL_SHADERS = {"shd:uvanimated", "shd:uvanimated2"}
+        for m in doc.get("materials", []):
+            if m.get("extras", {}).pop("dsor_alpha", None) is not None or m.get("extras", {}).pop("dsor_scroll", None) is not None:
+                shaded += 1
+        for i, nd in enumerate(nodes):
+            ex = nd.get("extras", {})
+            if "mesh" not in nd:
+                continue
+            anims = {a["var"] for a in by_node.get(i, [])}
+            alpha = ex.get("dsor_shader", {}).get("Intensity0")
+            vel = ex.get("dsor_vector", {}).get("Velocity", [0, 0])[:2]
+            for prim in doc["meshes"][nd["mesh"]].get("primitives", []):
+                if "material" not in prim:
+                    continue
+                m = doc["materials"][prim["material"]]
+                mex = m.setdefault("extras", {})
+                shader = mex.get("nebula_shader")
+                if shader in ALPHA_SHADERS and alpha is not None and abs(alpha - 1.0) > 1e-3 and "Intensity0" not in anims:
+                    mex["dsor_alpha"] = alpha
+                    shaded += 1
+                if shader in SCROLL_SHADERS and any(abs(v) > 1e-6 for v in vel) and "dsor_uvanim" not in ex and not anims:
+                    mex["dsor_scroll"] = vel
+                    shaded += 1
         if by_node or shaded or sprites:
             write_glb(glb, doc, rest)
             stats["models"] += 1

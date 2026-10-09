@@ -14,6 +14,12 @@
 #
 # Afterwards point the client at it:  ln -sfn <out_dir> <workspace>/assets
 #
+# Then puts back what glTF cannot carry (step 5, this repository's tools), in
+# this order: Nebula render states, emitters, animators / render states / cull
+# modes, cube maps and second layers, decal tiling, character colours, the
+# client's tables (skills, NPCs, exits, ambience) and the interface windows. The navigation meshes need the
+# server repository: EXPERIMENTAL=<experimental> enables them.
+#
 # Needs python3 with Pillow and numpy, a C++ compiler and curl (the .crn
 # transcoder), git (only when cloning DSO_Godot). Logs go to <out_dir>/logs/.
 set -eu
@@ -64,6 +70,26 @@ done
 echo "[convert] maps (log: $logs/export_maps.log)"
 python3 export_maps.py --root "$root" --out "$out/maps" > "$logs/export_maps.log" 2>&1
 tail -n 6 "$logs/export_maps.log"
+
+# 5. What glTF cannot carry, and the client's own tables.
+tools=$(cd "$(dirname "$0")" && pwd)
+echo "[convert] Nebula states and tables (log: $logs/post.log)"
+{
+    python3 "$tools/fix_materials.py" "$out"
+    python3 "$tools/embed_emitters.py" "$out"
+    python3 "$tools/embed_animators.py" "$root/models" "$out"
+    python3 "$tools/embed_textures.py" "$root" "$out" "$godot"
+    python3 "$tools/fix_materials.py" "$out" --n3 "$root/models"
+    python3 "$tools/fix_materials.py" "$out" --character-colors
+    python3 "$tools/character_tables.py" "$root" "$out"
+    python3 "$tools/export_skills.py" "$root" "$out"
+    python3 "$tools/export_npcs.py" "$root" "$out"
+    python3 "$tools/export_exits.py" "$root" "$out"
+    python3 "$tools/export_ambience.py" "$root" "$out"
+    python3 "$tools/export_ui.py" "$root" "$out" "$godot"
+    if [ -n "${EXPERIMENTAL:-}" ]; then python3 "$tools/export_navmesh.py" "$root" "$out"; fi
+} > "$logs/post.log" 2>&1
+tail -n 14 "$logs/post.log"
 
 du -sh "$out"
 echo "[convert] done -> $out"

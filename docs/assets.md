@@ -30,10 +30,12 @@ page, so the web server must serve the same tree next to `index.html`.
 | Path | What |
 |---|---|
 | `<category>/<model>.glb` | one model per client `.n3`: `models/t001_hub/arch_house_01.n3` -> `t001_hub/arch_house_01.glb`. Same sub-path, extension swapped. |
-| `<category>/<model>.fx.json` | particle emitter parameters, sidecar of a `.glb` (not used by this client yet) |
+| `<category>/<model>.fx.json` | particle emitter and render-state sidecar of a `.glb`, embedded into it by `tools/embed_emitters.py` |
 | `textures/<category>/<name>_color.png` etc. | textures, referenced by the `.glb` files through **relative** URIs (`../textures/t001_hub/mat_wood_01_color.png`). Never move a `.glb` out of the tree. Bump maps become `_bump_nrm.png` tangent-space normal maps, spec maps `_spec_rough.png`. |
 | `characters/uniskel/`, `characters/uniskel_dwarf/` | the player characters split up: `__animations.glb` (skeleton + every clip), `parts/*.glb`, `outfits.json` (outfit -> parts), `variations.json` (body-shape variations). |
 | `maps/<map>.map.json` | one placement manifest per client `.map` (format below). |
+| `maps/<map>.ambience.json` | the level's global light, post effect (fog, bloom, saturation, vignette) and placed lights (`tools/export_ambience.py`). |
+| `textures/**/<name>.cube.png` | cube maps, six faces stacked top to bottom (+X -X +Y -Y +Z -Z), `tools/embed_textures.py`. |
 | `maps/build_map.gd` | DSO_Godot's Godot-side builder; ignored here. |
 | `logs/` | conversion logs and `export_report.json`. |
 
@@ -110,6 +112,8 @@ ship or features glTF cannot carry:
   those materials have no base-colour map.
 - A few animation clips and mesh groups referenced by boss death models are
   missing from their `.nax3`/`.nvx2` files.
-- Shader-parameter and UV-scroll animators, cubemap reflections and Nebula's
-  additive/particle render states have no glTF equivalent (see DSO_Godot's
-  README). Effects therefore show as their spawn-surface meshes.
+- What glTF cannot carry is put back by `tools/` after the conversion (step 5 of
+  `convert_assets.sh`): Nebula render states and cull modes, emitters, shader
+  animators, cube maps and second texture layers, the levels' light and
+  post-effect settings. What the client draws of it, and what is still missing,
+  is in `docs/fx.md`.

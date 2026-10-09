@@ -2,7 +2,8 @@
 # Serve the browser client: the relay (WebSocket <-> UDP) and a static web server.
 #
 #   tools/serve_web.sh            build if needed, then serve on http://localhost:8080
-#   tools/serve_web.sh --build    rebuild the wasm client first
+#   tools/serve_web.sh --build    rebuild the wasm client first (tools/build_web.sh:
+#                                 the WebGPU and WebGL2 builds and their loader)
 #
 # Open:
 #   http://localhost:8080/?server=127.0.0.1:2190&relay=ws://127.0.0.1:2290&account=<id>&sid=<session>
@@ -14,10 +15,8 @@ WEB_PORT="${WEB_PORT:-8080}"
 RELAY="${RELAY:-0.0.0.0:2290}"
 
 if [ "${1:-}" = "--build" ] || [ ! -f client/dist/index.html ]; then
-    (cd client && trunk build --release)
+    tools/build_web.sh
 fi
-# The converted game data is never copied: the page reads it through a symlink.
-ln -sfn ../../assets client/dist/assets
 
 cargo build -q --release -p dsor-relay
 ./target/release/dsor-relay --listen "$RELAY" &

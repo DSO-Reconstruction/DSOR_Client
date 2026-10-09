@@ -33,7 +33,6 @@ pub struct ExitRow {
     pub id: String,
     pub name: String,
     pub url: String,
-    pub entry: String,
     pub graphics: String,
     pub range: f32,
     pub event: i32,

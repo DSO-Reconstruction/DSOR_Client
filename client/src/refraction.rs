@@ -15,7 +15,9 @@ use bevy::shader::ShaderRef;
 
 #[derive(Asset, AsBindGroup, Reflect, Debug, Clone)]
 pub struct Refraction {
-    /// x: strength (pixels), y: alphaBlendFactor, zw: scroll per second.
+    /// x: distortion in pixels (the node's Intensity1, `displacementFactor`, x 10
+    /// as the ps preshader computes it), y: alphaBlendFactor (the engine's fade,
+    /// 1), zw: the DuDv scroll per second (Velocity).
     #[uniform(100)]
     pub params: Vec4,
     #[texture(101)]

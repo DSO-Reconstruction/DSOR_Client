@@ -2420,9 +2420,11 @@ dependencies = [
  "dsor-raknet",
  "dsor-transport",
  "gltf",
+ "js-sys",
  "log",
  "serde",
  "serde_json",
+ "wasm-bindgen",
  "web-sys",
 ]
 
@@ -5641,6 +5643,7 @@ dependencies = [
  "smallvec",
  "static_assertions",
  "wasm-bindgen",
+ "wasm-bindgen-futures",
  "web-sys",
  "wgpu-core",
  "wgpu-hal",

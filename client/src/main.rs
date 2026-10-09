@@ -9,6 +9,7 @@
 
 mod character;
 mod decals;
+mod dump;
 mod exits;
 mod hud;
 mod anim_cull;
@@ -23,10 +24,11 @@ mod net;
 mod npc;
 mod particles;
 mod skills;
+mod surfaces;
+mod ui;
 
 use bevy::camera_controller::free_camera::{FreeCamera, FreeCameraPlugin};
 use bevy::diagnostic::{EntityCountDiagnosticsPlugin, FrameTimeDiagnosticsPlugin};
-use bevy::light::GlobalAmbientLight;
 use bevy::prelude::*;
 use bevy::render::view::screenshot::{save_to_disk, Screenshot};
 
@@ -173,6 +175,15 @@ pub fn flag(name: &str) -> bool {
         .contains(name)
 }
 
+/// The browser build on WebGL2 (the `webgl2` feature), whose limits some choices
+/// follow; natively and on WebGPU they do not apply.
+pub const WEBGL2: bool = cfg!(all(target_arch = "wasm32", not(feature = "webgpu")));
+
+/// Whether the camera keeps a depth pre-pass (see setup).
+fn depth_prepass() -> bool {
+    if WEBGL2 { flag("depth") } else { !flag("nodepth") }
+}
+
 fn main() {
     // CONTRACT: the IO pool is created here, before TaskPoolPlugin (which keeps an
     //   existing pool), with a large stack. bevy_gltf's loader waits in a
@@ -224,6 +235,7 @@ fn main() {
                     meta_check: bevy::asset::AssetMetaCheck::Never,
                     ..default()
                 })
+                .set(bevy::log::LogPlugin { custom_layer: dump::log_layer, ..default() })
                 .set(WindowPlugin {
                     primary_window: Some(Window {
                         title: format!("DSOR - {}", opts.map),
@@ -252,15 +264,36 @@ fn main() {
             nav::NavPlugin,
             hud::HudPlugin,
         ))
-        .add_plugins((anim_cull::AnimCullPlugin, refraction::RefractionPlugin, exits::ExitsPlugin))
+        .add_plugins(dump::DumpPlugin)
+        .add_plugins(ui::UiPlugin)
+        .add_plugins((anim_cull::AnimCullPlugin, refraction::RefractionPlugin, surfaces::SurfacesPlugin, exits::ExitsPlugin))
         .insert_resource(ClearColor(Color::srgb(0.05, 0.06, 0.08)))
-        .insert_resource(GlobalAmbientLight {
-            color: Color::WHITE,
-            brightness: 600.0,
-            affects_lightmapped_meshes: true,
+        // The sun's one shadow cascade covers 60 units: 1 024 texels in the
+        // browser (half bevy's default) is ~6 cm a texel.
+        .insert_resource(bevy::light::DirectionalLightShadowMap {
+            size: if flag("lowshadows") { 512 } else if WEBGL2 { 1024 } else { 2048 },
         })
         .insert_resource(opts.clone())
-        .add_systems(Startup, setup)
+        .add_systems(Startup, setup);
+    // CONTRACT: vertex and index slabs stay small in the browser. bevy's defaults
+    //   grow a slab x1.5 up to 512 MiB, copying it each time; with Kingshill's
+    //   ~140 MiB of static vertices ANGLE/Metal failed the allocation
+    //   ("GL_OUT_OF_MEMORY ... Failed to allocate host memory", then
+    //   CONTEXT_LOST) in Chrome on a Mac, the original build included.
+    if let Some(render) = app.get_sub_app_mut(bevy::render::RenderApp) {
+        if cfg!(target_arch = "wasm32") {
+            render.insert_resource(bevy::render::mesh::allocator::MeshAllocatorSettings {
+                slab_allocator_settings: bevy::render::slab_allocator::SlabAllocatorSettings {
+                    min_slab_size: 1 << 20,
+                    max_slab_size: 64 << 20,
+                    large_threshold: 32 << 20,
+                    growth_factor: 1.5,
+                },
+                ..default()
+            });
+        }
+    }
+    app
         .add_systems(Update, (screenshot_when_loaded, demo_character))
         .run();
 }
@@ -282,15 +315,42 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>, opts: Res<Optio
             .looking_at(map::game_to_bevy(t), Vec3::Y),
         None => Transform::default(),
     };
-    let camera = commands.spawn((Camera3d::default(), cam)).id();
+    // Lights are clustered for a top-down view: they all lie within a short depth
+    // of the camera, so few depth slices (bevy's advice for such games); the
+    // default 4 096 clusters in 24 slices cost CPU for nothing.
+    let clusters = bevy::light::cluster::ClusterConfig::FixedZ {
+        total: 512,
+        z_slices: 2,
+        z_config: default(),
+        dynamic_resizing: true,
+    };
+    let camera = commands.spawn((Camera3d::default(), clusters, cam)).id();
+    // The depth of the opaque scene, for the 2018 shaders' soft edges: particles
+    // (depthDensity), volume fog, water borders (crate::surfaces). Natively and on
+    // WebGPU always; on WebGL2 on request (?flag=depth): it binds the depth
+    // texture only without MSAA, and the pre-pass draws every opaque surface again.
+    // WebGL2: one hardware 2x2 comparison per pixel. bevy's default Gaussian
+    // filter (13 taps) on ANGLE/Metal took Kingshill from ~35 to ~1 FPS in
+    // Chrome on an M1 Pro (GPU-bound, the CPU at 4 ms).
+    if WEBGL2 {
+        commands.entity(camera).insert(bevy::light::ShadowFilteringMethod::Hardware2x2);
+    }
+    if depth_prepass() {
+        commands.entity(camera).insert(bevy::core_pipeline::prepass::DepthPrepass);
+        if WEBGL2 {
+            commands.entity(camera).insert(Msaa::Off);
+        }
+    }
     // Online the game camera follows the player (net::follow_camera); the free
     // fly camera is the map viewer's.
     if opts.net.is_none() {
         commands.entity(camera).insert(FreeCamera { walk_speed: 15.0, run_speed: 60.0, ..default() });
     }
 
-    // Sun: high and from the side, so walls and props read in relief.
+    // The level's global light (crate::lighting sets its colour, strength and
+    // direction from the level's data).
     commands.spawn((
+        lighting::Sun,
         DirectionalLight { illuminance: 7_500.0, shadow_maps_enabled: opts.shadows, ..default() },
         // One cascade: the boundary of a second one sat at the camera's own distance
         // at full zoom-out and cut the view in two ("la vision est coupee en 2").

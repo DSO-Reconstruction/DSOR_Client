@@ -11,7 +11,41 @@ use std::collections::HashMap;
 
 use bevy::asset::RenderAssetUsages;
 use bevy::mesh::{Indices, PrimitiveTopology, VertexAttributeValues};
+use bevy::asset::UntypedAssetId;
 use bevy::prelude::*;
+
+/// A static surface's material: a StandardMaterial, or one of the Nebula shaders
+/// drawn by a material of ours (crate::surfaces, crate::refraction).
+#[derive(Clone, Debug)]
+pub enum MapMaterial {
+    Standard(Handle<StandardMaterial>),
+    Surface(Handle<crate::surfaces::NebulaMaterial>),
+    Refraction(Handle<crate::refraction::RefractionMaterial>),
+}
+
+impl Default for MapMaterial {
+    fn default() -> Self {
+        Self::Standard(Handle::default())
+    }
+}
+
+impl MapMaterial {
+    pub fn id(&self) -> UntypedAssetId {
+        match self {
+            Self::Standard(h) => h.id().untyped(),
+            Self::Surface(h) => h.id().untyped(),
+            Self::Refraction(h) => h.id().untyped(),
+        }
+    }
+
+    pub fn insert(&self, e: &mut EntityCommands) {
+        match self {
+            Self::Standard(h) => e.insert(MeshMaterial3d(h.clone())),
+            Self::Surface(h) => e.insert(MeshMaterial3d(h.clone())),
+            Self::Refraction(h) => e.insert(MeshMaterial3d(h.clone())),
+        };
+    }
+}
 
 /// The attributes a merged mesh carries, as bits: 1 normal, 2 uv0, 4 uv1, 8 tangent,
 /// 16 colour. Surfaces are merged only with others of the same layout.
@@ -20,14 +54,14 @@ pub type Layout = u8;
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct BatchKey {
     pub cell: (i32, i32),
-    pub material: AssetId<StandardMaterial>,
+    pub material: UntypedAssetId,
     pub casts_shadow: bool,
     pub layout: Layout,
 }
 
 #[derive(Default)]
 pub struct Batch {
-    pub material: Handle<StandardMaterial>,
+    pub material: MapMaterial,
     positions: Vec<[f32; 3]>,
     normals: Vec<[f32; 3]>,
     uv0: Vec<[f32; 2]>,
@@ -161,7 +195,7 @@ pub struct Batches {
 }
 
 impl Batches {
-    pub fn batch(&mut self, key: BatchKey, material: &Handle<StandardMaterial>) -> &mut Batch {
+    pub fn batch(&mut self, key: BatchKey, material: &MapMaterial) -> &mut Batch {
         if self.open.get(&key).is_some_and(|b| b.is_full()) {
             let full = self.open.remove(&key).unwrap();
             self.ready.push((key.clone(), full));

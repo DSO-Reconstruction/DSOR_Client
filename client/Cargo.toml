@@ -5,14 +5,28 @@ edition.workspace = true
 version.workspace = true
 license.workspace = true
 
+[features]
+# The browser's graphics API (no effect natively). One per build: bevy's renderer
+# is specialised for it at compile time. index.html loads the WebGPU build when
+# the browser has an adapter, the WebGL2 one otherwise (tools/serve_web.sh).
+default = ["webgl2"]
+webgl2 = ["bevy/webgl2"]
+webgpu = ["bevy/webgpu"]
+
 [dependencies]
 log.workspace = true
 dsor-raknet.workspace = true
 dsor-proto.workspace = true
 dsor-transport.workspace = true
-# 3d: PBR + glTF + scenes; ui: the FPS/entity text; free_camera: WASD + mouse fly
-# camera. No audio for now.
-bevy = { workspace = true, features = ["3d", "ui", "png", "free_camera", "default_font"] }
+# bevy's "3d" collection without its web backend (default_platform brings
+# webgl2): the browser build picks WebGL2 or WebGPU through this crate's features.
+# ui: the HUD; free_camera: WASD + mouse fly camera. No audio for now.
+bevy = { workspace = true, features = [
+    "default_app", "scene", "picking", "3d_bevy_render",
+    "std", "bevy_gilrs", "bevy_winit", "bevy_clipboard", "default_font", "multi_threaded",
+    "x11", "wayland", "custom_cursor", "sysinfo_plugin",
+    "ui", "png", "free_camera",
+] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # The glTF document types bevy_gltf hands to extension handlers (same version).
@@ -20,4 +34,11 @@ gltf = { version = "1.4.1", default-features = false, features = ["extras"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 # Reads ?map=... from the page URL.
-web-sys = { version = "0.3", features = ["Window", "Location", "Storage", "Performance"] }
+web-sys = { version = "0.3", features = [
+    "Window", "Location", "Storage", "Performance",
+    # crate::dump: the bug dump's download and the browser's WebGL renderer.
+    "Navigator", "Document", "Element", "HtmlAnchorElement", "HtmlCanvasElement", "Blob",
+    "BlobPropertyBag", "Url", "WebGl2RenderingContext",
+] }
+js-sys = "0.3"
+wasm-bindgen = "0.2"
