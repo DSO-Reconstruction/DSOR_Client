@@ -5,8 +5,13 @@
 //!   colour and mask are already merged into one RGBA texture, drawn
 //!   alpha-blended over the ground the box covers (crate::decals).
 //! - `Additive`: glows (windows, torches, magic). Added to the frame, unlit.
-//! - `Hidden`: volume fog, refraction and particle emitter surfaces. Not artwork:
-//!   particles are rebuilt from the `.fx.json` sidecars (crate::fx).
+//! - `Hidden`: particle emitter surfaces, not artwork: the particles are rebuilt
+//!   from the emitters (crate::particles).
+//!
+//! Before any state, the Nebula shaders a StandardMaterial cannot draw get a
+//! material of ours: refraction (crate::refraction), and environment, simplelayer,
+//! water, volumefog, glow and scrolling uvanimated surfaces (crate::surfaces).
+//! The node's static alpha factor (extras.dsor_alpha) is applied to the rest.
 //!
 //! Done in a glTF extension handler, so the states are part of the loaded scene:
 //! nothing runs per entity once the map is up. Every surface that is not opaque
@@ -325,18 +330,33 @@ fn animate_shader_vars(
     }
 }
 
+/// A node's n3 shader parameters (tools/embed_animators.py): its floats
+/// (extras.dsor_shader: MatEmissiveIntensity, Intensity0..3, Amplitude, Scale,
+/// BumpScale...) and vectors (extras.dsor_vector: Velocity, MatDiffuse...).
+#[derive(Default, Clone)]
+struct NodeParams {
+    floats: std::collections::HashMap<String, f32>,
+    vectors: std::collections::HashMap<String, Vec4>,
+    velocity: Vec2,
+}
+
+impl NodeParams {
+    fn get(&self, k: &str) -> Option<f32> {
+        self.floats.get(k).copied()
+    }
+}
+
 #[derive(Default, Clone)]
 struct NebulaStates {
     /// This file's textures by glTF index (external images load by path, not as
     /// labelled sub-assets, so on_texture is the only way to their handles).
     textures: Vec<Option<Handle<Image>>>,
-    /// Node name -> its n3 MatEmissiveIntensity (extras.dsor_shader).
-    emissive: std::collections::HashMap<String, f32>,
-    /// Node name -> (Intensity0, Intensity1, Velocity.xy) of its n3 shader
-    /// (extras.dsor_shader / dsor_vector), for refraction surfaces.
-    shader_params: std::collections::HashMap<String, (f32, f32, Vec2)>,
+    /// Node name -> its n3 shader parameters.
+    params: std::collections::HashMap<String, NodeParams>,
     /// Material labels given a refraction material ("<label>/refr").
     refractions: std::collections::HashSet<String>,
+    /// Material labels given a surface material ("<label>/neb", crate::surfaces).
+    surfaces: std::collections::HashSet<String>,
     /// Whether lit surfaces of this file get their emission scaled (effects and
     /// the map; characters keep theirs).
     scale_lit: bool,
@@ -354,6 +374,25 @@ fn node_emissive(node: &::gltf::Node) -> Option<f32> {
     Some(v.get("dsor_shader")?.get("MatEmissiveIntensity")?.as_f64()? as f32)
 }
 
+/// The node a material belongs to: DSO_Godot names materials "<node>_<shader>".
+fn material_node<'a>(material: &'a gltf::Material<'a>) -> Option<&'a str> {
+    material.name().and_then(|n| n.rsplit_once('_')).map(|(n, _)| n)
+}
+
+/// The asset path in a material's extras.dsor_cube (tools/embed_textures.py).
+fn cube_path(extras: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(extras).ok()?;
+    Some(v.get("dsor_cube")?.as_str()?.to_owned())
+}
+
+/// The second layer's textures and tiling (extras.dsor_layer).
+fn layer_of(textures: &[Option<Handle<Image>>], extras: &str) -> Option<(Handle<Image>, Handle<Image>, f32)> {
+    let v: serde_json::Value = serde_json::from_str(extras).ok()?;
+    let l = v.get("dsor_layer")?;
+    let tex = |k: &str| textures.get(l.get(k)?.as_u64()? as usize)?.clone();
+    Some((tex("color")?, tex("mask")?, l.get("tiling").and_then(|t| t.as_f64()).unwrap_or(1.0) as f32))
+}
+
 impl GltfExtensionHandler for NebulaStates {
     fn dyn_clone(&self) -> Box<dyn ErasedGltfExtensionHandler> {
         Box::new(self.clone())
@@ -362,23 +401,32 @@ impl GltfExtensionHandler for NebulaStates {
     fn on_root(&mut self, load_context: &mut LoadContext<'_>, gltf: &::gltf::Gltf, _: &bevy::gltf::GltfLoaderSettings) {
         self.scale_lit = !load_context.path().path().to_string_lossy().starts_with("characters");
         for node in gltf.nodes() {
-            if let (Some(name), Some(i)) = (node.name(), node_emissive(&node)) {
-                self.emissive.insert(name.to_owned(), i);
+            let (Some(name), Some(extras)) = (node.name(), node.extras().as_ref()) else { continue };
+            let raw = extras.get();
+            if !raw.contains("dsor_shader") && !raw.contains("dsor_vector") {
+                continue;
             }
-            if let (Some(name), Some(extras)) = (node.name(), node.extras().as_ref()) {
-                if let Ok(v) = serde_json::from_str::<serde_json::Value>(extras.get()) {
-                    let f = |k: &str| v.get("dsor_shader").and_then(|s| s.get(k)).and_then(|x| x.as_f64()).map(|x| x as f32);
-                    let vel = v
-                        .get("dsor_vector")
-                        .and_then(|d| d.get("Velocity"))
-                        .and_then(|a| a.as_array())
-                        .map(|a| Vec2::new(a.first().and_then(|x| x.as_f64()).unwrap_or(0.0) as f32, a.get(1).and_then(|x| x.as_f64()).unwrap_or(0.0) as f32))
-                        .unwrap_or(Vec2::ZERO);
-                    if f("Intensity0").is_some() || f("Intensity1").is_some() || vel != Vec2::ZERO {
-                        self.shader_params.insert(name.to_owned(), (f("Intensity0").unwrap_or(1.0), f("Intensity1").unwrap_or(1.0), vel));
-                    }
-                }
-            }
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(raw) else { continue };
+            let floats = v
+                .get("dsor_shader")
+                .and_then(|s| s.as_object())
+                .map(|o| o.iter().filter_map(|(k, x)| Some((k.clone(), x.as_f64()? as f32))).collect())
+                .unwrap_or_default();
+            let vectors: std::collections::HashMap<String, Vec4> = v
+                .get("dsor_vector")
+                .and_then(|s| s.as_object())
+                .map(|o| {
+                    o.iter()
+                        .filter_map(|(k, x)| {
+                            let a = x.as_array()?;
+                            let c = |i: usize| a.get(i).and_then(|x| x.as_f64()).unwrap_or(0.0) as f32;
+                            Some((k.clone(), Vec4::new(c(0), c(1), c(2), c(3))))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            let velocity = vectors.get("Velocity").map(|v| v.truncate().truncate()).unwrap_or(Vec2::ZERO);
+            self.params.insert(name.to_owned(), NodeParams { floats, vectors, velocity });
         }
     }
 
@@ -433,18 +481,19 @@ impl GltfExtensionHandler for NebulaStates {
         material_asset: &GltfMaterial,
         material_label: &str,
     ) {
+        let extras = gltf_material.extras().as_ref().map(|e| e.get().to_owned()).unwrap_or_default();
+        let node = material_node(gltf_material).and_then(|n| self.params.get(n)).cloned().unwrap_or_default();
+        let intensity = node.get("MatEmissiveIntensity");
         // Refraction (shd:refraction): its own material, crate::refraction.
-        // CONTRACT: alphaBlendFactor = the node's Intensity0, the distortion (in
-        //   pixels) its Intensity1. UNVERIFIED: the shader names only
-        //   alphaBlendFactor (c1); the distortion constant c2 is not in its table.
-        let shader_name = gltf_material.extras().as_ref().map(|e| e.get().to_owned()).unwrap_or_default();
-        if shader_name.contains("shd:refraction") {
-            let node = gltf_material.name().and_then(|n| n.rsplit_once('_')).map(|(n, _)| n.to_owned()).unwrap_or_default();
-            let (alpha, strength, scroll) = self.shader_params.get(&node).copied().unwrap_or((1.0, 1.0, Vec2::ZERO));
+        // EVIDENCE: shaders_sm30 "refraction": the distortion is displacementFactor
+        //   (semantic Intensity1) x 10 pixels (ps preshader), the alpha
+        //   AlphaBlendFactor (the engine's fade, 1) x vertex alpha, the DuDv map
+        //   scrolled by uvVelocity (Velocity) x time.
+        if extras.contains("shd:refraction") {
             let m = crate::refraction::RefractionMaterial {
                 base: crate::refraction::base(),
                 extension: crate::refraction::Refraction {
-                    params: Vec4::new(strength, alpha, scroll.x, scroll.y),
+                    params: Vec4::new(10.0 * node.get("Intensity1").unwrap_or(1.0), 1.0, node.velocity.x, node.velocity.y),
                     dudv: material_asset.base_color_texture.clone(),
                 },
             };
@@ -452,11 +501,57 @@ impl GltfExtensionHandler for NebulaStates {
             self.refractions.insert(material_label.to_owned());
             return;
         }
-        // The material's node: DSO_Godot names materials "<node>_<shader>".
-        let intensity = gltf_material
-            .name()
-            .and_then(|n| n.rsplit_once('_'))
-            .and_then(|(node, _)| self.emissive.get(node).copied());
+        if let Some(kind) = crate::surfaces::kind_of(&extras).filter(|k| *k != crate::surfaces::Kind::Scroll) {
+            use crate::surfaces::{Kind, NebulaMaterial, NebulaSurface, SurfaceParams};
+            let mut base = standard_material(material_asset);
+            let mut params = SurfaceParams { p0: Vec4::new(kind as u32 as f32, 0.0, 1.0, 0.0), ..default() };
+            let (mut layer, mut mask) = (None, None);
+            let f = |k: &str, d: f32| node.get(k).unwrap_or(d);
+            match kind {
+                Kind::Environment | Kind::Layer => {
+                    params.p0.y = f("Amplitude", 0.5);
+                    params.p0.w = material_asset.metallic_roughness_texture.is_some() as u32 as f32;
+                    if let Some((c, m, tiling)) = layer_of(&self.textures, &extras) {
+                        (layer, mask) = (Some(c), Some(m));
+                        params.p0.z = tiling;
+                    }
+                    if self.scale_lit && material_asset.emissive_texture.is_some() {
+                        base.emissive = base.emissive * (intensity.unwrap_or(1.0) * EMISSIVE_NITS);
+                    }
+                }
+                Kind::Water => {
+                    params.p0.y = f("Intensity1", 0.0);
+                    params.p1 = Vec4::new(f("Intensity0", 1.0), f("Scale", 1.0), f("Intensity3", 0.0), f("Intensity2", 0.0));
+                    params.p2 = Vec4::new(f("Amplitude", 0.0), f("BumpScale", 0.0), 0.0, 0.0);
+                    base.perceptual_roughness = 0.3;
+                    base.metallic = 0.0;
+                }
+                Kind::VolumeFog => {
+                    params.p2 = Vec4::new(f("Intensity0", 1.0), f("Intensity1", 0.0), f("Intensity2", 0.0), intensity.unwrap_or(0.0));
+                    params.p3 = node.velocity.extend(0.0).extend(0.0);
+                    base.unlit = true;
+                    base.alpha_mode = AlphaMode::Blend;
+                }
+                Kind::Glow => {
+                    let c = node.vectors.get("MatDiffuse").copied().unwrap_or(Vec4::ZERO);
+                    let lin = Color::srgb(c.x, c.y, c.z).to_linear();
+                    params.p0.y = f("Amplitude", 0.0);
+                    params.p1 = Vec4::new(lin.red, lin.green, lin.blue, 0.0);
+                    params.p2 = Vec4::new(f("FresnelPower", 0.0), 1.0, 0.0, 0.0);
+                    base.unlit = true;
+                    base.alpha_mode = AlphaMode::Add;
+                    base.fog_enabled = false;
+                    base.base_color = Color::WHITE;
+                }
+                // Never here: crate::particles builds its own; Scroll is below.
+                Kind::Particle | Kind::Scroll => {}
+            }
+            let cube = cube_path(&extras).map(|p| load_context.load::<Image>(p));
+            let m = NebulaMaterial { base, extension: NebulaSurface { params, cube, layer, mask } };
+            load_context.add_labeled_asset(format!("{material_label}/neb"), m);
+            self.surfaces.insert(material_label.to_owned());
+            return;
+        }
         let state = state_of(gltf_material);
         let mut m = standard_material(material_asset);
         match state {
@@ -479,7 +574,7 @@ impl GltfExtensionHandler for NebulaStates {
             None => {
                 let unlit = gltf_material.extras().as_ref().is_some_and(|e| e.get().contains("\"dsor_unlit\":true"));
                 let emissive = self.scale_lit && material_asset.emissive_texture.is_some();
-                if !unlit && !emissive {
+                if !unlit && !emissive && !extras.contains("\"dsor_alpha\"") && !extras.contains("\"dsor_scroll\"") {
                     return;
                 }
                 // Drawn without lighting, as its Nebula state or shader says
@@ -494,6 +589,25 @@ impl GltfExtensionHandler for NebulaStates {
                     m.emissive = m.emissive * (intensity.unwrap_or(1.0) * EMISSIVE_NITS);
                 }
             }
+        }
+        // The node's static alpha factor (Intensity0): opacity, or brightness for
+        // an additive surface.
+        if let Some(a) = crate::surfaces::extras_number(&extras, "dsor_alpha") {
+            let c = m.base_color.to_linear();
+            m.base_color = if matches!(m.alpha_mode, AlphaMode::Add) {
+                LinearRgba::new(c.red * a, c.green * a, c.blue * a, c.alpha)
+            } else {
+                LinearRgba::new(c.red, c.green, c.blue, c.alpha * a)
+            }
+            .into();
+        }
+        if let Some(v) = crate::surfaces::extras_vec2(&extras, "dsor_scroll") {
+            use crate::surfaces::{Kind, NebulaMaterial, NebulaSurface, SurfaceParams};
+            let params = SurfaceParams { p0: Vec4::new(Kind::Scroll as u32 as f32, 0.0, 1.0, 0.0), p3: v.extend(0.0).extend(0.0), ..default() };
+            let surface = NebulaMaterial { base: m, extension: NebulaSurface { params, cube: None, layer: None, mask: None } };
+            load_context.add_labeled_asset(format!("{material_label}/neb"), surface);
+            self.surfaces.insert(material_label.to_owned());
+            return;
         }
         load_context.add_labeled_asset(dsor_label(material_label), m);
         self.ours.insert(material_label.to_owned());
@@ -519,6 +633,12 @@ impl GltfExtensionHandler for NebulaStates {
             let handle = load_context.get_label_handle::<crate::refraction::RefractionMaterial>(format!("{material_label}/refr"));
             entity.remove::<MeshMaterial3d<StandardMaterial>>();
             entity.insert((MeshMaterial3d(handle), Visibility::Inherited, NotShadowCaster));
+            return;
+        }
+        if self.surfaces.contains(material_label) {
+            let handle = load_context.get_label_handle::<crate::surfaces::NebulaMaterial>(format!("{material_label}/neb"));
+            entity.remove::<MeshMaterial3d<StandardMaterial>>();
+            entity.insert((MeshMaterial3d(handle), Visibility::Inherited));
             return;
         }
         match state {

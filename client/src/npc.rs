@@ -32,8 +32,6 @@ pub struct NpcTemplate {
     pub outfit: String,
     pub anim_set: String,
     pub state: String,
-    #[serde(default)]
-    pub title: String,
 }
 
 #[derive(Asset, TypePath, Deserialize, Debug)]
@@ -148,7 +146,6 @@ fn offline_npcs(
 #[derive(Component)]
 pub struct Npc {
     pub actor: u32,
-    pub template: String,
 }
 
 /// A whole-model NPC whose idle has not started yet.
@@ -316,7 +313,7 @@ fn spawn_npcs(
             e
         };
         commands.entity(entity).insert((
-            Npc { actor: spawn.actor, template: spawn.template.clone() },
+            Npc { actor: spawn.actor },
             // No name over NPCs: the game draws names over players only.
             // NPCs idle at a third of the frame rate (crate::character::AnimLod).
             crate::character::AnimLod::new(3, spawn.actor % 3),

@@ -1,8 +1,9 @@
 // Nebula's shd:refraction, as the 2018 client draws it (shaders_sm30 "refraction"
 // ps_3_0, disassembled): the scene behind the surface, read at the pixel moved by
 // the DuDv map --
-//   offset = (dudv.xy * 2 - 1) * pixelSize * strength
+//   offset = (dudv.xy * 2 - 1) * pixelSize * displacementFactor * 10   (ps preshader)
 //   colour = scene(screen + offset) * vertex colour, alpha = alphaBlendFactor * vertex alpha
+//   dudv uv = uv + uvVelocity * time                                     (vs preshader)
 // drawn over that same scene. bevy's copy of the scene (view_transmission_texture)
 // stands in for the client's light buffer; the alpha blend is done here, against
 // the unmoved scene, so the pass needs no blending state.

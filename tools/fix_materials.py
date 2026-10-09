@@ -15,8 +15,11 @@ the client turns into the matching render state (client/src/materials.rs):
   Additive  a glow: an emissive texture over no base colour (Nebula's additive
             pass adds EmsvMap0). The emission becomes the base colour; the client
             draws it additive and unlit.
-  Hidden    shd:volumefog, shd:refraction and particle surfaces: not artwork.
-            Particles are rebuilt from the .fx.json sidecars instead.
+  Hidden    particle emitter surfaces: not artwork, the particles are rebuilt
+            from the .fx.json sidecars (client/src/particles.rs). Volume fog and
+            refraction surfaces carry it too, so no StandardMaterial draws them:
+            the client gives them materials of its own (client/src/surfaces.rs,
+            refraction.rs).
 
 Idempotent: a material already carrying dsor_state is left alone.
 SEE: DSO_Godot docs/FORMATS.md "Shaders", godot/fx_to_scenes.gd.

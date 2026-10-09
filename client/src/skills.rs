@@ -51,14 +51,19 @@ fn entity_rotation(facing: f32) -> Quat {
 
 #[derive(Deserialize, Debug, Clone)]
 pub struct BulletDef {
-    pub id: String,
     #[serde(rename = "loop")]
     pub loop_seq: String,
+    /// The impact sequence on whatever it hits, its flight (Straight, Homing,
+    /// Orbiting...) and its hit radius: for the HitCommand handling that is not
+    /// written yet (docs/fx.md); bullets fly straight until their death sequence.
+    #[allow(dead_code)]
     pub impact: String,
     pub death: String,
+    #[allow(dead_code)]
     pub motion: String,
     pub velocity: f32,
     pub lifetime: f32,
+    #[allow(dead_code)]
     pub radius: f32,
     /// Where it leaves, in the caster's entity frame.
     pub start: [f32; 3],
@@ -69,7 +74,6 @@ pub struct SkillDef {
     pub id: String,
     #[serde(rename = "type")]
     pub kind: String,
-    pub targeting: String,
     pub hit_frame: u32,
     pub loop_start: u32,
     pub unblock: u32,
@@ -80,9 +84,7 @@ pub struct SkillDef {
     pub cooldown_category: String,
     #[serde(default)]
     pub resource_cost: f32,
-    pub pre: HashMap<String, String>,
     pub execute: HashMap<String, String>,
-    pub post: HashMap<String, String>,
     pub impact: String,
     pub bullet: Option<BulletDef>,
 }
@@ -188,8 +190,6 @@ pub struct StatusDef {
     pub tick: HashMap<String, String>,
     pub done: HashMap<String, String>,
     pub stop: HashMap<String, String>,
-    #[serde(default)]
-    pub animation: String,
 }
 
 impl StatusDef {

@@ -158,7 +158,6 @@ pub struct NpcSpawn {
 #[derive(Component)]
 pub struct RemotePlayer {
     pub actor: u32,
-    pub name: String,
     /// Where their last record says they are heading.
     pub target: Vec3,
     pub facing: f32,
@@ -416,10 +415,6 @@ fn on_command(net: &mut Net, command: ServerCommand, actor: Option<u32>) {
             let desc = CharacterDesc {
                 class: p.parts[0],
                 gender: p.parts[1],
-                hair: p.parts[2],
-                beard: p.parts[3],
-                body: p.parts[4],
-                variation: p.parts[5],
                 equipment: Vec::new(),
                 // The client tracks its own armament from the inventory; 0 is what
                 // the server sends (dsor/newplayer.py DEFAULT_ARMAMENT).
@@ -467,10 +462,6 @@ fn on_command(net: &mut Net, command: ServerCommand, actor: Option<u32>) {
             let desc = CharacterDesc {
                 class: p.parts[0],
                 gender: p.parts[1],
-                hair: p.parts[2],
-                beard: p.parts[3],
-                body: p.parts[4],
-                variation: p.parts[5],
                 equipment: p.equipment.iter().map(|w| (w.slot, w.skin_parts.clone())).collect(),
                 armament: p.armament.max(0),
                 look: None,
@@ -588,8 +579,8 @@ fn apply_remotes(
         let at = mesh.and_then(|m| m.nearest(at, 4.0)).unwrap_or(at);
         let e = spawn_character(&mut commands, desc, Transform::from_translation(at).with_rotation(Quat::from_rotation_y(heading)));
         commands.entity(e).insert((
-            Nameplate::player(name.clone(), admin),
-            RemotePlayer { actor, name, target: at, facing: heading, still_for: 1.0 },
+            Nameplate::player(name, admin),
+            RemotePlayer { actor, target: at, facing: heading, still_for: 1.0 },
         ));
     }
     for (actor, at, facing, _moving) in std::mem::take(&mut net.remote_moves) {
@@ -882,18 +873,18 @@ fn dress(
     mut net: NonSendMut<Net>,
     library: Option<Res<CharacterLibrary>>,
     skins: Res<Assets<ItemSkins>>,
-    mut locals: Query<(Entity, &mut Character, &mut CharacterAnim, Option<&Children>), (With<LocalPlayer>, Without<RemotePlayer>)>,
-    mut remotes: Query<(Entity, &RemotePlayer, &mut Character, &mut CharacterAnim, Option<&Children>), Without<LocalPlayer>>,
+    mut locals: Query<(&mut Character, &mut CharacterAnim, Option<&Children>), (With<LocalPlayer>, Without<RemotePlayer>)>,
+    mut remotes: Query<(&RemotePlayer, &mut Character, &mut CharacterAnim, Option<&Children>), Without<LocalPlayer>>,
 ) {
     for (actor, equipment, armament) in std::mem::take(&mut net.remote_redress) {
-        for (e, r, mut c, mut a, kids) in &mut remotes {
+        for (r, mut c, mut a, kids) in &mut remotes {
             if r.actor == actor {
-                redress(&mut commands, e, &mut c, &mut a, kids, equipment.clone(), armament);
+                redress(&mut commands, &mut c, &mut a, kids, equipment.clone(), armament);
             }
         }
     }
     let Some(table) = library.as_ref().and_then(|l| skins.get(&l.item_skins)) else { return };
-    let Ok((e, mut c, mut a, kids)) = locals.single_mut() else { return };
+    let Ok((mut c, mut a, kids)) = locals.single_mut() else { return };
     let Some(worn) = net.local_worn.take() else { return };
     let equipment = worn
         .iter()
@@ -901,7 +892,7 @@ fn dress(
             table.0.get(template).map(|parts| (slots.first().copied().unwrap_or(0).max(0) as u8, parts.clone()))
         })
         .collect();
-    redress(&mut commands, e, &mut c, &mut a, kids, equipment, armament(&worn));
+    redress(&mut commands, &mut c, &mut a, kids, equipment, armament(&worn));
 }
 
 /// DSOR_DEBUG_HIER=1: once, four seconds in, where the player's body really is.

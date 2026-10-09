@@ -18,6 +18,8 @@ use bevy::camera::primitives::MeshAabb;
 use bevy::prelude::*;
 use serde::Deserialize;
 
+use crate::merge::MapMaterial;
+
 /// Game map position -> Bevy world position.
 ///
 /// The game's map frame is the one the `.map` placements are written in, which is
@@ -119,6 +121,10 @@ pub struct CurrentMap {
     /// Materials by what they look like (textures, colours, states): the many
     /// identical materials of different models share one, so their surfaces merge.
     pub canonical: std::collections::HashMap<String, Handle<StandardMaterial>>,
+    /// The same for the Nebula surfaces and refractions (crate::surfaces,
+    /// crate::refraction): one per look across all the map's models.
+    pub canonical_surfaces: std::collections::HashMap<String, Handle<crate::surfaces::NebulaMaterial>>,
+    pub canonical_refractions: std::collections::HashMap<String, Handle<crate::refraction::RefractionMaterial>>,
     /// True once every model has been requested and every placement spawned.
     pub spawned: bool,
     pub instances: usize,
@@ -136,6 +142,8 @@ impl CurrentMap {
             cells: Default::default(),
             batches: Default::default(),
             canonical: Default::default(),
+            canonical_surfaces: Default::default(),
+            canonical_refractions: Default::default(),
             spawned: false,
             instances: 0,
         }
@@ -255,6 +263,8 @@ fn stream_models(
     materials: Res<Assets<GltfMaterial>>,
     mut mesh_assets_mut: ResMut<Assets<Mesh>>,
     std_materials: Res<Assets<StandardMaterial>>,
+    surface_materials: Res<Assets<crate::surfaces::NebulaMaterial>>,
+    refraction_materials: Res<Assets<crate::refraction::RefractionMaterial>>,
 ) {
     let mesh_assets = &*mesh_assets_mut;
     let Some(root) = current.root else { return };
@@ -296,12 +306,31 @@ fn stream_models(
                                 let casts_shadow = !(s.no_shadow || size < MIN_SHADOW_CASTER);
                                 // Merged with its cell's like surfaces (crate::merge);
                                 // alone when its layout cannot be.
-                                let material = match std_materials.get(&s.material) {
-                                    Some(m) => {
-                                        let sig = material_signature(m);
-                                        current.canonical.entry(sig).or_insert_with(|| s.material.clone()).clone()
-                                    }
-                                    None => s.material.clone(),
+                                let material = match &s.material {
+                                    MapMaterial::Standard(h) => match std_materials.get(h) {
+                                        Some(m) => {
+                                            let sig = material_signature(m);
+                                            MapMaterial::Standard(current.canonical.entry(sig).or_insert_with(|| h.clone()).clone())
+                                        }
+                                        None => s.material.clone(),
+                                    },
+                                    MapMaterial::Surface(h) => match surface_materials.get(h) {
+                                        Some(m) => {
+                                            let e = &m.extension;
+                                            let t = |h: &Option<Handle<Image>>| h.as_ref().map(|h| format!("{:?}", h.id())).unwrap_or_default();
+                                            let sig = format!("{}|{:?}|{}|{}|{}", material_signature(&m.base), e.params, t(&e.cube), t(&e.layer), t(&e.mask));
+                                            MapMaterial::Surface(current.canonical_surfaces.entry(sig).or_insert_with(|| h.clone()).clone())
+                                        }
+                                        None => s.material.clone(),
+                                    },
+                                    MapMaterial::Refraction(h) => match refraction_materials.get(h) {
+                                        Some(m) => {
+                                            let dudv = m.extension.dudv.as_ref().map(|h| format!("{:?}", h.id())).unwrap_or_default();
+                                            let sig = format!("{}|{:?}|{dudv}", material_signature(&m.base), m.extension.params);
+                                            MapMaterial::Refraction(current.canonical_refractions.entry(sig).or_insert_with(|| h.clone()).clone())
+                                        }
+                                        None => s.material.clone(),
+                                    },
                                 };
                                 let merged = mesh_assets.get(&s.mesh).and_then(|mesh| {
                                     let layout = crate::merge::layout_of(mesh)?;
@@ -310,7 +339,8 @@ fn stream_models(
                                 });
                                 if merged.is_none() {
                                     let tf = Transform::from_matrix(Mat4::from(world));
-                                    let mut e = commands.spawn((Mesh3d(s.mesh.clone()), MeshMaterial3d(s.material.clone()), tf, ChildOf(cell)));
+                                    let mut e = commands.spawn((Mesh3d(s.mesh.clone()), tf, ChildOf(cell)));
+                                    s.material.insert(&mut e);
                                     if !casts_shadow {
                                         e.insert(bevy::light::NotShadowCaster);
                                     }
@@ -345,7 +375,8 @@ fn stream_models(
             let Some(&cell) = current.cells.get(&key.cell) else { continue };
             let material = batch.material.clone();
             let Some(mesh) = batch.build() else { continue };
-            let mut e = commands.spawn((Mesh3d(mesh_assets_mut.add(mesh)), MeshMaterial3d(material), Transform::IDENTITY, ChildOf(cell)));
+            let mut e = commands.spawn((Mesh3d(mesh_assets_mut.add(mesh)), Transform::IDENTITY, ChildOf(cell)));
+            material.insert(&mut e);
             if !key.casts_shadow {
                 e.insert(bevy::light::NotShadowCaster);
             }
@@ -446,7 +477,7 @@ fn material_signature(m: &StandardMaterial) -> String {
 /// One visible surface of a static model, in the model's space.
 struct FlatSurface {
     mesh: Handle<Mesh>,
-    material: Handle<StandardMaterial>,
+    material: MapMaterial,
     local: bevy::math::Affine3A,
     no_shadow: bool,
     /// Largest extent of the surface in the model's space (its mesh bounds
@@ -489,7 +520,14 @@ fn flat_surfaces(
         let Some(mesh) = node.mesh.as_ref().and_then(|h| meshes.get(h)) else { continue };
         for prim in &mesh.primitives {
             let state = prim.material_extras.as_ref().map(|e| e.value.as_str()).unwrap_or("");
-            if state.contains("\"dsor_state\":\"Hidden\"") {
+            // Nebula shaders of ours come first: refraction and volume fog are
+            // marked Hidden for the scene path's StandardMaterial.
+            let ours = if state.contains("shd:refraction") {
+                Some("refr")
+            } else {
+                crate::surfaces::kind_of(state).map(|_| "neb")
+            };
+            if ours.is_none() && state.contains("\"dsor_state\":\"Hidden\"") {
                 continue;
             }
             if state.contains("\"dsor_state\":\"Decal\"") {
@@ -502,12 +540,19 @@ fn flat_surfaces(
             // Mirroring is undone in the merged mesh itself (crate::merge reverses
             // its winding), so the plain material, never the "(inverted)" one.
             let label = label.trim_end_matches(" (inverted)").to_owned();
-            // Ours (crate::materials) for glows and for lit surfaces with an emissive
-            // map, whose emission is scaled to the node's intensity.
+            // Ours (crate::materials) for glows, unlit surfaces, surfaces with a
+            // static alpha factor, and lit surfaces with an emissive map, whose
+            // emission is scaled to the node's intensity.
             let emissive = materials.get(gm).is_some_and(|m| m.emissive_texture.is_some());
-            let unlit = state.contains("\"dsor_unlit\":true");
-            let suffix = if additive || emissive || unlit { "dsor" } else { "std" };
-            let material = asset_server.load::<StandardMaterial>(path.clone().with_label(format!("{label}/{suffix}")));
+            let adjusted = state.contains("\"dsor_unlit\":true") || state.contains("\"dsor_alpha\"");
+            let material = match ours {
+                Some("refr") => MapMaterial::Refraction(asset_server.load(path.clone().with_label(format!("{label}/refr")))),
+                Some(_) => MapMaterial::Surface(asset_server.load(path.clone().with_label(format!("{label}/neb")))),
+                None => {
+                    let suffix = if additive || emissive || adjusted { "dsor" } else { "std" };
+                    MapMaterial::Standard(asset_server.load(path.clone().with_label(format!("{label}/{suffix}"))))
+                }
+            };
             let opaque = materials.get(gm).is_some_and(|m| matches!(m.alpha_mode, AlphaMode::Opaque | AlphaMode::Mask(_)));
             let size = mesh_assets
                 .get(&prim.mesh)

@@ -108,10 +108,6 @@ pub struct CharacterDesc {
     pub class: u8,
     /// 0 male, 1 female.
     pub gender: u8,
-    pub hair: u8,
-    pub beard: u8,
-    pub body: u8,
-    pub variation: u8,
     /// (equipment slot, Skin part names) of every worn item.
     pub equipment: Vec<(u8, Vec<String>)>,
     /// ArmamentState: 0 empty, 1/2 one-hand small (+off hand), 3/4 one-hand large
@@ -243,6 +239,9 @@ impl CharacterDesc {
 
 /// Logical animation states, the rows of anims.xml.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+// Hit, Death, Resurrect, Stunned and IdleHub are the combat and town states the
+// server's HitCommand / KillCommand / ResurrectCommand will drive (docs/fx.md).
+#[allow(dead_code)]
 pub enum AnimState {
     Idle,
     IdleHub,
@@ -829,7 +828,7 @@ struct VariedChild;
 fn drive_animations(
     time: Res<Time>,
     mut frame: Local<u32>,
-    mut characters: Query<(&mut CharacterAnim, &GlobalTransform, &InheritedVisibility, Option<&mut AnimLod>, &Character)>,
+    mut characters: Query<(&mut CharacterAnim, &GlobalTransform, &InheritedVisibility, Option<&mut AnimLod>)>,
     targets: Query<(Entity, &AnimatedBy)>,
     mut commands: Commands,
     mut players: Query<&mut AnimationPlayer>,
@@ -845,7 +844,7 @@ fn drive_animations(
     };
     let fade_step = time.delta_secs() / BLEND.as_secs_f32();
     *frame = frame.wrapping_add(1);
-    for (mut anim, at, shown, mut lod, character) in &mut characters {
+    for (mut anim, at, shown, mut lod) in &mut characters {
         let Some(player) = anim.player else { continue };
         let Ok(mut p) = players.get_mut(player) else { continue };
         // A lower-rate character between its frames: held still, unevaluated.
@@ -973,7 +972,6 @@ fn drive_animations(
 /// its animation state kept.
 pub fn redress(
     commands: &mut Commands,
-    entity: Entity,
     character: &mut Character,
     anim: &mut CharacterAnim,
     children: Option<&Children>,
