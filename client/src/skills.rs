@@ -900,6 +900,7 @@ fn fly_bullets(
         if ending == 0 {
             continue;
         }
+        debug!("bullet ends ({}) at {here:?}, struck {struck:?}", if ending == 1 { "death" } else { "impact" });
         // Offline nobody answers the shot: the monster it reached takes the blow.
         if let (true, Some(actor)) = (offline, struck.or(b.target.filter(|_| b.to_point))) {
             debug_monsters.blows.push((actor, 0));

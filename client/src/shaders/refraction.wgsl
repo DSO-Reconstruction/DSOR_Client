@@ -21,6 +21,13 @@ struct Refraction {
 @group(#{MATERIAL_BIND_GROUP}) @binding(101) var dudv_texture: texture_2d<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(102) var dudv_sampler: sampler;
 
+// sRGB decoding undone (the exact curve).
+fn to_stored(c: vec2<f32>) -> vec2<f32> {
+    let lo = c * 12.92;
+    let hi = 1.055 * pow(max(c, vec2<f32>(0.0)), vec2<f32>(1.0 / 2.4)) - 0.055;
+    return select(hi, lo, c <= vec2<f32>(0.0031308));
+}
+
 @fragment
 fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> FragmentOutput {
     var tint = vec4<f32>(1.0);
@@ -32,7 +39,12 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     uv = in.uv;
 #endif
     uv = uv + refraction.params.zw * globals.time;
-    let d = textureSample(dudv_texture, dudv_sampler, uv).xy * 2.0 - 1.0;
+    // The DuDv map is bound as a colour texture, so the GPU sRGB-decodes it: its
+    // neutral 0.5 came out 0.21, and (d x 2 - 1) a constant shift that drew a
+    // displaced copy of the scene over the whole surface (a doubled player, a
+    // visible rectangle). Back to the stored values first.
+    let raw = to_stored(textureSample(dudv_texture, dudv_sampler, uv).xy);
+    let d = raw * 2.0 - 1.0;
     let pixel = 1.0 / view.viewport.zw;
     let screen = (in.position.xy - view.viewport.xy) * pixel;
     let moved = textureSample(view_transmission_texture, view_transmission_sampler, screen + d * pixel * refraction.params.x);

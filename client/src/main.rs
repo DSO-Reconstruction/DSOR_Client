@@ -8,6 +8,7 @@
 //! so the browser build fetches them over HTTP.
 
 mod character;
+mod clamp;
 mod combat_text;
 mod debug;
 mod decals;
@@ -296,7 +297,7 @@ fn main() {
         ))
         .add_plugins(dump::DumpPlugin)
         .add_plugins(ui::UiPlugin)
-        .add_plugins((anim_cull::AnimCullPlugin, refraction::RefractionPlugin, surfaces::SurfacesPlugin, exits::ExitsPlugin, monsters::MonstersPlugin, combat_text::CombatTextPlugin, debug::DebugPlugin, stats::StatsPlugin))
+        .add_plugins((anim_cull::AnimCullPlugin, refraction::RefractionPlugin, surfaces::SurfacesPlugin, exits::ExitsPlugin, monsters::MonstersPlugin, combat_text::CombatTextPlugin, debug::DebugPlugin, stats::StatsPlugin, clamp::ClampPlugin))
         .insert_resource(ClearColor(Color::srgb(0.05, 0.06, 0.08)))
         // The sun's one shadow cascade covers 60 units: 1 024 texels in the
         // browser (half bevy's default) is ~6 cm a texel.
