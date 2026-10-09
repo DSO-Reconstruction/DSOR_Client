@@ -70,6 +70,16 @@ pub struct BulletDef {
 }
 
 #[derive(Deserialize, Debug, Clone)]
+pub struct Summon {
+    pub id: String,
+    pub amount: u32,
+    /// From the caster, in its frame (x right, z ahead).
+    pub offset: [f32; 3],
+    /// Frames after the hit frame.
+    pub delay: u32,
+}
+
+#[derive(Deserialize, Debug, Clone)]
 pub struct SkillDef {
     pub id: String,
     #[serde(rename = "type")]
@@ -94,6 +104,9 @@ pub struct SkillDef {
     pub victim_status: Vec<(String, f32)>,
     #[serde(default)]
     pub location_status: Vec<(String, f32)>,
+    /// What it summons (offline play spawns it; online the server does).
+    #[serde(default)]
+    pub summon: Option<Summon>,
     pub bullet: Option<BulletDef>,
 }
 
@@ -662,6 +675,16 @@ fn cast_input(
             victim: own(&skill.victim_status),
             location: own(&skill.location_status),
         });
+        // Its summons, beside the caster (UNVERIFIED: the offset's frame), standing
+        // still: no server moves them.
+        if let Some(sm) = &skill.summon {
+            let rot = Quat::from_rotation_y(facing);
+            for k in 0..sm.amount {
+                let side = (k as f32 - (sm.amount as f32 - 1.0) / 2.0) * 1.2;
+                let at = tf.translation + rot * Vec3::new(sm.offset[0] + side, 0.0, sm.offset[2].abs().max(1.0));
+                debug_monsters.delayed.push(((skill.hit_frame + sm.delay) as f32 / FPS, sm.id.clone(), at));
+            }
+        }
     }
     perform(&mut commands, skill, sequences, entity, Some(character), tf.translation, facing, point);
 }

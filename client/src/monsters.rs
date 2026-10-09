@@ -161,8 +161,11 @@ pub struct DebugMonsters {
     /// Offline play: the local player's skills landing, as no server answers them
     /// (crate::skills).
     pub strikes: Vec<Strike>,
+    /// Offline play: summons to place later (seconds, template, where).
+    pub delayed: Vec<(f32, String, Vec3)>,
     next_type: u8,
     tick: u32,
+    summoned: u32,
 }
 
 /// One offline skill landing.
@@ -258,6 +261,7 @@ fn spawn_monsters(
     assets: Res<AssetServer>,
     existing: Query<(Entity, &RemotePlayer)>,
     mut debug: ResMut<DebugMonsters>,
+    time: Res<Time>,
 ) {
     if net.is_none() && !test.placed {
         if let Ok(spec) = std::env::var("DSOR_TEST_MONSTER") {
@@ -274,6 +278,16 @@ fn spawn_monsters(
         None => &mut *offline,
     };
     queue.extend(debug.spawns.drain(..));
+    // Offline summons whose time has come.
+    let dt = time.delta_secs();
+    for (after, template, at) in std::mem::take(&mut debug.delayed) {
+        if after - dt > 0.0 {
+            debug.delayed.push((after - dt, template, at));
+        } else {
+            debug.summoned += 1;
+            queue.push(MonsterSpawn { actor: 0x6200_0000 + debug.summoned, blueprint: template, position: at, health: 100, level: 1 });
+        }
+    }
     if queue.is_empty() {
         return;
     }

@@ -292,6 +292,13 @@ for r in db.execute("select rowid, * from _Template_Skill order by rowid"):
         # offline play (client/src/monsters.rs).
         "victim_status": statuses(r["VictimStatusEffects"]),
         "location_status": statuses(r["LocationStatusEffects"]),
+        # What the skill summons (the server spawns them online): monster template,
+        # how many, the offset from the caster (caster frame, 4 floats), the delay in
+        # frames after the hit frame. Kept for offline play.
+        "summon": None if not r["Summons"] or not r["SummonMonsterId"] else {
+            "id": r["SummonMonsterId"], "amount": r["SummonMonsterAmount"] or 1,
+            "offset": list(struct.unpack("<3f", r["SummonSpawnOffset"][:12])) if r["SummonSpawnOffset"] and len(r["SummonSpawnOffset"]) >= 12 else [0.0, 0.0, 0.0],
+            "delay": r["SummonSpawnDelay"] or 0},
         "bullet": None if b is None else {
             "id": b["Id"],
             "loop": b["LoopSequence"] or "",
