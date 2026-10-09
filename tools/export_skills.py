@@ -299,6 +299,8 @@ for r in db.execute("select rowid, * from _Template_Skill order by rowid"):
             "id": r["SummonMonsterId"], "amount": r["SummonMonsterAmount"] or 1,
             "offset": list(struct.unpack("<3f", r["SummonSpawnOffset"][:12])) if r["SummonSpawnOffset"] and len(r["SummonSpawnOffset"]) >= 12 else [0.0, 0.0, 0.0],
             "delay": r["SummonSpawnDelay"] or 0},
+        "bullet_count": r["BulletCount"] or 1,
+        "emit_delay": r["BulletEmitDelay"] or 0,
         "bullet": None if b is None else {
             "id": b["Id"],
             "loop": b["LoopSequence"] or "",
@@ -308,6 +310,7 @@ for r in db.execute("select rowid, * from _Template_Skill order by rowid"):
             "velocity": b["Velocity"] or 0.0,
             "lifetime": b["LifeTime"] or 0.0,
             "radius": b["BulletRadius"] or 0.0,
+            "static_collision": bool(b["StaticCollision"]),
             # Where the bullet leaves, in the caster's entity frame (Nebula: -Z ahead):
             # mage_fireball_bullet (0.043, 1.49, -1.788) -- the hand, 1.8 ahead.
             "start": list(struct.unpack("<3f", b["StartOffset"][:12])) if b["StartOffset"] and len(b["StartOffset"]) >= 12 else [0.0, 1.2, 0.0],

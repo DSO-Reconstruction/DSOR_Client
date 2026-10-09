@@ -67,6 +67,9 @@ pub struct BulletDef {
     pub radius: f32,
     /// Where it leaves, in the caster's entity frame.
     pub start: [f32; 3],
+    /// StaticCollision: walls stop it.
+    #[serde(default)]
+    pub static_collision: bool,
 }
 
 #[derive(Deserialize, Debug, Clone)]
@@ -104,6 +107,12 @@ pub struct SkillDef {
     pub victim_status: Vec<(String, f32)>,
     #[serde(default)]
     pub location_status: Vec<(String, f32)>,
+    /// BulletCount bullets, BulletEmitDelay seconds apart (turned into whole ticks
+    /// by SecondsToGameTicks, 0x4AED10).
+    #[serde(default)]
+    pub bullet_count: u32,
+    #[serde(default)]
+    pub emit_delay: f32,
     /// What it summons (offline play spawns it; online the server does).
     #[serde(default)]
     pub summon: Option<Summon>,
@@ -287,17 +296,49 @@ pub struct SequencePlayer {
     /// Per track: what its local placement is multiplied by (the world placement
     /// it was left at, or the character's entity frame), for animated placements.
     bases: Vec<Mat4>,
+    /// Frames per frame of time: 1 but for a stretched sequence (a Shifted skill's
+    /// falls over its HitFrame ticks, BulletSkillVisualizer 0x5ECA7A / 0x5EC837).
+    rate: f32,
 }
 
 /// A bullet in flight.
 #[derive(Component)]
+/// EVIDENCE (2018 client, static): GameBulletSkill::ComputeStraightPosition 0x8EEB6E
+///   (start + step x ticks, the stored end point from the end tick on), its end
+///   point 0x8F2A6A (start + step x trunc(LifeTime x 25)), RangedTargetPoint
+///   ending on the aimed point 0x949601, StaticCollision's wall test 0x8F21B7, the
+///   end snapping to a hit actor 0x8ED6A1; the view chasing the tick position
+///   ~67 ms behind (0x5E4DB1); its two endings (0x5E4DB1): DeathSequence when the
+///   lifetime ran out (0x5E8515), else SkillImpactSequence (0x5E8981, 0x5EC436),
+///   both at the end point lowered by the bullet's height, facing its flight.
 struct Bullet {
+    /// Where it started and its velocity (units / second).
+    start: Vec3,
     velocity: Vec3,
-    left: f32,
+    /// Seconds since it started, and when it ends.
+    t: f32,
+    end_t: f32,
+    /// StartOffset.y: how far its end effects are lowered (they play on the ground).
+    height: f32,
     death: String,
+    /// The skill's SkillImpactSequence.
+    impact: String,
+    /// RangedTargetPoint: it ends on the aimed point, with its impact.
+    to_point: bool,
+    /// StaticCollision: the ground rising into it stops it (the walls the client
+    /// tests are not in this client's data; the navigation mesh stands for them).
+    static_collision: bool,
+    radius: f32,
+    /// Who shot it (monsters' bullets do not hit monsters).
+    caster: Entity,
+    /// Offline play: the aimed monster, struck when the bullet reaches it.
+    target: Option<u32>,
     /// Once it has hit or run out: seconds its particles still have to fade.
     dying: Option<f32>,
 }
+
+/// The view's lag behind the bullet's tick position (0x5E4DB1, ~67 ms).
+const BULLET_LAG: f32 = 0.067;
 
 
 /// A caster carried by its skill (Jump, Charge): from `from` to `to` between the
@@ -324,10 +365,10 @@ struct Pending {
 }
 
 enum PendingKind {
-    Bullet { from: Vec3, dir: Vec3, def: BulletDef },
+    Bullet { from: Vec3, dir: Vec3, def: BulletDef, impact: String, to: Option<Vec3>, caster: Entity, target: Option<u32> },
     /// The caster lands on the aimed point (Teleport skills).
     Teleport { who: Entity, to: Vec3 },
-    Sequence { name: String, at: Transform },
+    Sequence { name: String, at: Transform, rate: f32 },
 }
 
 /// An effect model: its node animation is started once it is in.
@@ -439,31 +480,38 @@ fn perform(
         play(commands, seq.clone(), Some(actor), actor, false);
     }
     let dir = Quat::from_rotation_y(facing) * Vec3::Z;
-    let fire = skill.loop_start.max(skill.hit_frame) as f32 / FPS;
     match (skill.kind.as_str(), &skill.bullet) {
-        ("Ranged" | "RangedTargetPoint" | "RangedTarget", Some(b)) => {
-            // The bullet leaves from the casting hand: StartOffset's height, a short
-            // way ahead. Its full 1.8 units ahead left a gap between the caster and
-            // the trail ("la trainee commence trop loin de moi").
-            // UNVERIFIED: how the client applies StartOffset's forward component.
-            let mut start = Vec3::from(b.start);
-            start.z = start.z.clamp(-0.6, 0.6);
-            commands.spawn(Pending {
-                after: fire,
-                what: PendingKind::Bullet { from: at + entity_rotation(facing) * start, dir, def: b.clone() },
-            });
-        }
         ("Shifted", _) if !skill.shifted.is_empty() => {
             // What falls on the aimed point (the lightning bolt, the meteor, the
             // singularity's start): SkillBulletId names a sequence for every Shifted
-            // skill. From LoopStartFrame: lightning strike's bolt (LoopStart 9) reaches
-            // the ground over ~26 frames, at its HitFrame 35.
-            // UNVERIFIED: the start frame (the client's Shifted update not traced).
-            let start = if skill.loop_start > 0 { skill.loop_start } else { skill.hit_frame };
+            // skill. EVIDENCE: BulletSkillVisualizer 0x5ECA7A / 0x5EC837: from
+            // start + LoopStartFrame, at the target point turned to the aim heading,
+            // stretched to last HitFrame ticks.
+            let rate = sequences.0.get(&skill.shifted).map(|q| q.length as f32 / skill.hit_frame.max(1) as f32).unwrap_or(1.0);
             commands.spawn(Pending {
-                after: start as f32 / FPS,
-                what: PendingKind::Sequence { name: skill.shifted.clone(), at: Transform::from_translation(point).with_rotation(entity_rotation(facing)) },
+                after: skill.loop_start as f32 / FPS,
+                what: PendingKind::Sequence { name: skill.shifted.clone(), at: Transform::from_translation(point).with_rotation(entity_rotation(facing)), rate },
             });
+        }
+        (_, Some(b)) => {
+            // EVIDENCE: the start (0x9BFFDC): a look-at frame on the aim, StartOffset
+            //   turned by it: x to the right of the aim, y up, -z ahead (every z in the
+            //   data is negative: magic missile 1.71 ahead, 1.49 up), no clamp; the
+            //   flight from start + LoopStartFrame (HitFrame unused for bullets);
+            //   BulletCount bullets from the same place, BulletEmitDelay ticks apart
+            //   (0x8F0ADA), Angle unused.
+            // UNVERIFIED: own casts rescale that delay by a speed attribute (0x8F170D,
+            //   attribute not identified).
+            let o = Vec3::from(b.start);
+            let right = Vec3::new(-dir.z, 0.0, dir.x);
+            let from = at + right * o.x + Vec3::Y * o.y - dir * o.z;
+            let to = (skill.kind == "RangedTargetPoint").then(|| Vec3::new(point.x, at.y + o.y, point.z));
+            for k in 0..skill.bullet_count.max(1) {
+                commands.spawn(Pending {
+                    after: (skill.loop_start + k * (skill.emit_delay * FPS) as u32) as f32 / FPS,
+                    what: PendingKind::Bullet { from, dir, def: b.clone(), impact: skill.impact.clone(), to, caster: actor, target: None },
+                });
+            }
         }
         _ => {}
     }
@@ -484,21 +532,23 @@ fn perform(
     }
     if !skill.impact.is_empty() && skill.impact != "empty_sequence" {
         let impact_at = match skill.kind.as_str() {
-            "Shifted" | "Teleport" | "Jump" | "RangedTargetPoint" => point,
-            "Ranged" => point,
+            "Shifted" | "Teleport" | "Jump" => point,
             _ => at,
         };
+        // Shifted: on its hit tick, start + LoopStartFrame + HitFrame (0x946F17;
+        // lightning strike 44, meteor 65).
         let after = match skill.kind.as_str() {
-            "Ranged" => fire + skill.bullet.as_ref().map(|b| (point - at).length().min(b.velocity * b.lifetime) / b.velocity.max(0.1)).unwrap_or(0.0),
+            "Shifted" => (skill.loop_start + skill.hit_frame) as f32 / FPS,
             _ => skill.hit_frame as f32 / FPS,
         };
-        // Ranged impacts are drawn when the bullet dies (fly_bullets); the others here.
-        if skill.kind != "Ranged" {
+        // A bullet's impact is drawn where it ends (fly_bullets); the others here.
+        if skill.bullet.is_none() || skill.kind == "Shifted" {
             commands.spawn(Pending {
                 after,
                 what: PendingKind::Sequence {
                     name: skill.impact.clone(),
                     at: Transform::from_translation(impact_at).with_rotation(entity_rotation(facing)),
+                    rate: 1.0,
                 },
             });
         }
@@ -515,7 +565,7 @@ pub(crate) fn play(commands: &mut Commands, seq: Sequence, actor: Option<Entity>
 fn play_with(commands: &mut Commands, seq: Sequence, actor: Option<Entity>, anchor: Entity, looping: bool, follow: bool) -> Entity {
     let n = seq.tracks.len();
     commands
-        .spawn(SequencePlayer { seq, t: 0.0, actor, anchor, looping, follow, stop: false, superseded: false, started: vec![false; n], spawned: vec![None; n], bases: vec![Mat4::IDENTITY; n] })
+        .spawn(SequencePlayer { seq, t: 0.0, actor, anchor, looping, follow, stop: false, superseded: false, rate: 1.0, started: vec![false; n], spawned: vec![None; n], bases: vec![Mat4::IDENTITY; n] })
         .id()
 }
 
@@ -658,7 +708,7 @@ fn cast_input(
     info!("cast {} (wire {wire}, {}) at {point:?}", skill.id, skill.kind);
     // Offline nobody answers the cast: it lands at its hit frame (and after the
     // bullet's flight), on the aimed monster or around the point.
-    if net.offline {
+    if net.offline && !matches!(skill.kind.as_str(), "Ranged" | "RangedTarget") {
         let mut after = skill.hit_frame.max(skill.loop_start) as f32 / FPS;
         if let Some(b) = skill.bullet.as_ref().filter(|b| b.velocity > 0.0) {
             after += Vec2::new(point.x - tf.translation.x, point.z - tf.translation.z).length() / b.velocity;
@@ -736,10 +786,34 @@ fn run_pending(
         }
         commands.entity(e).despawn();
         match &p.what {
-            PendingKind::Bullet { from, dir, def } => {
+            PendingKind::Bullet { from, dir, def, impact, to, caster, target } => {
+                let speed = def.velocity.max(0.01);
+                // Free flight: trunc(LifeTime x 25) ticks; to the aimed point for
+                // RangedTargetPoint.
+                let (velocity, end_t) = match to {
+                    Some(p) => {
+                        let d = *p - *from;
+                        (d.normalize_or_zero() * speed, d.length() / speed)
+                    }
+                    None => (*dir * speed, (def.lifetime * FPS).trunc().max(1.0) / FPS),
+                };
                 let bullet = commands
                     .spawn((
-                        Bullet { velocity: *dir * def.velocity, left: def.lifetime.max(0.05), death: def.death.clone(), dying: None },
+                        Bullet {
+                            start: *from,
+                            velocity,
+                            t: 0.0,
+                            end_t,
+                            height: def.start[1],
+                            death: def.death.clone(),
+                            impact: impact.clone(),
+                            to_point: to.is_some(),
+                            static_collision: def.static_collision,
+                            radius: def.radius.max(0.3),
+                            caster: *caster,
+                            target: *target,
+                            dying: None,
+                        },
                         Transform::from_translation(*from).with_rotation(entity_rotation(dir.x.atan2(dir.z))),
                         Visibility::default(),
                     ))
@@ -753,10 +827,18 @@ fn run_pending(
                     tf.translation = *to;
                 }
             }
-            PendingKind::Sequence { name, at } => {
+            PendingKind::Sequence { name, at, rate } => {
                 if let Some(seq) = sequences.0.get(name) {
                     let anchor = commands.spawn((*at, Visibility::default())).id();
-                    play(&mut commands, seq.clone(), None, anchor, false);
+                    let player = play(&mut commands, seq.clone(), None, anchor, false);
+                    if *rate != 1.0 {
+                        let r = *rate;
+                        commands.queue(move |w: &mut World| {
+                            if let Some(mut p) = w.get_mut::<SequencePlayer>(player) {
+                                p.rate = r;
+                            }
+                        });
+                    }
                 }
             }
         }
@@ -767,13 +849,15 @@ fn fly_bullets(
     mut commands: Commands,
     time: Res<Time>,
     mut bullets: Query<(Entity, &mut Transform, &mut Bullet)>,
-    children: Query<&Children>,
-    shown_parts: Query<(), Or<(With<Mesh3d>, With<PointLight>)>>,
-    emitters: Query<(), With<crate::particles::Emitter>>,
     nav: Option<Res<CurrentNav>>,
     navmeshes: Res<Assets<NavMesh>>,
+    monsters: Query<(&GlobalTransform, &crate::monsters::Monster, &CharacterAnim)>,
+    is_monster: Query<(), With<crate::monsters::Monster>>,
+    net: Option<NonSend<Net>>,
+    mut debug_monsters: ResMut<crate::monsters::DebugMonsters>,
 ) {
     let mesh = nav.as_ref().and_then(|n| navmeshes.get(&n.0));
+    let offline = net.as_ref().is_some_and(|n| n.offline);
     for (e, mut tf, mut b) in &mut bullets {
         let dt = time.delta_secs();
         if let Some(left) = b.dying.as_mut() {
@@ -783,29 +867,55 @@ fn fly_bullets(
             }
             continue;
         }
-        tf.translation += b.velocity * dt;
-        b.left -= dt;
-        // The ground rising into its path (stairs, a slope) stops it.
-        // UNVERIFIED: the server's own collision; walls off the navigation mesh
-        // are not detected.
-        let p = tf.translation;
-        let hit_ground = mesh.is_some_and(|m| m.heights(p.x, p.z).any(|h| h > p.y - 0.2 && h < p.y + 2.5));
-        if hit_ground {
-            b.left = 0.0;
+        b.t = (b.t + dt).min(b.end_t);
+        let here = b.start + b.velocity * b.t;
+        // Drawn ~67 ms behind its position, as the client's view chases it.
+        tf.translation = b.start + b.velocity * (b.t - BULLET_LAG).max(0.0);
+        // How it ends: 0 still flying, 1 its lifetime ran out (death), 2 it reached
+        // its point, hit an actor or a wall (impact).
+        let mut ending = 0;
+        let mut struck = None;
+        if b.t >= b.end_t {
+            ending = if b.to_point { 2 } else { 1 };
         }
-        if b.left <= 0.0 {
-            if !b.death.is_empty() {
-                commands.spawn(Pending {
-                    after: 0.0,
-                    what: PendingKind::Sequence { name: b.death.clone(), at: Transform::from_translation(tf.translation).with_rotation(tf.rotation) },
-                });
+        // Monsters in its way (the shooter's own kind spared: monsters' bullets
+        // fly through monsters). UNVERIFIED: the client's swept test (0x9BC609);
+        // this is the bullet's radius against the monster's capsule, flat.
+        if ending == 0 && !is_monster.contains(b.caster) {
+            for (at, m, a) in &monsters {
+                let p = at.translation();
+                if !a.dead && Vec2::new(p.x - here.x, p.z - here.z).length() <= b.radius + m.radius && here.y >= p.y - 0.5 && here.y <= p.y + m.height + 0.5 {
+                    ending = 2;
+                    struck = Some(m.actor);
+                    break;
+                }
             }
-            // The bullet and everything its loop sequence drew go at once (the
-            // client's track exit removes graphics entities); its death sequence
-            // takes over where it ended.
-            let _ = (&children, &shown_parts, &emitters);
-            commands.entity(e).despawn();
         }
+        if ending == 0 && b.static_collision {
+            let hit_ground = mesh.is_some_and(|m| m.heights(here.x, here.z).any(|h| h > here.y - 0.2 && h < here.y + 2.5));
+            if hit_ground {
+                ending = 2;
+            }
+        }
+        if ending == 0 {
+            continue;
+        }
+        // Offline nobody answers the shot: the monster it reached takes the blow.
+        if let (true, Some(actor)) = (offline, struck.or(b.target.filter(|_| b.to_point))) {
+            debug_monsters.blows.push((actor, 0));
+        }
+        let name = if ending == 1 { b.death.clone() } else { b.impact.clone() };
+        if !name.is_empty() && name != "empty_sequence" {
+            // On the ground: the end point lowered by the bullet's height.
+            let ground = here - Vec3::Y * b.height;
+            commands.spawn(Pending {
+                after: 0.0,
+                what: PendingKind::Sequence { name, at: Transform::from_translation(ground).with_rotation(tf.rotation), rate: 1.0 },
+            });
+        }
+        // The bullet and everything its loop sequence drew go at once (the
+        // client's track exit removes graphics entities).
+        commands.entity(e).despawn();
     }
 }
 
@@ -918,7 +1028,7 @@ fn play_sequences(
                 || remotes.get(a).is_ok_and(|r| r.still_for <= 0.0)
         }) && p.t > 0.1;
         let anchor_alive = exists.contains(p.anchor) && !interrupted;
-        p.t += time.delta_secs();
+        p.t += time.delta_secs() * p.rate;
         let mut frame = p.t * FPS;
         let length = p.seq.length.max(1) as f32;
         if p.looping && anchor_alive && frame > length {
