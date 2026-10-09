@@ -40,6 +40,18 @@ lto = "fat"
 strip = "debuginfo"
 
 # Profiling the browser build: same code as wasm-release, symbol names kept.
+# Fast iteration in the browser (tools/build_web.sh --fast): dependencies
+# optimised once and cached (dev.package."*"), our crate barely optimised and
+# incremental, no LTO, no wasm-opt (a non-release trunk build).
+[profile.wasm-fast]
+inherits = "dev"
+debug = false
+incremental = true
+codegen-units = 256
+
+[profile.wasm-fast.package."*"]
+opt-level = 3
+
 [profile.wasm-profile]
 inherits = "wasm-release"
 strip = "none"
