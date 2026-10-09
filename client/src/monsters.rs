@@ -152,6 +152,16 @@ pub struct Monster {
     heavy: Option<Entity>,
 }
 
+/// What the debug menu (crate::debug) asks for: monsters to place, and blows on
+/// them (actor; 0 a hit of the next damage type, 1 a critical, 2 a kill).
+#[derive(Resource, Default)]
+pub struct DebugMonsters {
+    pub spawns: Vec<MonsterSpawn>,
+    pub blows: Vec<(u32, u8)>,
+    next_type: u8,
+    tick: u32,
+}
+
 /// HitColor writes of the sequencer (crate::skills, ColorShaderParameterTrackBar):
 /// actor, colour (alpha: how much of it replaces the shaded colour).
 #[derive(Resource, Default)]
@@ -202,6 +212,7 @@ impl Plugin for MonstersPlugin {
             .init_resource::<OfflineMonster>()
             .init_resource::<Hovered>()
             .init_resource::<ShaderColors>()
+            .init_resource::<DebugMonsters>()
             .add_systems(PostUpdate, apply_shader_colors)
             .add_systems(PreUpdate, hover)
             .add_systems(Startup, load)
@@ -230,6 +241,7 @@ fn spawn_monsters(
     variations: Res<Assets<Variations>>,
     assets: Res<AssetServer>,
     existing: Query<(Entity, &RemotePlayer)>,
+    mut debug: ResMut<DebugMonsters>,
 ) {
     if net.is_none() && !test.placed {
         if let Ok(spec) = std::env::var("DSOR_TEST_MONSTER") {
@@ -245,6 +257,7 @@ fn spawn_monsters(
         Some(net) => &mut net.into_inner().monster_spawns,
         None => &mut *offline,
     };
+    queue.extend(debug.spawns.drain(..));
     if queue.is_empty() {
         return;
     }
@@ -481,10 +494,11 @@ fn hits_and_kills(
     templates: Res<Assets<MonsterTemplates>>,
     mut monsters: Query<(Entity, &mut Monster, &mut CharacterAnim)>,
     playing: Query<(), With<SequencePlayer>>,
-    (locals, remotes, mut texts): (
+    (locals, remotes, mut texts, mut debug): (
         Query<(Entity, &crate::net::LocalPlayer)>,
         Query<(Entity, &RemotePlayer), Without<Monster>>,
         ResMut<crate::combat_text::CombatTexts>,
+        ResMut<DebugMonsters>,
     ),
 ) {
     let (Some(sequences), Some(templates)) = (seqs.get(skills.sequences()), templates.get(&data.templates)) else { return };
@@ -547,6 +561,31 @@ fn hits_and_kills(
                 }
             }
         }
+    }
+    // The debug menu's blows, as the local player's.
+    for (victim, kind) in std::mem::take(&mut debug.blows) {
+        if kind == 2 {
+            deaths.push(victim);
+            continue;
+        }
+        debug.tick += 1;
+        let t = debug.next_type;
+        debug.next_type = (t + 1) % DAMAGE_TYPES.len() as u8;
+        blows.push(Blow {
+            victim,
+            attacker: local,
+            damage: 10 + (debug.tick * 37 % 400) as i32,
+            blocked: false,
+            immune: false,
+            kind: 3,
+            owner: local,
+            value: 0.0,
+            tick: 0x4000_0000 + debug.tick,
+            damage_types: vec![t],
+            critical: kind == 1,
+            heavy: false,
+            health: None,
+        });
     }
     for blow in blows {
         // Floating texts (crate::combat_text), for blows given or taken by the

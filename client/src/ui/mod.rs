@@ -252,6 +252,10 @@ struct Figures {
     bar: Vec<Option<String>>,
     name: String,
     online: bool,
+    level: Option<u32>,
+    /// Wallet slot 1, copper; slot 0, Andermant.
+    gold: Option<u32>,
+    andermant: Option<u32>,
 }
 
 #[derive(Resource, Default)]
@@ -624,7 +628,7 @@ fn read_figures(net: Option<NonSend<crate::net::Net>>, mut figures: ResMut<Figur
     // The server gives the current values; the maxima are the largest seen
     // (UNVERIFIED: ActorStatsUpdate's max fields are not decoded yet).
     if let Some(h) = net.health {
-        let max = figures.health.1.max(h);
+        let max = net.max_health.unwrap_or(0.0).max(figures.health.1).max(h);
         if figures.health != (h, max) {
             figures.health = (h, max);
         }
@@ -633,6 +637,21 @@ fn read_figures(net: Option<NonSend<crate::net::Net>>, mut figures: ResMut<Figur
         let max = figures.resource.1.max(r);
         if figures.resource != (r, max) {
             figures.resource = (r, max);
+        }
+    }
+    if figures.level != net.level {
+        figures.level = net.level;
+    }
+    if let Some((total, floor, ceiling)) = net.xp {
+        let f = if ceiling > floor { (total.saturating_sub(floor)) as f32 / (ceiling - floor) as f32 } else { 0.0 };
+        if figures.xp != f {
+            figures.xp = f;
+        }
+    }
+    if let Some(w) = net.wallet {
+        if (figures.andermant, figures.gold) != (Some(w[0]), Some(w[1])) {
+            figures.andermant = Some(w[0]);
+            figures.gold = Some(w[1]);
         }
     }
     if figures.bar != net.bar {
@@ -682,11 +701,15 @@ fn update_values(figures: Res<Figures>, mut texts: Query<(&Value, &mut Text2d)>)
         return;
     }
     for (v, mut t) in &mut texts {
-        // TODO(net): money, Andermant and the level are not decoded from the
-        //   server yet (PlayerInfo / CurrencyUpdate); shown as 0 / -.
+        // Gold is counted in copper: 100 copper a silver, 100 silver a gold.
+        // UNVERIFIED: the split (the currency bar's own code is not traced).
+        let copper = figures.gold.unwrap_or(0);
         let s = match v.0 {
-            ValueKind::Gold | ValueKind::Silver | ValueKind::Copper | ValueKind::Andermant => "0".to_owned(),
-            ValueKind::Level => "-".to_owned(),
+            ValueKind::Gold => (copper / 10_000).to_string(),
+            ValueKind::Silver => (copper / 100 % 100).to_string(),
+            ValueKind::Copper => (copper % 100).to_string(),
+            ValueKind::Andermant => figures.andermant.unwrap_or(0).to_string(),
+            ValueKind::Level => figures.level.map(|l| l.to_string()).unwrap_or_else(|| "-".to_owned()),
             ValueKind::Name => figures.name.clone(),
             ValueKind::Page => "1/1".to_owned(),
         };

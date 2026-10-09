@@ -109,6 +109,17 @@ pub struct Net {
     pub resource: Option<f32>,
     /// Our current health, from the same command.
     pub health: Option<f32>,
+    /// Our maximum health, from a blow on us (HitCommand's victim maximum).
+    pub max_health: Option<f32>,
+    /// Level, and experience: (total, the level's floor, the next level's floor).
+    /// NewPlayer +240.. [0, level, experience, floor, ceiling], then
+    /// PlayerLevelUpdate (133) and XPChanged (134).
+    pub level: Option<u32>,
+    pub xp: Option<(u32, u32, u32)>,
+    /// The wallet: slot 0 Andermant, slot 1 gold in copper (NewPlayer +356,
+    /// CurrencyChanged 137). EVIDENCE: experimental dsor/mapinstance.py WALLET_RC /
+    /// WALLET_VC (handler 0x513E39).
+    pub wallet: Option<[u32; 5]>,
     /// The first quick slot bar (QuickSlotsInfo 83): skill ids by wire slot.
     pub bar: Vec<Option<String>>,
     /// Skills other actors used, relayed by the server (73-77), for crate::skills.
@@ -267,6 +278,10 @@ fn connect(world: &mut World) {
         npc_spawns: Vec::new(),
         npc_gone: Vec::new(),
         monster_spawns: Vec::new(),
+        max_health: None,
+        level: None,
+        xp: None,
+        wallet: None,
         monster_health: Vec::new(),
         hits: Vec::new(),
         kills: Vec::new(),
@@ -453,6 +468,9 @@ fn on_command(net: &mut Net, command: ServerCommand, actor: Option<u32>) {
             // no blow had changed yet was unknown and every cast went out.
             net.health = Some(p.words_212[0] as f32);
             net.resource = Some(p.words_212[1] as f32);
+            net.level = Some(p.words_240[1]);
+            net.xp = Some((p.words_240[2], p.words_240[3], p.words_240[4]));
+            net.wallet = Some(p.currencies);
             net.local_name = Some(p.name.clone());
             // The third leading bool is the admin byte (OverheadAdminColor name).
             let admin = p.leading_flags[2];
@@ -566,7 +584,21 @@ fn on_command(net: &mut Net, command: ServerCommand, actor: Option<u32>) {
                 net.monster_health.push((a, u.health, u.max_health));
             }
         }
+        ServerCommand::PlayerLevelUpdate(u) => {
+            net.level = Some(u.level);
+        }
+        ServerCommand::XpChanged(x) => {
+            net.level = Some(x.level);
+            net.xp = Some((x.total, x.floor, x.ceiling));
+        }
+        ServerCommand::CurrencyChanged(c) => {
+            net.wallet = Some(c.wallet);
+        }
         ServerCommand::Hit(h) => {
+            if actor.is_some() && actor == net.local_actor && h.victim_max_health > 0 {
+                net.max_health = Some(h.victim_max_health as f32);
+                net.health = Some(h.victim_health.max(0) as f32);
+            }
             if let Some(a) = actor {
                 net.hits.push((a, h));
             }
