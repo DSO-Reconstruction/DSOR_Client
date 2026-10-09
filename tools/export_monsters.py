@@ -7,7 +7,7 @@ Writes:
   characters/monster_templates.json
       _Template_Monster Id -> {graphics, set, anim_set, state, loop, title,
       hit: {damage type -> sequence}, critical, heavy, death, death_s,
-      despawn, despawn_s, radius, height}
+      despawn, despawn_s, dye [PrimaryColor, SecondaryColor], radius, height}
       (title: language/fr/db.monster.xml "<Id>Title")
   characters/monster_anims.json
       every animation set of data/tables/anims.xml -> state -> clip base name,
@@ -45,7 +45,8 @@ HIT = {
 }
 COLS = ["Id", "Graphics", "CharacterSet", "AnimSet", "StartAnimationState", "LoopStartAnimation",
         "CriticalHitSequence", "HeavyHitSequence", "DeathSequence", "DeathDuration",
-        "DespawnSequence", "DespawnDuration", "CapsuleRadius", "CapsuleHeight"] + list(HIT.values())
+        "DespawnSequence", "DespawnDuration", "CapsuleRadius", "CapsuleHeight",
+        "PrimaryColor", "SecondaryColor"] + list(HIT.values())
 db = sqlite3.connect(f"file:{os.path.join(export, 'db', 'static.db4')}?mode=ro", uri=True)
 templates = {}
 for row in db.execute(f"select {','.join(COLS)} from _Template_Monster"):
@@ -64,6 +65,8 @@ for row in db.execute(f"select {','.join(COLS)} from _Template_Monster"):
         "death_s": float(r["DeathDuration"] or 0.0),
         "despawn": r["DespawnSequence"] or "",
         "despawn_s": float(r["DespawnDuration"] or 0.0),
+        "dye": [list(struct.unpack("<4f", r["PrimaryColor"])) if r["PrimaryColor"] else [1, 1, 1, 0],
+                list(struct.unpack("<4f", r["SecondaryColor"])) if r["SecondaryColor"] else [1, 1, 1, 0]],
         "radius": float(r["CapsuleRadius"] or 0.0),
         "height": float(r["CapsuleHeight"] or 0.0),
     }

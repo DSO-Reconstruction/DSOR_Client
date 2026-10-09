@@ -50,6 +50,10 @@ pub enum Kind {
     /// by the node's Velocity x time in the shader, so merged map surfaces scroll
     /// too and no material changes per frame.
     Scroll = 6,
+    /// shd:character, characterfalloff, monster, monsterexp with their dye mask
+    /// (tools/embed_character_masks.py): the dyes MatDiffuse (p1) and MatSpecular
+    /// (p2) through the spec map's green and blue, the HitColor flash (p3).
+    Character = 7,
 }
 
 /// The kind of surface a glTF material's extras describe, if it is one of ours.
@@ -57,7 +61,10 @@ pub enum Kind {
 pub fn kind_of(extras: &str) -> Option<Kind> {
     let shader = |s: &str| extras.contains(&format!("\"nebula_shader\":\"shd:{s}\""));
     let cube = extras.contains("\"dsor_cube\"");
-    if extras.contains("\"dsor_scroll\"") {
+    let character = ["character", "characterfalloff", "monster", "monsterexp"].iter().any(|s| shader(s));
+    if character && extras.contains("\"dsor_dye\"") {
+        Some(Kind::Character)
+    } else if extras.contains("\"dsor_scroll\"") {
         Some(Kind::Scroll)
     } else if shader("environment") && cube {
         Some(Kind::Environment)

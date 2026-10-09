@@ -52,6 +52,15 @@ const VOLUME_FOG: i32 = 3;
 const PARTICLE: i32 = 4;
 const GLOW: i32 = 5;
 const SCROLL: i32 = 6;
+const CHARACTER: i32 = 7;
+
+// Nebula shades in gamma space (D3D9, no sRGB reads); bevy in linear.
+fn to_gamma(c: vec3<f32>) -> vec3<f32> {
+    return pow(max(c, vec3<f32>(0.0)), vec3<f32>(1.0 / 2.2));
+}
+fn to_linear(c: vec3<f32>) -> vec3<f32> {
+    return pow(max(c, vec3<f32>(0.0)), vec3<f32>(2.2));
+}
 
 // How far behind this fragment the opaque scene is, in view units (large when
 // the depth prepass is off).
@@ -187,6 +196,29 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
         }
         pbr_input.material.base_color.a = a;
         out.color = main_pass_post_lighting_processing(pbr_input, vec4<f32>(lit + reflection, clamp(a, 0.0, 1.0)));
+        return out;
+    }
+
+    // character, characterfalloff, monster, monsterexp (SkinnedSolid ps_3_0):
+    //   colour = lerp(colour, MatDiffuse x lum, spec.g x MatDiffuse.a), then the same
+    //            with MatSpecular and spec.b;
+    //   lit    = 2 light x 0.75 colour + 0.35 x 0.75 colour (+ emission, spec);
+    //   out    = lerp(lit, HitColor.rgb, HitColor.a), then the fog.
+    // Against shd:standard (2 light x colour) the lighting is x 0.75 and 0.2625 x
+    // colour is added. UNVERIFIED: the cube reflection term (masked by the vertex
+    // colour's red, which the conversion dropped) is left out.
+    if kind == CHARACTER {
+        let m = textureSample(mask_texture, mask_sampler, uv0(in));
+        var base = to_gamma(pbr_input.material.base_color.rgb);
+        let lum = dot(base, vec3<f32>(0.299, 0.587, 0.114));
+        base = mix(base, surface.p1.rgb * lum, m.g * surface.p1.a);
+        base = mix(base, surface.p2.rgb * lum, m.b * surface.p2.a);
+        pbr_input.material.base_color = vec4<f32>(to_linear(base), pbr_input.material.base_color.a);
+        pbr_input.material.base_color = alpha_discard(pbr_input.material, pbr_input.material.base_color);
+        let lit = apply_pbr_lighting(pbr_input);
+        var shown = 0.75 * to_gamma(lit.rgb) + 0.2625 * base;
+        shown = mix(shown, surface.p3.rgb, surface.p3.a);
+        out.color = main_pass_post_lighting_processing(pbr_input, vec4<f32>(to_linear(shown), lit.a));
         return out;
     }
 

@@ -65,6 +65,9 @@ pub struct MonsterTemplate {
     pub heavy: String,
     #[serde(default)]
     pub death: String,
+    /// PrimaryColor, SecondaryColor (rgba): the dyes MatDiffuse and MatSpecular.
+    #[serde(default)]
+    pub dye: [[f32; 4]; 2],
     #[serde(default)]
     pub radius: f32,
     #[serde(default)]
@@ -149,9 +152,20 @@ pub struct Monster {
     heavy: Option<Entity>,
 }
 
+/// HitColor writes of the sequencer (crate::skills, ColorShaderParameterTrackBar):
+/// actor, colour (alpha: how much of it replaces the shaded colour).
+#[derive(Resource, Default)]
+pub struct ShaderColors(pub Vec<(Entity, Vec4)>);
+
+/// An actor's own copies of its character materials (crate::surfaces kind
+/// Character): its dyes, and the HitColor its sequences flash.
+#[derive(Component, Default)]
+pub struct ActorMaterials(pub Vec<Handle<crate::surfaces::NebulaMaterial>>);
+
 /// A whole model waiting for its scene: skins, variation, animations.
 #[derive(Component)]
 struct ModelSetup {
+    dye: [[f32; 4]; 2],
     gltf: Handle<Gltf>,
     sets: Handle<ModelSets>,
     set: String,
@@ -187,6 +201,8 @@ impl Plugin for MonstersPlugin {
             .register_asset_loader(ModelSetsLoader)
             .init_resource::<OfflineMonster>()
             .init_resource::<Hovered>()
+            .init_resource::<ShaderColors>()
+            .add_systems(PostUpdate, apply_shader_colors)
             .add_systems(PreUpdate, hover)
             .add_systems(Startup, load)
             .add_systems(Update, (spawn_monsters, setup_models, monster_health, hits_and_kills).chain());
@@ -278,6 +294,7 @@ fn spawn_monsters(
                     Visibility::default(),
                     CharacterAnim::default(),
                     ModelSetup {
+                        dye: t.dye,
                         gltf: assets.load(path.clone()),
                         sets: assets.load(format!("{}.sets.json", t.graphics)),
                         set: t.set.clone(),
@@ -331,6 +348,10 @@ fn setup_models(
     data: Res<MonsterData>,
     assets: Res<AssetServer>,
     mut graphs: ResMut<Assets<AnimationGraph>>,
+    (surfaces, mut surface_assets): (
+        Query<&MeshMaterial3d<crate::surfaces::NebulaMaterial>>,
+        ResMut<Assets<crate::surfaces::NebulaMaterial>>,
+    ),
 ) {
     let Some(table) = anims.get(&data.anims) else { return };
     for (e, setup, mut anim, mut monster) in &mut pending {
@@ -382,6 +403,22 @@ fn setup_models(
                 }
             }
         }
+        // Its own copies of its character materials: its template's dyes, and a
+        // HitColor of its own.
+        let mut own = Vec::new();
+        for d in children.iter_descendants(e) {
+            let Ok(MeshMaterial3d(h)) = surfaces.get(d) else { continue };
+            let Some(mut m) = surface_assets.get(h).cloned() else { continue };
+            if m.extension.params.p0.x as u32 != crate::surfaces::Kind::Character as u32 {
+                continue;
+            }
+            m.extension.params.p1 = Vec4::from_array(setup.dye[0]);
+            m.extension.params.p2 = Vec4::from_array(setup.dye[1]);
+            let copy = surface_assets.add(m);
+            commands.entity(d).insert(MeshMaterial3d(copy.clone()));
+            own.push(copy);
+        }
+        commands.entity(e).insert(ActorMaterials(own));
         let mut graph = AnimationGraph::new();
         let mut nodes = HashMap::new();
         if let Some(rows) = table.0.get(&setup.anim_set) {
@@ -649,5 +686,22 @@ fn hover(
     let now = best.map(|(_, e, a)| (e, a));
     if hovered.0 != now {
         hovered.0 = now;
+    }
+}
+
+fn apply_shader_colors(
+    mut colors: ResMut<ShaderColors>,
+    actors: Query<&ActorMaterials>,
+    mut materials: ResMut<Assets<crate::surfaces::NebulaMaterial>>,
+) {
+    for (actor, c) in colors.0.drain(..) {
+        let Ok(own) = actors.get(actor) else { continue };
+        for h in &own.0 {
+            if let Some(mut m) = materials.get_mut(h) {
+                if m.extension.params.p3 != c {
+                    m.extension.params.p3 = c;
+                }
+            }
+        }
     }
 }

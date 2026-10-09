@@ -182,6 +182,13 @@ def sequence(layout):
             t = {"kind": "hide"}
         elif kind == "PlaySoundTrackBar":
             t = {"kind": "sound", "name": v.get("soundname", ""), "volume": num(v.get("volume"), 100)}
+        elif kind == "ColorShaderParameterTrackBar":
+            # A shader colour of the actor while the track runs (HitColor: the red
+            # flash of a hit), its alpha x the "intensity" curve; defaultColor after.
+            c, d = v.get("color") or {}, v.get("defaultColor") or {}
+            t = {"kind": "color", "param": v.get("shaderParameter", ""),
+                 "color": [num(c.get(k)) / 255.0 for k in "xyzw"], "default": [num(d.get(k)) / 255.0 for k in "xyzw"],
+                 "intensity": num((v.get("intensity") or {}).get("intensity"), 1) if isinstance(v.get("intensity"), dict) else num(v.get("intensity"), 1)}
         if t and (t.get("graphics", "x") not in ("", "empty")):
             t["start"], t["end"] = start, end
             # Values that change over the track (a light dimming, an effect moving).

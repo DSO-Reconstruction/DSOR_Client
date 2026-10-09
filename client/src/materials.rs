@@ -385,6 +385,12 @@ fn cube_path(extras: &str) -> Option<String> {
     Some(v.get("dsor_cube")?.as_str()?.to_owned())
 }
 
+/// A character surface's dye mask (extras.dsor_dye, tools/embed_character_masks.py).
+fn dye_mask(textures: &[Option<Handle<Image>>], extras: &str) -> Option<Handle<Image>> {
+    let v: serde_json::Value = serde_json::from_str(extras).ok()?;
+    textures.get(v.get("dsor_dye")?.get("mask")?.as_u64()? as usize)?.clone()
+}
+
 /// The second layer's textures and tiling (extras.dsor_layer).
 fn layer_of(textures: &[Option<Handle<Image>>], extras: &str) -> Option<(Handle<Image>, Handle<Image>, f32)> {
     let v: serde_json::Value = serde_json::from_str(extras).ok()?;
@@ -542,6 +548,9 @@ impl GltfExtensionHandler for NebulaStates {
                     base.alpha_mode = AlphaMode::Add;
                     base.fog_enabled = false;
                     base.base_color = Color::WHITE;
+                }
+                Kind::Character => {
+                    mask = dye_mask(&self.textures, &extras);
                 }
                 // Never here: crate::particles builds its own; Scroll is below.
                 Kind::Particle | Kind::Scroll => {}

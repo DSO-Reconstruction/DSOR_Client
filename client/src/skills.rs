@@ -132,6 +132,19 @@ pub enum Track {
     Shake { intensity: f32, range: f32, start: i32, end: i32 },
     Hide { start: i32, end: i32 },
     Sound { start: i32, end: i32 },
+    /// ColorShaderParameterTrackBar: a shader colour of the actor (HitColor, the
+    /// flash of a hit) while it runs, its alpha x the intensity curve; `default`
+    /// once it ends.
+    Color {
+        param: String,
+        color: [f32; 4],
+        default: [f32; 4],
+        intensity: f32,
+        start: i32,
+        end: i32,
+        #[serde(default)]
+        curves: HashMap<String, Vec<[f32; 8]>>,
+    },
 }
 
 impl Track {
@@ -143,7 +156,8 @@ impl Track {
             | Track::Light { start, end, .. }
             | Track::Shake { start, end, .. }
             | Track::Hide { start, end }
-            | Track::Sound { start, end } => (*start, *end),
+            | Track::Sound { start, end }
+            | Track::Color { start, end, .. } => (*start, *end),
         }
     }
 }
@@ -815,9 +829,9 @@ fn play_sequences(
     transforms: Query<&GlobalTransform>,
     cameras: Query<&GlobalTransform, With<Camera3d>>,
     mut shake: ResMut<CameraShake>,
-    locals: Query<&LocalPlayer>,
-    remotes: Query<&RemotePlayer>,
+    (locals, remotes): (Query<&LocalPlayer>, Query<&RemotePlayer>),
     mut point_lights: Query<(&mut PointLight, &mut Transform), Without<Character>>,
+    mut colors: ResMut<crate::monsters::ShaderColors>,
 ) {
     let eye = cameras.iter().next().map(|c| c.translation());
     let mut lights_to_set: Vec<(Entity, f32, f32, Transform)> = Vec::new();
@@ -862,6 +876,20 @@ fn play_sequences(
             let track = p.seq.tracks[i].clone();
             let (start, end) = track.span();
             let ending = done || frame >= end as f32;
+            // A shader colour: set every frame it runs, its default once it ends.
+            if let (Track::Color { param, color, default, intensity, curves, .. }, Some(actor)) = (&track, p.actor) {
+                if param == "HitColor" {
+                    if !ending && frame >= start as f32 {
+                        p.started[i] = true;
+                        let k = eval_curve(curves.get("intensity"), frame).unwrap_or(*intensity);
+                        colors.0.push((actor, Vec4::new(color[0], color[1], color[2], color[3] * k)));
+                    } else if ending && p.started[i] {
+                        colors.0.push((actor, Vec4::from_array(*default)));
+                        p.spawned[i] = None;
+                    }
+                }
+                continue;
+            }
             if !p.started[i] && frame >= start as f32 && !ending {
                 p.started[i] = true;
                 match &track {
@@ -946,7 +974,7 @@ fn play_sequences(
                             *v = Visibility::Hidden;
                         }
                     }
-                    Track::Phase { .. } | Track::Sound { .. } | Track::Anim { .. } => {}
+                    Track::Phase { .. } | Track::Sound { .. } | Track::Anim { .. } | Track::Color { .. } => {}
                 }
             }
             // Animated values (bezier curves over the sequence's frames).
