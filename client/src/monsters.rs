@@ -158,6 +158,9 @@ pub struct Monster {
 pub struct DebugMonsters {
     pub spawns: Vec<MonsterSpawn>,
     pub blows: Vec<(u32, u8)>,
+    /// Offline play: the local player's skills landing, as no server answers them
+    /// (crate::skills): (seconds to go, where, radius, the aimed monster).
+    pub strikes: Vec<(f32, Vec3, f32, Option<u32>)>,
     next_type: u8,
     tick: u32,
 }
@@ -494,11 +497,12 @@ fn hits_and_kills(
     templates: Res<Assets<MonsterTemplates>>,
     mut monsters: Query<(Entity, &mut Monster, &mut CharacterAnim)>,
     playing: Query<(), With<SequencePlayer>>,
-    (locals, remotes, mut texts, mut debug): (
+    (locals, remotes, mut texts, mut debug, transforms): (
         Query<(Entity, &crate::net::LocalPlayer)>,
         Query<(Entity, &RemotePlayer), Without<Monster>>,
         ResMut<crate::combat_text::CombatTexts>,
         ResMut<DebugMonsters>,
+        Query<&GlobalTransform>,
     ),
 ) {
     let (Some(sequences), Some(templates)) = (seqs.get(skills.sequences()), templates.get(&data.templates)) else { return };
@@ -562,6 +566,29 @@ fn hits_and_kills(
             }
         }
     }
+    // Offline play: the player's skills strike what they aimed at, or what stands
+    // where they land.
+    let dt = time.delta_secs();
+    let mut landed = Vec::new();
+    debug.strikes.retain_mut(|(after, at, radius, target)| {
+        *after -= dt;
+        if *after > 0.0 {
+            return true;
+        }
+        landed.push((*at, *radius, *target));
+        false
+    });
+    for (at, radius, target) in landed {
+        let near = |p: Vec3| Vec2::new(p.x - at.x, p.z - at.z).length() <= radius;
+        let hit: Vec<u32> = monsters
+            .iter()
+            .filter(|(e, m, a)| !a.dead && (target == Some(m.actor) || (target.is_none() && near(transforms.get(*e).map(|t| t.translation()).unwrap_or(Vec3::INFINITY)))))
+            .map(|(_, m, _)| m.actor)
+            .collect();
+        for actor in hit {
+            debug.blows.push((actor, 0));
+        }
+    }
     // The debug menu's blows, as the local player's.
     for (victim, kind) in std::mem::take(&mut debug.blows) {
         if kind == 2 {
@@ -570,11 +597,21 @@ fn hits_and_kills(
         }
         debug.tick += 1;
         let t = debug.next_type;
+        let damage = 10 + (debug.tick * 37 % 40) as i32;
+        // Debug monsters have 100 health: the blow that empties it kills.
+        if let Some((_, mut m, _)) = monsters.iter_mut().find(|(_, m, _)| m.actor == victim) {
+            if victim >= 0x6100_0000 {
+                m.health = m.health.saturating_sub(damage as u32);
+                if m.health == 0 {
+                    deaths.push(victim);
+                }
+            }
+        }
         debug.next_type = (t + 1) % DAMAGE_TYPES.len() as u8;
         blows.push(Blow {
             victim,
             attacker: local,
-            damage: 10 + (debug.tick * 37 % 400) as i32,
+            damage,
             blocked: false,
             immune: false,
             kind: 3,

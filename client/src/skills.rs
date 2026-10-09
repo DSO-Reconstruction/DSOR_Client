@@ -509,7 +509,11 @@ fn cast_input(
     time: Res<Time<Real>>,
     mut players: Query<(Entity, &Transform, &mut LocalPlayer, &Character)>,
     mut cooldowns: Local<HashMap<String, f64>>,
-    (hovered, monsters): (Res<crate::monsters::Hovered>, Query<(&GlobalTransform, &crate::monsters::Monster, &CharacterAnim)>),
+    (hovered, monsters, mut debug_monsters): (
+        Res<crate::monsters::Hovered>,
+        Query<(&GlobalTransform, &crate::monsters::Monster, &CharacterAnim)>,
+        ResMut<crate::monsters::DebugMonsters>,
+    ),
     // A target skill aimed at a monster out of reach: (slot, monster), cast once
     // the walk brings it in reach.
     mut queued: Local<Option<(usize, Entity)>>,
@@ -626,6 +630,16 @@ fn cast_input(
         *r -= skill.resource_cost;
     }
     info!("cast {} (wire {wire}, {}) at {point:?}", skill.id, skill.kind);
+    // Offline nobody answers the cast: it lands at its hit frame (and after the
+    // bullet's flight), on the aimed monster or around the point.
+    if net.offline {
+        let mut after = skill.hit_frame.max(skill.loop_start) as f32 / FPS;
+        if let Some(b) = skill.bullet.as_ref().filter(|b| b.velocity > 0.0) {
+            after += Vec2::new(point.x - tf.translation.x, point.z - tf.translation.z).length() / b.velocity;
+        }
+        let target = aimed.map(|(_, _, a, _)| a);
+        debug_monsters.strikes.push((after, point, 2.5, target));
+    }
     perform(&mut commands, skill, sequences, entity, Some(character), tf.translation, facing, point);
 }
 

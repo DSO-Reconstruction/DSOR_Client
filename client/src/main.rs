@@ -59,6 +59,22 @@ struct Options {
     anim: Option<String>,
     /// Play online: the login server and the launcher's identity.
     net: Option<net::NetConfig>,
+    /// Play offline (class, gender): a character of one's own without a server
+    /// (crate::net::start_offline). The debug map starts one by itself.
+    play: Option<(u8, u8)>,
+}
+
+/// Offline play: `--play` / `?play=`, or the debug map with nobody else to play.
+fn offline_play(world: &mut World) {
+    let opts = world.resource::<Options>().clone();
+    if opts.net.is_some() {
+        return;
+    }
+    let play = opts.play.or((opts.map == "debug" && opts.character.is_none()).then_some((1, 0)));
+    if let Some((class, gender)) = play {
+        info!("offline play: class {class}, gender {gender}");
+        net::start_offline(world, class, gender);
+    }
 }
 
 fn parse_cam(s: &str) -> Option<([f32; 3], [f32; 3])> {
@@ -68,7 +84,7 @@ fn parse_cam(s: &str) -> Option<([f32; 3], [f32; 3])> {
 
 #[cfg(not(target_arch = "wasm32"))]
 fn options() -> Options {
-    let mut o = Options { map: DEFAULT_MAP.into(), screenshot: None, cam: None, shadows: true, npcs: false, character: None, anim: None, net: None };
+    let mut o = Options { map: DEFAULT_MAP.into(), screenshot: None, cam: None, shadows: true, npcs: false, character: None, anim: None, net: None, play: None };
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -83,6 +99,11 @@ fn options() -> Options {
                 o.character = Some((class, gender));
             }
             "--anim" => o.anim = args.next(),
+            "--play" => {
+                let class = args.next().and_then(|c| c.parse().ok()).unwrap_or(1);
+                let gender = args.next().and_then(|g| g.parse().ok()).unwrap_or(0);
+                o.play = Some((class, gender));
+            }
             "--server" => {
                 let login = args.next().unwrap_or_else(|| "127.0.0.1:2190".into());
                 o.net = Some(net::NetConfig {
@@ -117,7 +138,7 @@ fn options() -> Options {
 
 #[cfg(target_arch = "wasm32")]
 fn options() -> Options {
-    let mut o = Options { map: DEFAULT_MAP.into(), screenshot: None, cam: None, shadows: true, npcs: false, character: None, anim: None, net: None };
+    let mut o = Options { map: DEFAULT_MAP.into(), screenshot: None, cam: None, shadows: true, npcs: false, character: None, anim: None, net: None, play: None };
     let search = web_sys::window()
         .and_then(|w| w.location().search().ok())
         .unwrap_or_default();
@@ -128,6 +149,11 @@ fn options() -> Options {
             "cam" => o.cam = parse_cam(&v.replace("%2C", ",")),
             "noshadows" => o.shadows = false,
             "npcs" => o.npcs = true,
+            // ?play=<class>[,<gender>]: an offline character of one's own.
+            "play" => {
+                let mut it = v.split("%2C").flat_map(|x| x.split(',')).filter_map(|x| x.parse::<u8>().ok());
+                o.play = Some((it.next().unwrap_or(1), it.next().unwrap_or(0)));
+            }
             // Diagnostics: ?flag=name switches one cost off (crate::flag).
             "flag" => {
                 let _ = FLAGS.set(v.split(',').map(str::to_owned).collect());
@@ -278,7 +304,7 @@ fn main() {
             size: if flag("lowshadows") { 512 } else if WEBGL2 { 1024 } else { 2048 },
         })
         .insert_resource(opts.clone())
-        .add_systems(Startup, setup);
+        .add_systems(Startup, (setup, offline_play));
     // CONTRACT: vertex and index slabs stay small in the browser. bevy's defaults
     //   grow a slab x1.5 up to 512 MiB, copying it each time; with Kingshill's
     //   ~140 MiB of static vertices ANGLE/Metal failed the allocation

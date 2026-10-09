@@ -78,6 +78,11 @@ pub struct NetConfig {
 /// CONTRACT: a NON-SEND resource: in the browser the transport holds a WebSocket
 ///   and JS closures, which cannot cross threads; natively it costs nothing.
 pub struct Net {
+    /// Playing without a server (crate::debug's playable character): nothing is
+    /// sent or received; the local player, its skills and its moves work as online.
+    pub offline: bool,
+    /// Offline: the character to put on the map once its centre is known.
+    pub offline_pending: Option<CharacterDesc>,
     session: Session,
     transport: Option<Transport>,
     clock_offset: Option<i64>,
@@ -241,6 +246,66 @@ pub fn now_ms(time: &Time<Real>) -> u64 {
     (time.elapsed_secs_f64() * 1000.0) as u64
 }
 
+/// The local actor of the offline character.
+pub const OFFLINE_ACTOR: u32 = 0x5FFF_FFFF;
+
+/// A class's starting quick bar for the offline character (left button, right
+/// button, keys 1-5).
+pub fn default_bar(class: u8) -> Vec<Option<String>> {
+    let ids: &[&str] = match class {
+        0 => &["angrystrike", "mightyswing", "mightybash", "battlecry", "enragingleap", "seismicslam", "bloody360"],
+        2 => &["markshot", "multishot", "stab", "explosiveshot", "jump", "stunshot", "whirlwind"],
+        3 => &["SimpleShot", "HeavyShot", "Grenade", "CombatTurret", "HoverJump", "ShrapnelShot", "Barrier"],
+        _ => &["magicmissile", "fireball", "frostnova", "iceball", "teleport", "lightningstrike", "frostwind"],
+    };
+    let class_name = ["warrior", "mage", "ranger", "dwarf"][class.min(3) as usize];
+    ids.iter().map(|s| Some(format!("{class_name}_{s}_default"))).collect()
+}
+
+/// Offline play (no server): a Net that connects nowhere, and a character of
+/// this class and gender. Switching later: crate::debug sets `offline_pending`.
+pub fn start_offline(world: &mut World, class: u8, gender: u8) {
+    let now = now_ms(world.resource::<Time<Real>>());
+    let credentials = Credentials::parse("1", "00000000000000000000000000000000").expect("fixed credentials");
+    let session = Session::new(std::net::SocketAddrV4::new(std::net::Ipv4Addr::LOCALHOST, 9), credentials, 1, now);
+    world.insert_non_send(Net {
+        offline: true,
+        offline_pending: Some(CharacterDesc { class, gender, ..default() }),
+        session,
+        transport: None,
+        clock_offset: Some(0),
+        relay: None,
+        wanted_character: None,
+        local_actor: Some(OFFLINE_ACTOR),
+        centre: None,
+        pending_local: None,
+        requested: Default::default(),
+        remote_spawns: Vec::new(),
+        remote_gone: Vec::new(),
+        remote_moves: Vec::new(),
+        local_worn: None,
+        remote_redress: Vec::new(),
+        npc_spawns: Vec::new(),
+        npc_gone: Vec::new(),
+        monster_spawns: Vec::new(),
+        max_health: None,
+        level: Some(1),
+        xp: None,
+        wallet: None,
+        monster_health: Vec::new(),
+        hits: Vec::new(),
+        kills: Vec::new(),
+        bar: default_bar(class),
+        skill_events: Vec::new(),
+        status_events: Vec::new(),
+        location_events: Vec::new(),
+        location_gone: Vec::new(),
+        local_name: Some("Debug".into()),
+        resource: None,
+        health: None,
+    });
+}
+
 fn net_exists(net: Option<NonSend<Net>>) -> bool {
     net.is_some()
 }
@@ -261,6 +326,8 @@ fn connect(world: &mut World) {
     let guid = 0x0660_0000_0000_0000 | (credentials.account as u64) << 8 | 0x42;
     let session = Session::new(login, credentials, guid, now);
     world.insert_non_send(Net {
+        offline: false,
+        offline_pending: None,
         session,
         transport: None,
         clock_offset: None,
@@ -341,7 +408,17 @@ impl Net {
         self.skill_events.push(SkillEvent { actor, wire: base.skill_id, heading: base.heading, points });
     }
 
+    /// Put the local player (back) on the map: spawned by spawn_local, the old one
+    /// removed (crate::debug's character switch).
+    pub fn queue_local(&mut self, desc: CharacterDesc, at: Vec3, facing: f32) {
+        let name = self.local_name.clone().unwrap_or_else(|| "Debug".into());
+        self.pending_local = Some((desc, at, facing, name, false));
+    }
+
     pub fn send(&mut self, command: &ClientCommand) {
+        if self.offline {
+            return;
+        }
         let (bytes, bits) = command.encode();
         self.session.send_command(&bytes, bits);
     }
@@ -360,6 +437,20 @@ fn pump(
 ) {
     let now = now_ms(&time);
     let net = &mut *net;
+    if net.offline {
+        if net.centre.is_none() {
+            if let Some(manifest) = current.as_ref().and_then(|c| manifests.get(&c.manifest)) {
+                net.centre = Some(Vec3::from(manifest.center));
+            }
+        }
+        // CONTRACT: taken only once the centre is known (taken before, it was lost).
+        if let Some(c) = net.centre.filter(|_| net.offline_pending.is_some()) {
+            let desc = net.offline_pending.take().expect("checked");
+            info!("offline: playing class {} at {c:?}", desc.class);
+            net.pending_local = Some((desc, c, 0.0, "Debug".into(), false));
+        }
+        return;
+    }
     if let Some(t) = net.transport.as_mut() {
         let mut inbox = Vec::new();
         t.poll(&mut inbox);
@@ -943,6 +1034,9 @@ fn send_moves(mut net: NonSendMut<Net>, time: Res<Time<Real>>, mut players: Quer
         start_tick: tick,
         duration: MOVE_DURATION,
     });
+    if net.offline {
+        return;
+    }
     let (bytes, bits) = command.encode();
     net.session.send_command_with(&bytes, bits, Reliability::UnreliableSequenced);
     let _ = TICK_SECONDS;

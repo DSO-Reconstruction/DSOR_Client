@@ -333,6 +333,13 @@ impl CharacterAnim {
         self.player.is_some()
     }
 
+    /// The animation states this character has clips for (crate::debug).
+    pub fn states(&self) -> Vec<String> {
+        let mut v: Vec<String> = self.nodes.keys().cloned().collect();
+        v.sort();
+        v
+    }
+
     /// Drive a whole model's own animation player (monsters, crate::monsters):
     /// `nodes` are its graph's clips by state row, with whether each loops.
     pub fn bind_model(&mut self, player: Entity, nodes: HashMap<String, (AnimationNodeIndex, bool)>) {
