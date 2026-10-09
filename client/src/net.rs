@@ -271,6 +271,7 @@ pub fn start_offline(world: &mut World, class: u8, gender: u8) {
     let now = now_ms(world.resource::<Time<Real>>());
     let credentials = Credentials::parse("1", "00000000000000000000000000000000").expect("fixed credentials");
     let session = Session::new(std::net::SocketAddrV4::new(std::net::Ipv4Addr::LOCALHOST, 9), credentials, 1, now);
+    world.insert_resource(NetActive);
     world.insert_non_send(Net {
         offline: true,
         offline_pending: Some(CharacterDesc { class, gender, ..default() }),
@@ -310,8 +311,15 @@ pub fn start_offline(world: &mut World, class: u8, gender: u8) {
     });
 }
 
-fn net_exists(net: Option<NonSend<Net>>) -> bool {
-    net.is_some()
+/// Marks that `Net` exists, for run conditions.
+/// CONTRACT: run conditions must not read the NonSend `Net` itself: bevy 0.19 runs
+///   them on worker threads, and the game aborted at random ("Attempted to access
+///   or drop non-send resource ... from thread", segfaults).
+#[derive(Resource)]
+pub struct NetActive;
+
+fn net_exists(active: Option<Res<NetActive>>) -> bool {
+    active.is_some()
 }
 
 /// Exclusive: a non-send resource can only be inserted through the World.
@@ -329,6 +337,7 @@ fn connect(world: &mut World) {
     // One RakNet GUID per run, as the real client keeps one for all its connections.
     let guid = 0x0660_0000_0000_0000 | (credentials.account as u64) << 8 | 0x42;
     let session = Session::new(login, credentials, guid, now);
+    world.insert_resource(NetActive);
     world.insert_non_send(Net {
         offline: false,
         offline_pending: None,

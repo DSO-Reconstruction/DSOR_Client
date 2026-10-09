@@ -220,6 +220,7 @@ fn keyboard(
     mut debug: ResMut<Debug>,
     mut panel: Query<&mut Visibility, With<Panel>>,
     mut ctx: Ctx,
+    mut net: Option<NonSendMut<Net>>,
 ) {
     let mut enter = false;
     for ev in events.read() {
@@ -261,7 +262,7 @@ fn keyboard(
         keys.reset_all();
         if enter {
             if let Some((_, act)) = debug.rows.first().cloned() {
-                ctx.act(&mut debug, act);
+                ctx.act(&mut debug, act, &mut net);
             }
         }
     }
@@ -280,7 +281,6 @@ struct Ctx<'w, 's> {
     skills: Res<'w, SkillData>,
     seqs: Res<'w, Assets<SequenceTable>>,
     debug_monsters: ResMut<'w, DebugMonsters>,
-    net: Option<NonSendMut<'w, Net>>,
 }
 
 impl Ctx<'_, '_> {
@@ -299,7 +299,10 @@ impl Ctx<'_, '_> {
         self.monsters.iter().find(|(_, m)| m.actor == actor).map(|(e, _)| e)
     }
 
-    fn act(&mut self, debug: &mut Debug, act: Act) {
+    /// CONTRACT: `net` comes as the system's own parameter: a NonSend resource in a
+    ///   derived SystemParam did not keep the system on the main thread, and the
+    ///   game crashed at random ("non-send resource ... from thread", segfaults).
+    fn act(&mut self, debug: &mut Debug, act: Act, net: &mut Option<NonSendMut<Net>>) {
         let at = self.place();
         match act {
             Act::Spawn(name) => self.spawn(debug, &name, at),
@@ -317,7 +320,7 @@ impl Ctx<'_, '_> {
                 }
             }
             Act::Hero(class, gender) => {
-                let Some(net) = self.net.as_mut().filter(|n| n.offline) else {
+                let Some(net) = net.as_mut().filter(|n| n.offline) else {
                     debug.status = "only offline (no server)".into();
                     return;
                 };
@@ -328,7 +331,7 @@ impl Ctx<'_, '_> {
                 debug.status = format!("playing {} ({})", CLASSES[class as usize], if gender == 1 { "female" } else { "male" });
             }
             Act::Skill(id) => {
-                let Some(net) = self.net.as_mut() else { return };
+                let Some(net) = net.as_mut() else { return };
                 if net.bar.len() < 2 {
                     net.bar.resize(2, None);
                 }
@@ -410,6 +413,7 @@ fn buttons(
     mut ctx: Ctx,
     mut scripted: Local<bool>,
     time: Res<Time>,
+    mut net: Option<NonSendMut<Net>>,
 ) {
     // DSOR_DEBUG_SPAWN=<tab>:<name>;... (tab 0 monsters, 1 models, 2 effects,
     // 3 sequences): spawned once, two seconds in (testing without a mouse).
@@ -438,7 +442,7 @@ fn buttons(
     for (i, Row(r)) in &rows {
         if *i == Interaction::Pressed {
             if let Some((_, act)) = debug.rows.get(*r).cloned() {
-                ctx.act(&mut debug, act);
+                ctx.act(&mut debug, act, &mut net);
             }
         }
     }

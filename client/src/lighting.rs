@@ -36,8 +36,6 @@ const UNIT: f32 = 1.2 * 831.746; // 1.2 x 2^9.7
 /// Bevy's diffuse ambient is `EnvBRDFApprox(albedo, F_AB(1, NdotV))` x ambient:
 /// 0.452 x albedo at roughness 1 (Karis' fit); Nebula's is albedo x ambient.
 const AMBIENT_BRDF: f32 = 0.452;
-/// Bevy's point light window at half range, (1 - 0.5^4)^2.
-const WINDOW_AT_HALF: f32 = 0.8789;
 /// The light that follows the player (LocalLightColor x LocalLightIntensity):
 /// `_Template_RemotePlayer.PlayerLightOffset` (1, 1, -0.5) from the player.
 /// UNVERIFIED: its range (the data has none).
@@ -50,17 +48,45 @@ fn linear(c: [f32; 3], k: f32) -> LinearRgba {
     LinearRgba::rgb(l.red, l.green, l.blue)
 }
 
-/// A Nebula point light (gamma colour x intensity, linear falloff to `range`) as a
-/// Bevy one (inverse square, windowed), matched at half the range, where Nebula
-/// gives half its colour: E(r/2) / pi x exposure = linear(colour x intensity / 2).
+/// A Nebula point light: gamma colour x intensity, falling off linearly to its
+/// range. Bevy's falloff is replaced by Nebula's (`NebulaFalloff`: sat(1 - d/r),
+/// ^2.2 as the light is added in gamma space), so the light is its colour x
+/// intensity at the centre and nothing at its range, with no inverse-square hot
+/// spot near it: matched at half range with bevy's 1/d^2, a lamp lit the wall
+/// beside it ~9 times too bright ("trop emissive les lights").
+/// E / pi x exposure = linear(colour x intensity) x f: intensity / (4 pi) = pi x UNIT.
 pub fn point_light(color: [f32; 3], intensity: f32, range: f32) -> PointLight {
     PointLight {
-        color: Color::LinearRgba(linear(color, intensity * 0.5)),
-        intensity: std::f32::consts::PI.powi(2) * range * range * UNIT / WINDOW_AT_HALF,
+        color: Color::LinearRgba(linear(color, intensity)),
+        intensity: 4.0 * std::f32::consts::PI.powi(2) * UNIT,
         range,
         shadow_maps_enabled: false,
         ..default()
     }
+}
+
+/// Bevy's `getDistanceAttenuation` (bevy_pbr::lighting) replaced, once the module
+/// is loaded, by Nebula's linear point light falloff. Point and spot lights only.
+/// EVIDENCE: the frame's Lights batch (b_empty, default.xml) and docs/fx.md
+///   ("Nebula's linear falloff").
+fn nebula_falloff(mut shaders: ResMut<Assets<bevy::shader::Shader>>, mut done: Local<bool>) {
+    if *done {
+        return;
+    }
+    let target = bevy::shader::ShaderImport::Custom("bevy_pbr::lighting".into());
+    let Some(id) = shaders.iter().find(|(_, s)| s.import_path == target).map(|(id, _)| id) else { return };
+    *done = true;
+    let Some(mut shader) = shaders.get_mut(id) else { return };
+    let bevy::shader::Source::Wgsl(src) = &shader.source else { return };
+    let old = "fn getDistanceAttenuation(distanceSquare: f32, inverseRangeSquared: f32) -> f32 {\n    return getRangeFalloff(distanceSquare, inverseRangeSquared) * 1.0 / max(distanceSquare, 0.0001);\n}";
+    if !src.contains(old) {
+        warn!("bevy_pbr::lighting: getDistanceAttenuation not as expected; point lights keep bevy's falloff");
+        return;
+    }
+    let new = "fn getDistanceAttenuation(distanceSquare: f32, inverseRangeSquared: f32) -> f32 {\n    // Nebula: linear to the range, in gamma space (crate::lighting).\n    return pow(saturate(1.0 - sqrt(distanceSquare * inverseRangeSquared)), 2.2);\n}";
+    let patched = src.replace(old, new);
+    shader.source = bevy::shader::Source::Wgsl(patched.into());
+    info!("point lights: Nebula's linear falloff");
 }
 
 /// An ambience bubble's settings (the fields the client uses; names as in the
@@ -373,6 +399,7 @@ impl Plugin for LightingPlugin {
             .init_asset_loader::<AmbienceLoader>()
             .init_resource::<Level>()
             .insert_resource(load_saved().unwrap_or_default())
+            .add_systems(Update, nebula_falloff)
             .add_systems(Startup, (spawn_panel, spawn_back_light))
             .add_systems(
                 Update,

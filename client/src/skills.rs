@@ -986,7 +986,7 @@ fn curved(at: &[f32; 9], curves: &HashMap<String, Vec<[f32; 8]>>, prefix: &str, 
 
 /// A sequence point light's intensity (Nebula 0..10) in bevy lumens.
 /// UNVERIFIED: the scale; chosen so the fireball's light does not burn its rock white.
-const LIGHT_LUMENS: f32 = 40_000.0;
+
 
 /// An effect transform from a track: translation, rotation in degrees, scale.
 fn track_transform(at: &[f32; 9]) -> Transform {
@@ -1020,7 +1020,7 @@ fn play_sequences(
     bodies: Query<&Transform, (With<Character>, Without<PointLight>)>,
 ) {
     let eye = cameras.iter().next().map(|c| c.translation());
-    let mut lights_to_set: Vec<(Entity, f32, f32, Transform)> = Vec::new();
+    let mut lights_to_set: Vec<(Entity, [f32; 3], f32, f32, Transform)> = Vec::new();
     // A new skill sequence on an actor takes its animation over from the older
     // ones (their effects play on): an older one's ending animation track reset
     // the actor to Idle in the middle of the second cast of the same skill.
@@ -1132,14 +1132,9 @@ fn play_sequences(
                     Track::Light { color, intensity, range, at, .. } => {
                         let light = commands
                             .spawn((
-                                PointLight {
-                                    color: Color::srgb(color[0], color[1], color[2]),
-                                    // UNVERIFIED: Nebula's intensity (0..10) to lumens.
-                                    intensity: intensity * LIGHT_LUMENS,
-                                    range: *range,
-                                    shadow_maps_enabled: false,
-                                    ..default()
-                                },
+                                // As the level's lights: Nebula's colour x intensity, falling
+                                // off linearly to its range (crate::lighting::point_light).
+                                crate::lighting::point_light(*color, *intensity, *range),
                                 if characters.contains(p.anchor) {
                                     Transform::from_rotation(entity_rotation(0.0)) * track_transform(at)
                                 } else {
@@ -1175,11 +1170,11 @@ fn play_sequences(
                         let place = track_transform(&curved(at, curves, "graphicstrans", frame));
                         commands.entity(spawned).try_insert(Transform::from_matrix(p.bases[i] * place.to_matrix()));
                     }
-                    Track::Light { intensity, range, at, curves, .. } if !curves.is_empty() => {
+                    Track::Light { color, intensity, range, at, curves, .. } if !curves.is_empty() => {
                         let k = eval_curve(curves.get("intensity"), frame).unwrap_or(*intensity);
                         let r = eval_curve(curves.get("range"), frame).unwrap_or(*range);
                         let place = track_transform(&curved(at, curves, "lighttrans", frame));
-                        lights_to_set.push((spawned, k, r, place));
+                        lights_to_set.push((spawned, *color, k, r, place));
                     }
                     _ => {}
                 }
@@ -1226,9 +1221,11 @@ fn play_sequences(
             commands.entity(e).despawn();
         }
     }
-    for (light, k, r, place) in lights_to_set {
+    for (light, color, k, r, place) in lights_to_set {
         if let Ok((mut l, mut tf)) = point_lights.get_mut(light) {
-            l.intensity = k * LIGHT_LUMENS;
+            let pl = crate::lighting::point_light(color, k, r);
+            l.color = pl.color;
+            l.intensity = pl.intensity;
             l.range = r;
             *tf = place;
         }

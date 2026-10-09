@@ -107,9 +107,6 @@ pub struct ShaderAnim {
     tracks: Vec<VarTrack>,
     /// Seconds since the model was spawned.
     t: f32,
-    /// The node's static MatEmissiveIntensity, already in its material: the
-    /// animated value replaces it.
-    base_emissive: f32,
 }
 
 #[derive(Reflect, Default, Clone)]
@@ -287,8 +284,9 @@ fn animate_shader_vars(
             continue;
         }
         let t = anim.t;
-        let base = if anim.base_emissive.abs() > 1e-3 { anim.base_emissive } else { 1.0 };
-        let glow = anim.tracks.iter().find(|k| k.var == "MatEmissiveIntensity").map(|k| k.at(t) / base);
+        // The intensity itself (the material holds the unscaled colour, see
+        // NodeParams::glow_animated), as a linear factor (gamma_factor).
+        let glow = anim.tracks.iter().find(|k| k.var == "MatEmissiveIntensity").map(|k| gamma_factor(k.at(t)));
         let fade = anim.tracks.iter().find(|k| k.var.starts_with("Intensity")).map(|k| k.at(t));
         if glow.is_none() && fade.is_none() {
             continue;
@@ -338,6 +336,9 @@ struct NodeParams {
     floats: std::collections::HashMap<String, f32>,
     vectors: std::collections::HashMap<String, Vec4>,
     velocity: Vec2,
+    /// An animator drives its MatEmissiveIntensity (ShaderAnim): the material keeps
+    /// its unscaled colour and the animator applies the intensity.
+    glow_animated: bool,
 }
 
 impl NodeParams {
@@ -364,15 +365,6 @@ struct NebulaStates {
     ours: std::collections::HashSet<String>,
 }
 
-/// A node's n3 MatEmissiveIntensity, from extras.dsor_shader.
-fn node_emissive(node: &::gltf::Node) -> Option<f32> {
-    let raw = node.extras().as_ref()?.get();
-    if !raw.contains("MatEmissiveIntensity") {
-        return None;
-    }
-    let v: serde_json::Value = serde_json::from_str(raw).ok()?;
-    Some(v.get("dsor_shader")?.get("MatEmissiveIntensity")?.as_f64()? as f32)
-}
 
 /// The node a material belongs to: DSO_Godot names materials "<node>_<shader>".
 fn material_node<'a>(material: &'a gltf::Material<'a>) -> Option<&'a str> {
@@ -409,7 +401,7 @@ impl GltfExtensionHandler for NebulaStates {
         for node in gltf.nodes() {
             let (Some(name), Some(extras)) = (node.name(), node.extras().as_ref()) else { continue };
             let raw = extras.get();
-            if !raw.contains("dsor_shader") && !raw.contains("dsor_vector") {
+            if !raw.contains("dsor_shader") && !raw.contains("dsor_vector") && !raw.contains("dsor_anim") {
                 continue;
             }
             let Ok(v) = serde_json::from_str::<serde_json::Value>(raw) else { continue };
@@ -432,7 +424,11 @@ impl GltfExtensionHandler for NebulaStates {
                 })
                 .unwrap_or_default();
             let velocity = vectors.get("Velocity").map(|v| v.truncate().truncate()).unwrap_or(Vec2::ZERO);
-            self.params.insert(name.to_owned(), NodeParams { floats, vectors, velocity });
+            let glow_animated = v
+                .get("dsor_anim")
+                .and_then(|a| a.as_array())
+                .is_some_and(|l| l.iter().any(|t| t.get("var").and_then(|x| x.as_str()) == Some("MatEmissiveIntensity")));
+            self.params.insert(name.to_owned(), NodeParams { floats, vectors, velocity, glow_animated });
         }
     }
 
@@ -467,8 +463,7 @@ impl GltfExtensionHandler for NebulaStates {
                 })
             })
             .collect();
-        let base_emissive = node_emissive(gltf_node).unwrap_or(1.0);
-        entity.insert(ShaderAnim { tracks, t: 0.0, base_emissive });
+        entity.insert(ShaderAnim { tracks, t: 0.0 });
     }
 
     fn on_texture(&mut self, gltf_texture: &gltf::Texture, texture: Handle<Image>) {
@@ -489,7 +484,11 @@ impl GltfExtensionHandler for NebulaStates {
     ) {
         let extras = gltf_material.extras().as_ref().map(|e| e.get().to_owned()).unwrap_or_default();
         let node = material_node(gltf_material).and_then(|n| self.params.get(n)).cloned().unwrap_or_default();
-        let intensity = node.get("MatEmissiveIntensity");
+        // An animated glow keeps its colour unscaled: the animator applies it.
+        // FAILURE: a static 0 baked in (warrior_mightyswing's swoosh: 0, then up to
+        //   3 for a tenth of a second) left the colour black, and the animator only
+        //   scaled that black ("mighty swing ne marche pas").
+        let intensity = if node.glow_animated { None } else { node.get("MatEmissiveIntensity") };
         // Refraction (shd:refraction): its own material, crate::refraction.
         // EVIDENCE: shaders_sm30 "refraction": the distortion is displacementFactor
         //   (semantic Intensity1) x 10 pixels (ps preshader), the alpha
