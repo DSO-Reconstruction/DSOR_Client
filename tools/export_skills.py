@@ -290,6 +290,7 @@ for r in db.execute("select rowid, * from _Template_Skill order by rowid"):
         # What the skill leaves on its victims and on the ground: (status id, D:).
         # The server places them (StatusEffect 82 / NewLocationEffect 64); kept for
         # offline play (client/src/monsters.rs).
+        "user_status": statuses(r["UserStatusEffects"]),
         "victim_status": statuses(r["VictimStatusEffects"]),
         "location_status": statuses(r["LocationStatusEffects"]),
         # What the skill summons (the server spawns them online): monster template,

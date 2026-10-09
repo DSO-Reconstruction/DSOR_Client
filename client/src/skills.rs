@@ -102,6 +102,9 @@ pub struct SkillDef {
     /// Shifted skills: the sequence drawn on the aimed point (SkillBulletId).
     #[serde(default)]
     pub shifted: String,
+    /// UserStatusEffects: on the caster (the shouts' auras), (status id, seconds).
+    #[serde(default)]
+    pub user_status: Vec<(String, f32)>,
     /// VictimStatusEffects / LocationStatusEffects: (status id, seconds).
     #[serde(default)]
     pub victim_status: Vec<(String, f32)>,
@@ -583,7 +586,7 @@ fn cast_input(
     nav: Option<Res<CurrentNav>>,
     navmeshes: Res<Assets<NavMesh>>,
     time: Res<Time<Real>>,
-    mut players: Query<(Entity, &Transform, &mut LocalPlayer, &Character)>,
+    mut players: Query<(Entity, &mut Transform, &mut LocalPlayer, &Character)>,
     mut cooldowns: Local<HashMap<String, f64>>,
     (hovered, monsters, mut debug_monsters): (
         Res<crate::monsters::Hovered>,
@@ -632,7 +635,7 @@ fn cast_input(
     if aimed.is_none() {
         *queued = None;
     }
-    let Ok((entity, tf, mut player, character)) = players.single_mut() else { return };
+    let Ok((entity, mut tf, mut player, character)) = players.single_mut() else { return };
     if player.casting > 0.0 {
         return;
     }
@@ -678,6 +681,8 @@ fn cast_input(
     }
     let facing = if to.length() > 0.01 { to.x.atan2(to.y) } else { player.facing };
     player.facing = facing;
+    // Turned now: the cast's effects take the caster's placement this frame.
+    tf.rotation = Quat::from_rotation_y(facing);
     player.target = None;
     player.casting = (skill.motion_unblock.max(skill.unblock).max(1) as f32 / FPS).min(2.0);
 
@@ -717,6 +722,12 @@ fn cast_input(
         // Items' and talents' effects (item_..., ..._talent) need what the player
         // does not have offline.
         let own = |v: &Vec<(String, f32)>| v.iter().filter(|(n, _)| !n.starts_with("item_") && !n.contains("talent")).cloned().collect();
+        // The caster's own effects (the shouts' auras), at the hit frame.
+        let mine: Vec<(String, f32)> = own(&skill.user_status);
+        let me = net.local_actor.unwrap_or(crate::net::OFFLINE_ACTOR);
+        for (status, seconds) in mine {
+            net.named_status_events.push((me, status, seconds.max(1.0)));
+        }
         debug_monsters.strikes.push(crate::monsters::Strike {
             after,
             at: point,
@@ -1003,6 +1014,10 @@ fn play_sequences(
     (locals, remotes): (Query<&LocalPlayer>, Query<&RemotePlayer>),
     mut point_lights: Query<(&mut PointLight, &mut Transform), Without<Character>>,
     mut colors: ResMut<crate::monsters::ShaderColors>,
+    // A character's own Transform: current the frame its skill starts, where its
+    // GlobalTransform still holds the previous frame (the facing before it turned
+    // to cast).
+    bodies: Query<&Transform, (With<Character>, Without<PointLight>)>,
 ) {
     let eye = cameras.iter().next().map(|c| c.translation());
     let mut lights_to_set: Vec<(Entity, f32, f32, Transform)> = Vec::new();
@@ -1099,7 +1114,12 @@ fn play_sequences(
                         let unattached = joint.is_empty() && !p.follow;
                         if unattached {
                             // Left where it was made: the anchor's world placement now.
-                            if let Ok(g) = transforms.get(p.anchor) {
+                            // CONTRACT: a character's own Transform (it has no parent), not
+                            //   its GlobalTransform, which is propagated after this system.
+                            // FAILURE: every effect left by a cast pointed where the previous
+                            //   cast had aimed ("le fx est decale de 1").
+                            let now = bodies.get(p.anchor).map(|t| GlobalTransform::from(*t)).ok().or_else(|| transforms.get(p.anchor).ok().copied());
+                            if let Some(g) = now.as_ref() {
                                 base = g.to_matrix() * base;
                                 fx.insert(Transform::from_matrix(g.to_matrix() * place.to_matrix()));
                             }
