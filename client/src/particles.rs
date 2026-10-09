@@ -491,10 +491,14 @@ fn draw(
             let (sin, cos) = p.rot.sin_cos();
             let r = (r0 * cos + u0 * sin) * half;
             let u = (u0 * cos - r0 * sin) * half;
+            // Nebula's colours are gamma values (D3D9 shades and blends in gamma
+            // space); bevy's vertex colours are linear: each channel ^2.2, after the
+            // glow, so a mid colour is not drawn lighter than the game draws it.
+            let lin = |v: f32| v.max(0.0).powf(2.2);
             let c = [
-                sample(&e.envelopes[RED], a) * glow,
-                sample(&e.envelopes[GREEN], a) * glow,
-                sample(&e.envelopes[BLUE], a) * glow,
+                lin(sample(&e.envelopes[RED], a) * glow),
+                lin(sample(&e.envelopes[GREEN], a) * glow),
+                lin(sample(&e.envelopes[BLUE], a) * glow),
                 (sample(&e.envelopes[ALPHA], a) * glow).clamp(0.0, 1.0),
             ];
             let (v0, v1) = (p.frame as f32 / tile, (p.frame + 1) as f32 / tile);

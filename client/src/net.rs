@@ -133,6 +133,9 @@ pub struct Net {
     /// placed (64) or removed (65), for crate::skills.
     pub status_events: Vec<StatusEvent>,
     pub location_events: Vec<LocationEvent>,
+    /// Offline play: status effects by name (holder, status id, seconds), for
+    /// crate::skills (online they come by wire index in `status_events`).
+    pub named_status_events: Vec<(u32, String, f32)>,
     pub location_gone: Vec<u32>,
     remote_gone: Vec<u32>,
     remote_moves: Vec<(u32, Vec3, f32, bool)>,
@@ -299,6 +302,7 @@ pub fn start_offline(world: &mut World, class: u8, gender: u8) {
         skill_events: Vec::new(),
         status_events: Vec::new(),
         location_events: Vec::new(),
+        named_status_events: Vec::new(),
         location_gone: Vec::new(),
         local_name: Some("Debug".into()),
         resource: None,
@@ -356,6 +360,7 @@ fn connect(world: &mut World) {
         skill_events: Vec::new(),
         status_events: Vec::new(),
         location_events: Vec::new(),
+        named_status_events: Vec::new(),
         location_gone: Vec::new(),
         local_name: None,
         resource: None,

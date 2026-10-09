@@ -252,6 +252,18 @@ def mapped(name):
 db = sqlite3.connect(os.path.join(export, "db", "static.db4"))
 db.row_factory = sqlite3.Row
 bullets = {r["Id"]: r for r in db.execute("select * from _Template_SkillBullet")}
+
+
+def statuses(text):
+    """'name,C:1.0,D:8.0,...;name2,...' -> [[name, duration]] (D:, 0 when absent)."""
+    out = []
+    for part in (text or "").split(";"):
+        fields = [f.strip() for f in part.split(",") if f.strip()]
+        if not fields:
+            continue
+        d = next((float(f[2:]) for f in fields[1:] if f.startswith("D:")), 0.0)
+        out.append([fields[0], d])
+    return out
 skills = {}
 for r in db.execute("select rowid, * from _Template_Skill order by rowid"):
     b = bullets.get(r["SkillBulletId"] or "")
@@ -271,6 +283,15 @@ for r in db.execute("select rowid, * from _Template_Skill order by rowid"):
         "execute": mapped(r["ExecuteSequenceMapping"]),
         "post": mapped(r["PostExecuteSequenceMapping"]),
         "impact": r["SkillImpactSequence"] or "",
+        # Shifted skills (lightning strike, meteor, singularity): SkillBulletId names
+        # no _Template_SkillBullet row but a sequence, drawn on the aimed point (all
+        # 107 of them in 2018).
+        "shifted": (r["SkillBulletId"] or "") if b is None and r["SkillType"] == "Shifted" else "",
+        # What the skill leaves on its victims and on the ground: (status id, D:).
+        # The server places them (StatusEffect 82 / NewLocationEffect 64); kept for
+        # offline play (client/src/monsters.rs).
+        "victim_status": statuses(r["VictimStatusEffects"]),
+        "location_status": statuses(r["LocationStatusEffects"]),
         "bullet": None if b is None else {
             "id": b["Id"],
             "loop": b["LoopSequence"] or "",

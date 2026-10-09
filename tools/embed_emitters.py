@@ -59,6 +59,29 @@ OPAQUE = {"Solid", "DecalReceiveSolid"}
 UNLIT_STATES = {"AlphaUnlit", "PostAlphaUnlit", "PreAlphaUnlit", "Background"}
 UNLIT_SHADERS = {"unlit", "unlitalphavertexcolors", "sequenceadditive", "sequencealpha", "glow"}
 CUTOUT = {"AlphaTest", "DecalReceiveAlphaTest"}
+
+
+def apply_state(m, state, shader):
+    """The Nebula render state (and unlit shaders) on one glTF material; True if changed."""
+    changed = False
+    if state in UNLIT_STATES or shader in UNLIT_SHADERS:
+        if not m.setdefault("extras", {}).get("dsor_unlit"):
+            m["extras"]["dsor_unlit"] = True
+            stats["unlit"] = stats.get("unlit", 0) + 1
+            changed = True
+    if "dsor_state" not in m.get("extras", {}):
+        if state in OPAQUE and m.get("alphaMode", "OPAQUE") != "OPAQUE":
+            m.pop("alphaMode", None)
+            m.pop("alphaCutoff", None)
+            stats["opaque"] += 1
+            changed = True
+        elif state in CUTOUT and m.get("alphaMode") != "MASK":
+            m["alphaMode"] = "MASK"
+            m["alphaCutoff"] = 0.5
+            stats["cutout"] += 1
+            changed = True
+    return changed
+
 for root, _dirs, files in os.walk(assets):
     for name in files:
         if not name.endswith(".fx.json"):
@@ -76,33 +99,33 @@ for root, _dirs, files in os.walk(assets):
         nodes = doc.get("nodes", [])
         changed = False
         materials = {m.get("name"): m for m in doc.get("materials", [])}
+        mats = doc.get("materials", [])
+
+        def node_materials(node, by_name):
+            """The materials the sidecar entry's glTF node draws with: through the node's
+            own mesh. CONTRACT: not by name: every skin of a whole monster model is a node
+            "skinned0", so "skinned0_monster" named several materials and only the last
+            got its render state. FAILURE: 343 monster materials stayed BLEND and their
+            texture's alpha made parts of the body see-through."""
+            if node is not None and node < len(nodes) and "mesh" in nodes[node]:
+                found = [mats[p["material"]] for p in doc["meshes"][nodes[node]["mesh"]].get("primitives", []) if "material" in p]
+                if found:
+                    return found
+            return [by_name] if by_name is not None else []
+
         for e in fx.get("emitters", []):
             state = (e.get("emitter") or {}).get("type_name")
             shader = (e.get("shader") or "").removeprefix("shd:")
-            m = materials.get(f"{e.get('node')}_{shader}")
-            if m is not None and (state in UNLIT_STATES or shader in UNLIT_SHADERS):
-                if not m.setdefault("extras", {}).get("dsor_unlit"):
-                    m["extras"]["dsor_unlit"] = True
-                    stats["unlit"] = stats.get("unlit", 0) + 1
-                    changed = True
-            if m is not None and "dsor_state" not in m.get("extras", {}):
-                if state in OPAQUE and m.get("alphaMode", "OPAQUE") != "OPAQUE":
-                    m.pop("alphaMode", None)
-                    m.pop("alphaCutoff", None)
-                    stats["opaque"] += 1
-                    changed = True
-                elif state in CUTOUT and m.get("alphaMode") != "MASK":
-                    m["alphaMode"] = "MASK"
-                    m["alphaCutoff"] = 0.5
-                    stats["cutout"] += 1
-                    changed = True
+            for m in node_materials(e.get("gltf_node"), materials.get(f"{e.get('node')}_{shader}")):
+                changed |= apply_state(m, state, shader)
+            m = None
             tex = e.get("textures") or {}
             if e.get("shader") == "shd:standard" and tex.get("DiffMap0") == "tex:system/white":
-                m = materials.get(f"{e.get('node')}_standard")
-                if m is not None and "baseColorTexture" not in m.get("pbrMetallicRoughness", {}):
-                    m.setdefault("extras", {})["dsor_state"] = "Hidden"
-                    stats["helpers"] += 1
-                    changed = True
+                for m in node_materials(e.get("gltf_node"), materials.get(f"{e.get('node')}_standard")):
+                    if "baseColorTexture" not in m.get("pbrMetallicRoughness", {}):
+                        m.setdefault("extras", {})["dsor_state"] = "Hidden"
+                        stats["helpers"] += 1
+                        changed = True
             em = e.get("emitter") or {}
             node = e.get("gltf_node")
             if "emission_frequency" not in em or node is None or node >= len(nodes):

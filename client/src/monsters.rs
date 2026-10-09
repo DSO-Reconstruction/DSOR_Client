@@ -159,10 +159,23 @@ pub struct DebugMonsters {
     pub spawns: Vec<MonsterSpawn>,
     pub blows: Vec<(u32, u8)>,
     /// Offline play: the local player's skills landing, as no server answers them
-    /// (crate::skills): (seconds to go, where, radius, the aimed monster).
-    pub strikes: Vec<(f32, Vec3, f32, Option<u32>)>,
+    /// (crate::skills).
+    pub strikes: Vec<Strike>,
     next_type: u8,
     tick: u32,
+}
+
+/// One offline skill landing.
+pub struct Strike {
+    /// Seconds to go.
+    pub after: f32,
+    pub at: Vec3,
+    pub radius: f32,
+    /// The aimed monster, if any (else what stands within `radius` of `at`).
+    pub target: Option<u32>,
+    /// The skill's VictimStatusEffects and LocationStatusEffects: (status, seconds).
+    pub victim: Vec<(String, f32)>,
+    pub location: Vec<(String, f32)>,
 }
 
 /// HitColor writes of the sequencer (crate::skills, ColorShaderParameterTrackBar):
@@ -489,7 +502,7 @@ fn hits_and_kills(
     mut commands: Commands,
     time: Res<Time>,
     real: Res<Time<Real>>,
-    net: Option<NonSendMut<Net>>,
+    mut net: Option<NonSendMut<Net>>,
     mut test: ResMut<OfflineMonster>,
     skills: Res<SkillData>,
     seqs: Res<Assets<SequenceTable>>,
@@ -510,8 +523,8 @@ fn hits_and_kills(
     let mut deaths = Vec::new();
     // Offline the test blows are the local player's own.
     let mut local = LOCAL_TEST;
-    match net {
-        Some(mut net) => {
+    match net.as_deref_mut() {
+        Some(net) => {
             local = net.local_actor.unwrap_or(u32::MAX);
             let now = net.server_tick(now_ms(&real));
             for (victim, h) in std::mem::take(&mut net.hits) {
@@ -570,15 +583,28 @@ fn hits_and_kills(
     // where they land.
     let dt = time.delta_secs();
     let mut landed = Vec::new();
-    debug.strikes.retain_mut(|(after, at, radius, target)| {
-        *after -= dt;
-        if *after > 0.0 {
-            return true;
+    for mut s in std::mem::take(&mut debug.strikes) {
+        s.after -= dt;
+        if s.after > 0.0 {
+            debug.strikes.push(s);
+        } else {
+            landed.push(s);
         }
-        landed.push((*at, *radius, *target));
-        false
-    });
-    for (at, radius, target) in landed {
+    }
+    for Strike { at, radius, target, victim, location, .. } in landed {
+        // Its ground effects, as the server's NewLocationEffect would place them.
+        if let Some(net) = net.as_deref_mut() {
+            for (status, seconds) in location {
+                debug.tick += 1;
+                net.location_events.push(crate::net::LocationEvent {
+                    id: 0x4000_0000 + debug.tick,
+                    status,
+                    position: at,
+                    heading: 0.0,
+                    seconds: (seconds > 0.0).then_some(seconds),
+                });
+            }
+        }
         let near = |p: Vec3| Vec2::new(p.x - at.x, p.z - at.z).length() <= radius;
         let hit: Vec<u32> = monsters
             .iter()
@@ -587,6 +613,12 @@ fn hits_and_kills(
             .collect();
         for actor in hit {
             debug.blows.push((actor, 0));
+            // Its victim effects, as the server's StatusEffect would start them.
+            if let Some(net) = net.as_deref_mut() {
+                for (status, seconds) in &victim {
+                    net.named_status_events.push((actor, status.clone(), *seconds));
+                }
+            }
         }
     }
     // The debug menu's blows, as the local player's.

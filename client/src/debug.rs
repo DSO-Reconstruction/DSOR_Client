@@ -416,11 +416,12 @@ fn buttons(
     if !*scripted && time.elapsed_secs() > 2.0 {
         *scripted = true;
         if let Ok(list) = std::env::var("DSOR_DEBUG_SPAWN") {
-            for item in list.split(';') {
+            for (i, item) in list.split(';').enumerate() {
                 let Some((tab, name)) = item.split_once(':') else { continue };
                 let keep = debug.tab;
                 debug.tab = tab.parse().unwrap_or(MONSTERS);
-                let at = ctx.place();
+                // In a row, 3 units apart, so one look shows them all.
+                let at = ctx.place() + Vec3::X * (i as f32 * 3.0 - 6.0);
                 ctx.spawn(&mut debug, name, at);
                 debug.tab = keep;
             }

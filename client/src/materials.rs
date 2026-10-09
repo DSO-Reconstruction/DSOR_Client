@@ -522,7 +522,7 @@ impl GltfExtensionHandler for NebulaStates {
                         params.p0.z = tiling;
                     }
                     if self.scale_lit && material_asset.emissive_texture.is_some() {
-                        base.emissive = base.emissive * (intensity.unwrap_or(1.0) * EMISSIVE_NITS);
+                        base.emissive = base.emissive * (gamma_factor(intensity.unwrap_or(1.0)) * EMISSIVE_NITS);
                     }
                 }
                 Kind::Water => {
@@ -575,6 +575,7 @@ impl GltfExtensionHandler for NebulaStates {
                 // The glow is EmsvMap0 x MatEmissiveIntensity (the fireball's big
                 // halo is 0.1: a faint red haze, not a white disc).
                 if let Some(i) = intensity {
+                    let i = gamma_factor(i);
                     let c = m.base_color.to_linear();
                     m.base_color = LinearRgba::new(c.red * i, c.green * i, c.blue * i, c.alpha).into();
                 }
@@ -595,7 +596,7 @@ impl GltfExtensionHandler for NebulaStates {
                 // A lit surface with an emissive map, outside the characters: its
                 // emission at the node's intensity, in Bevy's luminance units.
                 if emissive {
-                    m.emissive = m.emissive * (intensity.unwrap_or(1.0) * EMISSIVE_NITS);
+                    m.emissive = m.emissive * (gamma_factor(intensity.unwrap_or(1.0)) * EMISSIVE_NITS);
                 }
             }
         }
@@ -604,6 +605,7 @@ impl GltfExtensionHandler for NebulaStates {
         if let Some(a) = crate::surfaces::extras_number(&extras, "dsor_alpha") {
             let c = m.base_color.to_linear();
             m.base_color = if matches!(m.alpha_mode, AlphaMode::Add) {
+                let a = gamma_factor(a);
                 LinearRgba::new(c.red * a, c.green * a, c.blue * a, c.alpha)
             } else {
                 LinearRgba::new(c.red, c.green, c.blue, c.alpha * a)
@@ -679,6 +681,14 @@ impl GltfExtensionHandler for NebulaStates {
 /// EVIDENCE: shaders_sm30 "particle" ps_3_0: colour x (1 + MatEmissiveIntensity);
 ///   the intensities themselves are the n3 nodes' (tools/embed_animators.py).
 const EMISSIVE_NITS: f32 = 1000.0;
+
+/// A factor Nebula applies to a gamma-space colour, as the factor to apply to
+/// bevy's linear one: (k x c)^2.2 = k^2.2 x c^2.2. Nebula adds emission and
+/// additive colours in gamma space (D3D9, no sRGB writes); applied as is in linear
+/// space, a 0.3 emission was drawn at 0.58 ("les emissives sont trop puissants").
+fn gamma_factor(k: f32) -> f32 {
+    k.max(0.0).powf(2.2)
+}
 
 pub struct MaterialsPlugin;
 

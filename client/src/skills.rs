@@ -86,6 +86,14 @@ pub struct SkillDef {
     pub resource_cost: f32,
     pub execute: HashMap<String, String>,
     pub impact: String,
+    /// Shifted skills: the sequence drawn on the aimed point (SkillBulletId).
+    #[serde(default)]
+    pub shifted: String,
+    /// VictimStatusEffects / LocationStatusEffects: (status id, seconds).
+    #[serde(default)]
+    pub victim_status: Vec<(String, f32)>,
+    #[serde(default)]
+    pub location_status: Vec<(String, f32)>,
     pub bullet: Option<BulletDef>,
 }
 
@@ -432,11 +440,16 @@ fn perform(
                 what: PendingKind::Bullet { from: at + entity_rotation(facing) * start, dir, def: b.clone() },
             });
         }
-        ("Shifted", Some(b)) => {
-            // A bolt falling on the aimed point (lightning strike, meteor).
+        ("Shifted", _) if !skill.shifted.is_empty() => {
+            // What falls on the aimed point (the lightning bolt, the meteor, the
+            // singularity's start): SkillBulletId names a sequence for every Shifted
+            // skill. From LoopStartFrame: lightning strike's bolt (LoopStart 9) reaches
+            // the ground over ~26 frames, at its HitFrame 35.
+            // UNVERIFIED: the start frame (the client's Shifted update not traced).
+            let start = if skill.loop_start > 0 { skill.loop_start } else { skill.hit_frame };
             commands.spawn(Pending {
-                after: fire,
-                what: PendingKind::Sequence { name: b.loop_seq.clone(), at: Transform::from_translation(point).with_rotation(entity_rotation(facing)) },
+                after: start as f32 / FPS,
+                what: PendingKind::Sequence { name: skill.shifted.clone(), at: Transform::from_translation(point).with_rotation(entity_rotation(facing)) },
             });
         }
         _ => {}
@@ -638,7 +651,17 @@ fn cast_input(
             after += Vec2::new(point.x - tf.translation.x, point.z - tf.translation.z).length() / b.velocity;
         }
         let target = aimed.map(|(_, _, a, _)| a);
-        debug_monsters.strikes.push((after, point, 2.5, target));
+        // Items' and talents' effects (item_..., ..._talent) need what the player
+        // does not have offline.
+        let own = |v: &Vec<(String, f32)>| v.iter().filter(|(n, _)| !n.starts_with("item_") && !n.contains("talent")).cloned().collect();
+        debug_monsters.strikes.push(crate::monsters::Strike {
+            after,
+            at: point,
+            radius: 2.5,
+            target,
+            victim: own(&skill.victim_status),
+            location: own(&skill.location_status),
+        });
     }
     perform(&mut commands, skill, sequences, entity, Some(character), tf.translation, facing, point);
 }
@@ -1401,10 +1424,12 @@ fn status_visuals(
     let mut net_events = Vec::new();
     let mut gone = Vec::new();
     let mut status_events = Vec::new();
+    let mut named: Vec<(u32, String, f32)> = Vec::new();
     if let Some(mut net) = net {
         net_events = std::mem::take(&mut net.location_events);
         gone = std::mem::take(&mut net.location_gone);
         status_events = std::mem::take(&mut net.status_events);
+        named = std::mem::take(&mut net.named_status_events);
     }
     net_events.extend(pending_test.drain(..));
     let actor_entity = |id: u32| {
@@ -1434,6 +1459,12 @@ fn status_visuals(
             end: StatusDef::first(&def.done).or_else(|| StatusDef::first(&def.stop)).cloned(),
         });
     };
+    for (holder, name, seconds) in named {
+        let Some(def) = by_name.get(&name).and_then(|i| table.0.get(i)) else { continue };
+        let Some(e) = actor_entity(holder) else { continue };
+        let instance = 0x4000_0000 | by_name.get(&name).copied().unwrap_or(0);
+        start(&mut commands, def, (holder, instance), Some(e), e, Some(seconds));
+    }
     for ev in status_events {
         let Some(def) = table.0.get(&(ev.index as u32)) else { continue };
         let Some(holder) = actor_entity(ev.holder) else { continue };
