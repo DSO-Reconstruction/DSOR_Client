@@ -232,7 +232,19 @@ enum ValueKind {
     Level,
     Name,
     Page,
+    /// A character sheet figure (crate::stats::Sheet, by widget name).
+    Sheet(&'static str),
 }
+
+/// The character sheet's widgets crate::stats fills.
+const SHEET_WIDGETS: &[&str] = &[
+    "CharacterClass", "Guildname", "Level", "NextLevel", "XP", "BaseDamage", "AttackSpeed", "LMKSkill", "RMKSkill",
+    "DamageLMK", "DamageRMK", "CurHealth", "MaxHealth", "SkillResourceTitle", "CurSkillResource", "MaxSkillResource",
+    "Armor", "Armor_Percentage", "BlockRating", "BlockRating_Percentage", "BlockValue", "BlockValue_Percentage",
+    "CriticalHit", "CriticalHit_Percentage", "CriticalDamage", "CriticalDamage_Percentage", "Fire", "Fire_Percentage",
+    "Nature", "Nature_Percentage", "Ice", "Ice_Percentage", "Lightning", "Lightning_Percentage", "DarkMagic",
+    "DarkMagic_Percentage",
+];
 
 /// A quick slot's icon place: its wire slot and rect.
 #[derive(Component)]
@@ -321,6 +333,8 @@ fn gauge_of(id: &str) -> Option<Gauge> {
         "ProgressBar_health" => Some(Gauge::Health),
         "ProgressBar_rage" | "ProgressBar_mana" | "ProgressBar_stamina" | "ProgressBar_mechanicResource" => Some(Gauge::Resource),
         "ProgressBar_xp" if !id.ends_with("glow") && !id.contains("glow") => Some(Gauge::Xp),
+        // The character sheet's XP bar: its begin, middle and end pieces.
+        "XPBar" if !id.ends_with("xp_leiste_relief") => Some(Gauge::Xp),
         _ => None,
     }
 }
@@ -337,6 +351,11 @@ fn resource_bar(class: u8) -> &'static str {
 
 fn value_of(id: &str) -> Option<ValueKind> {
     let leaf = id.rsplit('/').next().unwrap_or("");
+    if id.contains("/StatsCharacter/") {
+        if let Some(w) = SHEET_WIDGETS.iter().find(|w| **w == leaf) {
+            return Some(ValueKind::Sheet(w));
+        }
+    }
     Some(match leaf {
         "gold_display" if id.contains("VirtualCurrency") => ValueKind::Gold,
         "silver_display" => ValueKind::Silver,
@@ -696,8 +715,8 @@ fn update_fills(
     }
 }
 
-fn update_values(figures: Res<Figures>, mut texts: Query<(&Value, &mut Text2d)>) {
-    if !figures.is_changed() {
+fn update_values(figures: Res<Figures>, sheet: Res<crate::stats::Sheet>, mut texts: Query<(&Value, &mut Text2d)>) {
+    if !figures.is_changed() && !sheet.is_changed() {
         return;
     }
     for (v, mut t) in &mut texts {
@@ -712,6 +731,10 @@ fn update_values(figures: Res<Figures>, mut texts: Query<(&Value, &mut Text2d)>)
             ValueKind::Level => figures.level.map(|l| l.to_string()).unwrap_or_else(|| "-".to_owned()),
             ValueKind::Name => figures.name.clone(),
             ValueKind::Page => "1/1".to_owned(),
+            ValueKind::Sheet(w) => match sheet.0.get(w) {
+                Some(v) => v.clone(),
+                None => continue,
+            },
         };
         if t.0 != s {
             t.0 = s;
