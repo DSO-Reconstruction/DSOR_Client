@@ -95,6 +95,14 @@ pub struct Net {
     /// NPCs to place (NewNPCCommand) and actors gone, applied by crate::npc.
     pub npc_spawns: Vec<NpcSpawn>,
     pub npc_gone: Vec<u32>,
+    /// Monsters to place (NewMonsterCommand 48), for crate::monsters; they leave
+    /// with DiscardMonster (49) through `remote_gone`, as they move as remote actors.
+    pub monster_spawns: Vec<MonsterSpawn>,
+    /// Health of monsters (MonsterUpdate 50): actor, health, maximum.
+    pub monster_health: Vec<(u32, u32, u32)>,
+    /// Blows (HitCommand 115) and deaths (KillCommand 116), for crate::monsters.
+    pub hits: Vec<(u32, dsor_proto::commands::combat::Hit)>,
+    pub kills: Vec<(u32, dsor_proto::commands::combat::Kill)>,
     /// Our character's name, to recognise our own stale session (below).
     pub local_name: Option<String>,
     /// Our current skill resource (rage, mana...), from ActorStatsUpdate (132).
@@ -152,6 +160,15 @@ pub struct NpcSpawn {
     pub guid: String,
     pub position: Vec3,
     pub visible: bool,
+}
+
+/// One NewMonsterCommand: its _Template_Monster blueprint and where (map frame).
+pub struct MonsterSpawn {
+    pub actor: u32,
+    pub blueprint: String,
+    pub position: Vec3,
+    pub health: u32,
+    pub level: u32,
 }
 
 /// Another player, drawn from NewRemotePlayer and moved by their MoveCommands.
@@ -249,6 +266,10 @@ fn connect(world: &mut World) {
         remote_redress: Vec::new(),
         npc_spawns: Vec::new(),
         npc_gone: Vec::new(),
+        monster_spawns: Vec::new(),
+        monster_health: Vec::new(),
+        hits: Vec::new(),
+        kills: Vec::new(),
         bar: Vec::new(),
         skill_events: Vec::new(),
         status_events: Vec::new(),
@@ -374,6 +395,10 @@ fn pump(
                 net.remote_redress.clear();
                 net.npc_spawns.clear();
                 net.npc_gone.clear();
+                net.monster_spawns.clear();
+                net.monster_health.clear();
+                net.hits.clear();
+                net.kills.clear();
                 // Nothing may stand on the old map's ground (the new player snaps to
                 // the first mesh it sees); crate::nav loads the new one.
                 commands.remove_resource::<CurrentNav>();
@@ -519,6 +544,38 @@ fn on_command(net: &mut Net, command: ServerCommand, actor: Option<u32>) {
                 visible: n.visible,
             });
         }
+        ServerCommand::NewMonster(m) => {
+            let Some(actor) = actor else { return };
+            debug!("monster {} actor {actor:#x} at {:?}", m.blueprint, m.position);
+            net.monster_spawns.push(MonsterSpawn {
+                actor,
+                blueprint: m.blueprint,
+                position: Vec3::from(m.position),
+                health: m.health,
+                level: m.level,
+            });
+        }
+        ServerCommand::DiscardMonster(_) => {
+            if let Some(a) = actor {
+                net.requested.remove(&a);
+                net.remote_gone.push(a);
+            }
+        }
+        ServerCommand::MonsterUpdate(u) => {
+            if let Some(a) = actor {
+                net.monster_health.push((a, u.health, u.max_health));
+            }
+        }
+        ServerCommand::Hit(h) => {
+            if let Some(a) = actor {
+                net.hits.push((a, h));
+            }
+        }
+        ServerCommand::Kill(k) => {
+            if let Some(a) = actor {
+                net.kills.push((a, k));
+            }
+        }
         ServerCommand::InventoryInfo(inv) => {
             let worn = inv
                 .slots
@@ -598,6 +655,9 @@ fn apply_remotes(
 /// snap when they are far off (a teleport, a map entry).
 fn move_remotes(time: Res<Time>, mut remotes: Query<(&mut Transform, &mut RemotePlayer, &mut CharacterAnim)>) {
     for (mut tf, mut r, mut anim) in &mut remotes {
+        if anim.dead {
+            continue;
+        }
         let to = r.target - tf.translation;
         let flat = Vec2::new(to.x, to.z).length();
         let step = RUN_SPEED * 1.25 * time.delta_secs();
@@ -687,8 +747,13 @@ fn click_to_move(
     nav: Option<Res<CurrentNav>>,
     meshes: Res<Assets<NavMesh>>,
     mut players: Query<(&Transform, &mut LocalPlayer)>,
+    hovered: Option<Res<crate::monsters::Hovered>>,
 ) {
     if !buttons.pressed(MouseButton::Left) || keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight) {
+        return;
+    }
+    // A monster under the cursor: the click attacks it (crate::skills), it is no walk.
+    if hovered.is_some_and(|h| h.0.is_some()) {
         return;
     }
     let Ok(window) = windows.single() else { return };

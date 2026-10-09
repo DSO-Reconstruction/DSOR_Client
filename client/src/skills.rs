@@ -215,6 +215,13 @@ pub struct SkillData {
     by_id: HashMap<String, u32>,
 }
 
+impl SkillData {
+    /// Every sequence of the sequencer's data (sequences.json).
+    pub(crate) fn sequences(&self) -> &Handle<SequenceTable> {
+        &self.sequences
+    }
+}
+
 /// One sequence playing: on an actor (its animation, effects that follow it) or on
 /// its own anchor entity (a bullet, a point on the ground).
 #[derive(Component)]
@@ -458,7 +465,7 @@ fn perform(
     }
 }
 
-fn play(commands: &mut Commands, seq: Sequence, actor: Option<Entity>, anchor: Entity, looping: bool) -> Entity {
+pub(crate) fn play(commands: &mut Commands, seq: Sequence, actor: Option<Entity>, anchor: Entity, looping: bool) -> Entity {
     // A caster's own skill sequence leaves its effects in place; anything else
     // (a bullet, a ground effect) carries them.
     let follow = actor != Some(anchor);
@@ -488,13 +495,22 @@ fn cast_input(
     time: Res<Time<Real>>,
     mut players: Query<(Entity, &Transform, &mut LocalPlayer, &Character)>,
     mut cooldowns: Local<HashMap<String, f64>>,
+    (hovered, monsters): (Res<crate::monsters::Hovered>, Query<(&GlobalTransform, &crate::monsters::Monster, &CharacterAnim)>),
+    // A target skill aimed at a monster out of reach: (slot, monster), cast once
+    // the walk brings it in reach.
+    mut queued: Local<Option<(usize, Entity)>>,
 ) {
     let Some(mut net) = net else { return };
     let shift = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
+    // A click on the ground (a walk) drops the pending attack.
+    if buttons.just_pressed(MouseButton::Left) && hovered.0.is_none() {
+        *queued = None;
+    }
     // One press, one cast (holding a key re-fired the skill as soon as it
     // unblocked: "certains sorts se lancent 2x"); only the basic attack on
     // Shift + left button repeats while held.
-    let slot = if shift && buttons.pressed(MouseButton::Left) {
+    // A left click held on a monster attacks it with the left button's skill.
+    let slot = if (shift || hovered.0.is_some()) && buttons.pressed(MouseButton::Left) {
         Some(0)
     } else if buttons.just_pressed(MouseButton::Right) {
         Some(1)
@@ -504,7 +520,24 @@ fn cast_input(
             .position(|k| keys.just_pressed(*k))
             .map(|i| i + 2)
     };
-    let Some(slot) = slot else { return };
+    // DSOR_TEST_SLOT=<slot>: that quick slot pressed all the time (testing online
+    // without a keyboard; the cooldowns pace it).
+    let slot = slot.or_else(|| std::env::var("DSOR_TEST_SLOT").ok().and_then(|v| v.parse().ok()));
+    let (slot, aimed) = match slot {
+        Some(s) => {
+            *queued = None;
+            (s, hovered.0.map(|(e, _)| e))
+        }
+        None => match *queued {
+            Some((s, e)) => (s, Some(e)),
+            None => return,
+        },
+    };
+    // A dead or vanished monster is no target.
+    let aimed = aimed.and_then(|e| monsters.get(e).ok().filter(|(_, _, a)| !a.dead).map(|(at, m, _)| (e, at.translation(), m.actor, m.radius)));
+    if aimed.is_none() {
+        *queued = None;
+    }
     let Ok((entity, tf, mut player, character)) = players.single_mut() else { return };
     if player.casting > 0.0 {
         return;
@@ -527,7 +560,22 @@ fn cast_input(
     }
     let (Ok(window), Ok((camera, cam_tf))) = (windows.single(), cameras.single()) else { return };
     let mesh = nav.as_ref().and_then(|n| navmeshes.get(&n.0));
-    let Some(mut point) = cursor_ground(window, camera, cam_tf, mesh, tf.translation) else { return };
+    let Some(mut point) = aimed.map(|(_, at, _, _)| at).or_else(|| cursor_ground(window, camera, cam_tf, mesh, tf.translation)) else { return };
+    // A target skill on a monster beyond its reach walks there first, as the 2018
+    // client does (ClientSkillValidator 0x5E3C61 answers 17, out of range; its
+    // caller 0x4C1553 casts after approaching, 0x4BDEC4).
+    // UNVERIFIED: the reach is AttackRange plus the target's capsule radius.
+    let targeted = matches!(skill.kind.as_str(), "MeleeTarget" | "RangedTarget");
+    let target_actor = if targeted { aimed.map(|(_, _, a, _)| a) } else { None };
+    if let (true, Some((e, at, _, radius))) = (targeted, aimed) {
+        let gap = Vec2::new(at.x - tf.translation.x, at.z - tf.translation.z).length();
+        if gap > skill.range + radius {
+            player.target = Some(at);
+            *queued = Some((slot, e));
+            return;
+        }
+        *queued = None;
+    }
     let to = Vec2::new(point.x - tf.translation.x, point.z - tf.translation.z);
     // A point skill reaches no farther than its range.
     if skill.range > 0.0 && to.length() > skill.range {
@@ -546,7 +594,9 @@ fn cast_input(
     let step = [dir.x * speed, 0.0, dir.z * speed, 0.0];
     let points = vec![point.to_array()];
     let command = match skill.kind.as_str() {
-        "MeleeTarget" | "RangedTarget" => ClientCommand::TargetSkill(combat::TargetSkill { base, target: u32::MAX, server: None }),
+        "MeleeTarget" | "RangedTarget" => {
+            ClientCommand::TargetSkill(combat::TargetSkill { base, target: target_actor.unwrap_or(u32::MAX), server: None })
+        }
         "Ranged" => ClientCommand::BulletSkill(combat::BulletSkill { base, step, orbit: 0, server: None }),
         "RangedTargetPoint" => {
             ClientCommand::TargetPointBulletSkill(combat::TargetPointBulletSkill { base, step, orbit: 0, points, server: None })
@@ -573,7 +623,8 @@ fn remote_skills(
     data: Res<SkillData>,
     tables: Res<Assets<SkillTable>>,
     seqs: Res<Assets<SequenceTable>>,
-    mut remotes: Query<(Entity, &mut Transform, &mut RemotePlayer, &Character)>,
+    // Monsters too (crate::monsters): they move as remote actors, without a Character.
+    mut remotes: Query<(Entity, &mut Transform, &mut RemotePlayer, Option<&Character>)>,
 ) {
     let Some(mut net) = net else { return };
     if net.skill_events.is_empty() {
@@ -591,7 +642,7 @@ fn remote_skills(
             .first()
             .map(|p| Vec3::from(*p))
             .unwrap_or(tf.translation + Quat::from_rotation_y(facing) * Vec3::Z * skill.range.min(15.0));
-        perform(&mut commands, skill, sequences, e, Some(character), tf.translation, facing, point);
+        perform(&mut commands, skill, sequences, e, character, tf.translation, facing, point);
     }
 }
 
@@ -758,6 +809,7 @@ fn play_sequences(
     mut players: Query<(Entity, &mut SequencePlayer)>,
     exists: Query<()>,
     characters: Query<&Character>,
+    model_bones: Query<&crate::character::ModelBones>,
     mut anims: Query<&mut CharacterAnim>,
     mut visibility: Query<&mut Visibility>,
     transforms: Query<&GlobalTransform>,
@@ -825,7 +877,11 @@ fn play_sequences(
                         let parent = if joint.is_empty() {
                             Some(p.anchor)
                         } else {
-                            p.actor.and_then(|a| characters.get(a).ok()).and_then(|c| c.bone(joint)).or(Some(p.anchor))
+                            p.actor
+                                .and_then(|a| {
+                                    characters.get(a).ok().and_then(|c| c.bone(joint)).or_else(|| model_bones.get(a).ok().and_then(|b| b.0.get(joint).copied()))
+                                })
+                                .or(Some(p.anchor))
                         };
                         let path = format!("{graphics}.glb");
                         // On a character (not a joint): into its entity frame.
@@ -920,14 +976,17 @@ fn play_sequences(
                 match &track {
                     Track::Anim { name, .. } if !p.superseded => {
                         if let Some(Ok(mut a)) = p.actor.map(|a| anims.get_mut(a)) {
-                            if a.state == AnimState::Named(name.clone()) {
+                            // A dead actor keeps its death pose.
+                            if a.state == AnimState::Named(name.clone()) && !a.dead {
                                 a.state = AnimState::Idle;
                                 a.speed = 1.0;
                             }
                         }
                     }
                     Track::Hide { .. } => {
-                        if let Some(Ok(mut v)) = p.actor.map(|a| visibility.get_mut(a)) {
+                        // A dead actor hidden by its death sequence stays hidden.
+                        let dead = p.actor.and_then(|a| anims.get(a).ok()).is_some_and(|a| a.dead);
+                        if let (false, Some(Ok(mut v))) = (dead, p.actor.map(|a| visibility.get_mut(a))) {
                             *v = Visibility::Inherited;
                         }
                     }

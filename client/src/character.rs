@@ -305,11 +305,14 @@ pub struct CharacterAnim {
     parking: bool,
     fading: Vec<(AnimationNodeIndex, f32)>,
     nodes: HashMap<String, (AnimationNodeIndex, bool)>,
+    /// Killed (KillCommand): the death animation keeps its last pose; no sequence
+    /// or movement brings the actor back to Idle.
+    pub dead: bool,
 }
 
 impl Default for CharacterAnim {
     fn default() -> Self {
-        Self { state: AnimState::Idle, speed: 1.0, applied: None, player: None, nodes: HashMap::new(), current: None, fading: Vec::new(), parked: Vec::new(), parking: false }
+        Self { state: AnimState::Idle, speed: 1.0, applied: None, player: None, nodes: HashMap::new(), current: None, fading: Vec::new(), parked: Vec::new(), parking: false, dead: false }
     }
 }
 
@@ -329,7 +332,22 @@ impl CharacterAnim {
     pub fn is_ready(&self) -> bool {
         self.player.is_some()
     }
+
+    /// Drive a whole model's own animation player (monsters, crate::monsters):
+    /// `nodes` are its graph's clips by state row, with whether each loops.
+    pub fn bind_model(&mut self, player: Entity, nodes: HashMap<String, (AnimationNodeIndex, bool)>) {
+        self.player = Some(player);
+        self.nodes = nodes;
+        self.current = None;
+        self.fading.clear();
+        self.applied = None;
+    }
 }
+
+/// The joints of a whole model (not on the shared skeleton), by name, for effects
+/// attached to a joint (crate::skills).
+#[derive(Component)]
+pub struct ModelBones(pub HashMap<String, Entity>);
 
 #[derive(Component)]
 pub struct Character {
@@ -475,6 +493,40 @@ struct SkeletonCtx<'w, 's> {
     parents: Query<'w, 's, &'static ChildOf>,
 }
 
+/// Give the joints a body variation (VariedJoint): (joint, translation, scale) per
+/// joint. Returns each varied joint's scaled child by the joint's name: what the
+/// skinned vertices of that joint must be bound to.
+pub fn vary_joints(
+    commands: &mut Commands,
+    joints: &Query<(&Transform, Option<&ChildOf>)>,
+    bones: &HashMap<String, Entity>,
+    variation: &[(String, Vec3, Vec3)],
+) -> HashMap<String, Entity> {
+    let shape: HashMap<&str, (Vec3, Vec3)> = variation.iter().map(|(n, t, s)| (n.as_str(), (*t, *s))).collect();
+    let varied: HashMap<Entity, &str> =
+        bones.iter().filter(|(n, _)| shape.contains_key(n.as_str())).map(|(n, e)| (*e, n.as_str())).collect();
+    let mut scaled_bones = HashMap::new();
+    for (&joint, &name) in &varied {
+        let Ok((tf, parent)) = joints.get(joint) else { continue };
+        let (var_t, var_s) = shape[name];
+        let scaled = commands
+            .spawn((Name::new(format!("{name}#scaled")), VariedChild, Transform::from_scale(var_s), ChildOf(joint)))
+            .id();
+        commands.entity(joint).insert(VariedJoint {
+            var_t,
+            var_s,
+            bind_t: tf.translation,
+            parent: parent.map(|p| p.parent()).filter(|p| varied.contains_key(p)),
+            scaled,
+            raw: (tf.translation, tf.scale),
+            written: None,
+            scale: var_s * tf.scale,
+        });
+        scaled_bones.insert(name.to_owned(), scaled);
+    }
+    scaled_bones
+}
+
 /// Take the skeleton instance `entity` as its character's: bones, animation
 /// player and graph, body variation, and every part of the dressing bound to it.
 fn adopt_skeleton(ctx: &mut SkeletonCtx, entity: Entity, owner: Entity, generation: u32) {
@@ -519,28 +571,7 @@ fn adopt_skeleton(ctx: &mut SkeletonCtx, entity: Entity, owner: Entity, generati
     }
     let variation = character.desc.look.as_ref().map(|l| l.variation.clone()).unwrap_or_default();
     if !variation.is_empty() {
-        let shape: HashMap<&str, (Vec3, Vec3)> = variation.iter().map(|(n, t, s)| (n.as_str(), (*t, *s))).collect();
-        let varied: HashMap<Entity, &str> =
-            bones.iter().filter(|(n, _)| shape.contains_key(n.as_str())).map(|(n, e)| (*e, n.as_str())).collect();
-        let mut scaled_bones = HashMap::new();
-        for (&joint, &name) in &varied {
-            let Ok((tf, parent)) = ctx.joints.get(joint) else { continue };
-            let (var_t, var_s) = shape[name];
-            let scaled = commands
-                .spawn((Name::new(format!("{name}#scaled")), VariedChild, Transform::from_scale(var_s), ChildOf(joint)))
-                .id();
-            commands.entity(joint).insert(VariedJoint {
-                var_t,
-                var_s,
-                bind_t: tf.translation,
-                parent: parent.map(|p| p.parent()).filter(|p| varied.contains_key(p)),
-                scaled,
-                raw: (tf.translation, tf.scale),
-                written: None,
-                scale: var_s * tf.scale,
-            });
-            scaled_bones.insert(name.to_owned(), scaled);
-        }
+        let scaled_bones = vary_joints(commands, &ctx.joints, &bones, &variation);
         bones.extend(scaled_bones);
     }
     // Every part of this dressing, pending or already bound to a skeleton
