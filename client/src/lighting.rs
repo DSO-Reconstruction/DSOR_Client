@@ -531,11 +531,19 @@ fn apply_look(
     for (e, _) in &cameras {
         let mut cam = commands.entity(e);
         cam.insert((fog.clone(), grading.clone(), vignette.clone(), tonemapping));
+        // The 2018 client's own bloom (crate::nebula_bloom): from the opaque scene
+        // only, as its frame shader does; bevy's took the effects too.
+        cam.remove::<Bloom>();
         if crate::flag("nobloom") || b.bloom_scale * l.bloom <= 0.0 {
-            cam.remove::<Bloom>();
+            cam.remove::<crate::nebula_bloom::NebulaBloom>();
         } else {
-            cam.insert(bloom.clone());
+            cam.insert(crate::nebula_bloom::NebulaBloom {
+                threshold: b.bright_pass_threshold,
+                scale: b.bloom_scale * l.bloom,
+                color: Vec4::from_array(b.bloom_color),
+            });
         }
+        let _ = &bloom;
     }
 }
 

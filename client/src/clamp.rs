@@ -36,7 +36,7 @@ impl Plugin for ClampPlugin {
 }
 
 #[derive(Resource)]
-struct ClampPipeline {
+pub struct ClampPipeline {
     layout: BindGroupLayoutDescriptor,
     sampler: Sampler,
     fullscreen: FullscreenShader,
@@ -78,7 +78,7 @@ impl SpecializedRenderPipeline for ClampPipeline {
 }
 
 #[derive(Component)]
-struct ClampPipelineId(CachedRenderPipelineId);
+pub struct ClampPipelineId(CachedRenderPipelineId);
 
 fn prepare(
     mut commands: Commands,
@@ -98,7 +98,7 @@ fn prepare(
     }
 }
 
-fn clamp(view: ViewQuery<(&ViewTarget, &ClampPipelineId)>, pipeline: Res<ClampPipeline>, cache: Res<PipelineCache>, mut ctx: RenderContext) {
+pub fn clamp(view: ViewQuery<(&ViewTarget, &ClampPipelineId)>, pipeline: Res<ClampPipeline>, cache: Res<PipelineCache>, mut ctx: RenderContext) {
     let (target, id) = view.into_inner();
     let Some(render_pipeline) = cache.get_render_pipeline(id.0) else { return };
     let post = target.post_process_write();
