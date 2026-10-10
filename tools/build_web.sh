@@ -15,9 +15,14 @@ cd "$(dirname "$0")/../client"
 export PATH="$HOME/.cargo/bin:$PATH"
 if [ "${1:-}" = "--fast" ]; then
     echo "[web] webgpu (fast)"
-    CARGO_TARGET_DIR="../target/web-fast" trunk build --cargo-profile wasm-fast \
+    # index.html names its profile (wasm-release, wasm-opt 3), and that wins over
+    # --cargo-profile: the fast build reads a copy naming wasm-fast, no wasm-opt.
+    sed -e 's/data-cargo-profile="wasm-release"/data-cargo-profile="wasm-fast"/' \
+        -e 's/data-wasm-opt="3"/data-wasm-opt="0"/' index.html > index.fast.html
+    CARGO_TARGET_DIR="../target/web-fast" trunk build index.fast.html \
         --no-default-features --features webgpu \
         --dist "dist/webgpu" --filehash false --public-url "./"
+    [ -f dist/webgpu/index.fast.html ] && mv dist/webgpu/index.fast.html dist/webgpu/index.html
     cp web/index.html dist/index.html
     ln -sfn ../../assets dist/assets
     echo "[web] done (fast, WebGPU only): client/dist"

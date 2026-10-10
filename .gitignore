@@ -12,3 +12,4 @@
 /client/dist
 __pycache__/
 /client/dist-profile
+/client/index.fast.html
