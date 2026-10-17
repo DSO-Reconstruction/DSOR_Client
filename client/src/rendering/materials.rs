@@ -695,6 +695,10 @@ impl GltfExtensionHandler for NebulaStates {
                 }
                 Kind::Character => {
                     mask = dye_mask(&self.textures, &extras);
+                    // The rim light is in shd:character and characterfalloff only.
+                    let rim = ["character", "characterfalloff"].iter()
+                        .any(|s| extras.contains(&format!("\"nebula_shader\":\"shd:{s}\"")));
+                    params.p0.y = if rim { 1.0 } else { 0.0 };
                 }
                 // Never here: crate::rendering::particles builds its own; Scroll is below.
                 Kind::Particle | Kind::Scroll => {}

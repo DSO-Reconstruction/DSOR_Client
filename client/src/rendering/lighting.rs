@@ -115,6 +115,15 @@ pub struct Bubble {
     pub fog_intensity: f32,
     pub fog_near_dist: f32,
     pub fog_far_dist: f32,
+    /// Height fog, Nebula's second fog layer: by world height, from none at
+    /// `FogNearHeight` to all of `HeightFogColor` at `FogFarHeight`.
+    pub height_fog_color: [f32; 4],
+    pub fog_near_height: f32,
+    pub fog_far_height: f32,
+    /// The characters' rim light (shd:character, characterfalloff only): the
+    /// shader receives `RimLightColor x RimLightIntensity`.
+    pub rim_light_color: [f32; 4],
+    pub rim_light_intensity: f32,
     pub local_light_color: [f32; 4],
     pub local_light_intensity: f32,
     pub vignette_intensity: f32,
@@ -160,6 +169,11 @@ impl Bubble {
             fog_intensity: f(self.fog_intensity, to.fog_intensity),
             fog_near_dist: f(self.fog_near_dist, to.fog_near_dist),
             fog_far_dist: f(self.fog_far_dist, to.fog_far_dist),
+            height_fog_color: mix4(self.height_fog_color, to.height_fog_color, t),
+            fog_near_height: f(self.fog_near_height, to.fog_near_height),
+            fog_far_height: f(self.fog_far_height, to.fog_far_height),
+            rim_light_color: mix4(self.rim_light_color, to.rim_light_color, t),
+            rim_light_intensity: f(self.rim_light_intensity, to.rim_light_intensity),
             local_light_color: mix4(self.local_light_color, to.local_light_color, t),
             local_light_intensity: f(self.local_light_intensity, to.local_light_intensity),
             vignette_intensity: f(self.vignette_intensity, to.vignette_intensity),
@@ -225,6 +239,29 @@ mod bubble_tests {
         ambience.bubbles[1].event = 83;
         assert_eq!(ambience.bubble_at(Vec3::ZERO), Some(0));
         assert_eq!(ambience.bubble_at(Vec3::X), None);
+    }
+
+    #[test]
+    fn height_fog_is_read_from_the_level_and_fades_between_bubbles() {
+        // a0302_wildforest's default bubble.
+        let wild: Bubble = serde_json::from_str(r#"{"HeightFogColor":[0.2275,0.6627,0.6902,1.0],"FogNearHeight":-3.0,"FogFarHeight":-20.0}"#).unwrap();
+        assert_eq!((wild.height_fog_color, wild.fog_near_height, wild.fog_far_height), ([0.2275, 0.6627, 0.6902, 1.0], -3.0, -20.0));
+        // Assets without the columns keep Kingshill's, like every other field.
+        let legacy: Bubble = serde_json::from_str("{}").unwrap();
+        assert_eq!((legacy.fog_near_height, legacy.fog_far_height), (Bubble::default().fog_near_height, Bubble::default().fog_far_height));
+        let half = Bubble::default().mix(&wild, 0.5);
+        assert!((half.fog_near_height - (-2.0)).abs() < 1e-5 && (half.fog_far_height - (-25.0)).abs() < 1e-5);
+        assert!((half.height_fog_color[0] - (1.0 + 0.2275) / 2.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn rim_light_is_read_from_the_level_and_fades_between_bubbles() {
+        // a0302_wildforest's default bubble.
+        let wild: Bubble = serde_json::from_str(r#"{"RimLightColor":[0.2275,0.6627,0.6902,1.0],"RimLightIntensity":0.5}"#).unwrap();
+        assert_eq!((wild.rim_light_color, wild.rim_light_intensity), ([0.2275, 0.6627, 0.6902, 1.0], 0.5));
+        let dark: Bubble = serde_json::from_str(r#"{"RimLightIntensity":0.0}"#).unwrap();
+        let half = wild.mix(&dark, 0.5);
+        assert!((half.rim_light_intensity - 0.25).abs() < 1e-5);
     }
 
     #[test]
@@ -347,6 +384,11 @@ impl Default for Bubble {
             fog_intensity: 1.0,
             fog_near_dist: 25.0,
             fog_far_dist: 50.0,
+            height_fog_color: [1.0, 0.961, 0.902, 1.0],
+            fog_near_height: -1.0,
+            fog_far_height: -30.0,
+            rim_light_color: [1.0, 1.0, 0.902, 1.0],
+            rim_light_intensity: 0.5,
             local_light_color: [1.0, 0.71, 0.502, 1.0],
             local_light_intensity: 0.25,
             vignette_intensity: 1.0,
@@ -685,7 +727,7 @@ fn apply_look(
     fresh.extend(cameras.iter());
     let (l, b) = (&*lighting, &level.bubble);
     let rgb = |c: [f32; 4]| [c[0], c[1], c[2]];
-    *gpu_ambience = level.blend.gpu(l);
+    *gpu_ambience = level.blend.gpu(l).with_height_fog(b).with_rim_light(b);
     let toward = level.shadow_dir.normalize_or(blend::direction(None));
     for (mut sun, mut tf, mut global_tf) in &mut suns {
         // The single real sun supplies the fixed shadow map. The fragment

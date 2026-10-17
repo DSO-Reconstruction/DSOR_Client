@@ -201,7 +201,7 @@ http://localhost:8080/?server=127.0.0.1:2190&relay=ws://127.0.0.1:2290&account=<
 
 Flags (`?flag=...` in the browser, `DSOR_FLAGS=...` natively): `nobloom`, `nolights`
 (no placed level lights), `noshadows`, `lowshadows` (512 shadow map),
-`noparticles`, `nodecals`, `noanim`, `noanimviewcull` (disable NPC visibility-based
+`noparticles`, `nodecals`, `norim` (no character rim light), `noanim`, `noanimviewcull` (disable NPC visibility-based
 animation culling), `nonames`, `nonpcs-shadow`, `depth` (depth
 pre-pass on WebGL2: soft particle and water edges), `nodepth` (natively / WebGPU:
 without it).

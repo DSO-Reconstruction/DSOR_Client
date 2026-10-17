@@ -28,6 +28,9 @@ struct LightTerm {
     front: Vec3,
     shadowed: Vec3,
     back: Vec3,
+    /// BackLightFactor: the back light covers sat(offset - N.L), not only the
+    /// surfaces facing away from the light.
+    back_offset: f32,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -57,7 +60,7 @@ impl LightBlend {
             * (b.sun_luminance() / reference.max(1e-6)).clamp(0., 1.);
         Self(vec![LightTerm { dir: direction(b.dir), front,
             shadowed: front * strength,
-            back: color(b.light_opposite_color) }], reference)
+            back: color(b.light_opposite_color), back_offset: b.back_light_factor }], reference)
     }
     pub(super) fn mix(&self, to: &Bubble, t: f32) -> Self {
         if t <= 0. { return self.clone(); }
@@ -75,9 +78,10 @@ impl LightBlend {
             term.front += target.front * t;
             term.shadowed += target.shadowed * t;
             term.back += target.back * t;
+            term.back_offset += (target.back_offset - term.back_offset) * t;
         } else {
             result.0.push(LightTerm { dir: target.dir, front: target.front * t,
-                shadowed: target.shadowed * t, back: target.back * t });
+                shadowed: target.shadowed * t, back: target.back * t, back_offset: target.back_offset });
         }
         // Discard only sub-visible residue after many interrupted transitions.
         result.0.retain(|term| term.front.max_element().max(term.back.max_element()) > 1e-7);
@@ -101,7 +105,7 @@ impl LightBlend {
             *out = GpuTerm { direction: term.dir.extend(0.),
                 front: (term.front * unit * factors.sun).extend(0.),
                 shadowed: (term.shadowed * unit * factors.sun).extend(0.),
-                back: (term.back * unit * factors.back).extend(0.) };
+                back: (term.back * unit * factors.back).extend(term.back_offset) };
         }
         value
     }
@@ -111,10 +115,53 @@ impl LightBlend {
 struct GpuTerm { direction: Vec4, front: Vec4, shadowed: Vec4, back: Vec4 }
 
 #[derive(Resource, Clone, ExtractResource, ShaderType)]
-pub(super) struct GpuAmbience { counts: UVec4, terms: [GpuTerm; MAX_TERMS] }
+pub(super) struct GpuAmbience {
+    counts: UVec4,
+    terms: [GpuTerm; MAX_TERMS],
+    /// Linear rgb; w 1 enables height fog (0 in the inactive buffer).
+    height_fog_color: Vec4,
+    /// x FogNearHeight, y FogFarHeight.
+    fog_heights: Vec4,
+    /// Gamma rgb: RimLightColor x RimLightIntensity, Nebula's rimLightColor
+    /// (0 in the inactive buffer: no rim).
+    rim_color: Vec4,
+    /// View-space direction (xyz) and exponent (w), Nebula's rimLightDirAndSpec.
+    rim_dir_spec: Vec4,
+}
 
 impl Default for GpuAmbience {
-    fn default() -> Self { Self { counts: UVec4::ZERO, terms: [GpuTerm::default(); MAX_TERMS] } }
+    fn default() -> Self {
+        Self { counts: UVec4::ZERO, terms: [GpuTerm::default(); MAX_TERMS], height_fog_color: Vec4::ZERO, fog_heights: Vec4::ZERO,
+            rim_color: Vec4::ZERO, rim_dir_spec: Vec4::ZERO }
+    }
+}
+
+impl GpuAmbience {
+    /// The bubble's height fog. Like the 2018 shaders, it has no strength of its
+    /// own: the colour and the two heights are the whole of it.
+    pub(super) fn with_height_fog(mut self, b: &Bubble) -> Self {
+        let c = linear([b.height_fog_color[0], b.height_fog_color[1], b.height_fog_color[2]], 1.0);
+        self.height_fog_color = Vec4::new(c.red, c.green, c.blue, 1.0);
+        self.fog_heights = Vec4::new(b.fog_near_height, b.fog_far_height, 0.0, 0.0);
+        self
+    }
+
+    /// The characters' rim light. The colour is the bubble's; the engine sets the
+    /// direction and exponent itself, the same in every map.
+    /// EVIDENCE: the "character" and "characterfalloff" ps_3_0 (shaders_sm30) add
+    ///   rimLightColor (c8) x pow(max(dot(n_view, c9.xyz), 0), c9.w) to the lit
+    ///   colour, before the hit colour and the fogs. Read from the running
+    ///   release261_192 client (D3D9 SetPixelShaderConstantF, Wild Forest):
+    ///   c8 = (0.1137, 0.3314, 0.3451, 0.5), its RimLightColor x RimLightIntensity
+    ///   0.5; c9 = (0.6963, 0.6963, 0.1741, 4), (4, 4, 1) normalised.
+    pub(super) fn with_rim_light(mut self, b: &Bubble) -> Self {
+        let c = b.rim_light_color;
+        // DSOR_FLAGS=norim leaves it out, for comparisons.
+        let scale = if crate::flag("norim") { 0.0 } else { 1.0 };
+        self.rim_color = Vec4::new(c[0], c[1], c[2], 1.0) * b.rim_light_intensity * scale;
+        self.rim_dir_spec = Vec3::new(4.0, 4.0, 1.0).normalize().extend(4.0);
+        self
+    }
 }
 
 #[derive(Component, Clone, ExtractComponent)]
@@ -237,7 +284,12 @@ fn blend_function(source: &str) -> Option<String> {
     let end = patched[start..].find(anchor)? + start + anchor.len();
     let original = patched[start..end].to_owned();
     patched = patched.replace(&original, &format!("#ifdef DSOR_AMBIENCE\n        if ambience.counts.x != 0u && i == 0u {{\n            transmitted_light += apply_ambience(&transmissive_lighting_input, enable_diffuse, transmitted_shadow);\n        }} else {{\n{original}\n        }}\n#else\n{original}\n#endif"));
-    Some(format!("#ifdef DSOR_AMBIENCE\n#import dsor::ambience::{{ambience, apply_ambience}}\n#endif\n{patched}"))
+    // Height fog follows distance fog on the same fogged materials, as the 2018
+    // pixel shaders lerp heightFogColor over the distance-fogged colour.
+    let fog_end = "            pbr_input.frag_coord.xy,\n        );\n    }\n#endif  // DISTANCE_FOG";
+    if !patched.contains(fog_end) { return None; }
+    patched = patched.replace(fog_end, "            pbr_input.frag_coord.xy,\n        );\n#ifdef DSOR_AMBIENCE\n        output_color = apply_height_fog(output_color, pbr_input.world_position.xyz);\n#endif\n    }\n#endif  // DISTANCE_FOG");
+    Some(format!("#ifdef DSOR_AMBIENCE\n#import dsor::ambience::{{ambience, apply_ambience, apply_height_fog}}\n#endif\n{patched}"))
 }
 
 fn prepare_shaders(mut shaders: ResMut<Assets<Shader>>, mut done: Local<bool>) {
