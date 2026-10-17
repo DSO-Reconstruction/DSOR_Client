@@ -201,7 +201,7 @@ http://localhost:8080/?server=127.0.0.1:2190&relay=ws://127.0.0.1:2290&account=<
 
 Flags (`?flag=...` in the browser, `DSOR_FLAGS=...` natively): `nobloom`, `nolights`
 (no placed level lights), `noshadows`, `lowshadows` (512 shadow map),
-`noparticles`, `nodecals`, `noanim`, `noanimviewcull` (disable NPC visibility-based
+`noparticles`, `nodecals`, `norim` (no character rim light), `noanim`, `noanimviewcull` (disable NPC visibility-based
 animation culling), `nonames`, `nonpcs-shadow`, `depth` (depth
 pre-pass on WebGL2: soft particle and water edges), `nodepth` (natively / WebGPU:
 without it).
@@ -218,6 +218,6 @@ HTTPS (and the relay over `wss://`) for others.
 | I, C, S | inventory, character sheet, skills |
 | drag an inventory item | move/swap slots; drop onto a compatible stack to merge |
 | Ctrl + left click a stack | choose an amount to split into a free inventory slot |
-| F2 | lighting panel: scale the level's sun, ambient, placed lights and fog; camera colours come from ambience bubbles |
+| F2 | lighting panel: scale the level's sun, ambient, placed lights and fog; camera colours come from ambience bubbles. With `DSOR_STUDIO_PREVIEW=1` (natively, for developers) F2 opens the Lighting Menu instead: the same multipliers, live overrides of the map's and each zone's ambience (with a zone preview), and named presets, saved in `lighting-presets.json` |
 | F9 or Ctrl+Shift+D | bug dump: downloads `dsor-dump-<time>.json` (natively: written in the working directory). Also written by itself on a crash or a rendering error. Send it with the bug report. |
 | W A S D, Q E, right mouse | free camera (offline viewer) |

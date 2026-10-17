@@ -66,9 +66,18 @@ Legacy saved `saturation`, `exposure`, `bloom`, `vignette` and `tonemapping` val
 are ignored, so they cannot override the authored camera colours. Death/revival
 temporarily desaturates and dims the view without changing the bubble settings.
 
-Not yet: height fog (`HeightFogColor`, `FogNearHeight` / `FogFarHeight`),
-the characters' rim light (`RimLightColor`, `RimLightIntensity`),
-`LightSpecularIntensity`, projected spot lights
+Height fog follows distance fog on fogged materials, as in the 2018/261 shaders:
+none above `FogNearHeight`, all of `HeightFogColor` past `FogFarHeight`, linear
+in world height between, mixed in gamma space like their `lrp`. It fades with the
+other bubble values.
+
+The characters' rim light (`shd:character` and `characterfalloff` only, not
+monsters) adds `RimLightColor x RimLightIntensity x pow(max(dot(n_view, dir), 0), 4)`
+to their lit colour in gamma space, before the hit colour and the fogs. The
+engine's direction is fixed, (4, 4, 1) normalised in view space (from the upper
+right), read from the running release261 client. `DSOR_FLAGS=norim` leaves it out.
+
+Not yet: `LightSpecularIntensity`, projected spot lights
 (`LightType` 1, 329 rows: they need `LightTexture` and shadows), event bubbles
 (`EventSetRow` other than -1).
 

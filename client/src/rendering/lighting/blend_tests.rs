@@ -9,7 +9,7 @@ fn preset(dir: Vec3, intensity: f32, shadows: f32) -> Bubble {
 fn sample(blend: &LightBlend, normal: Vec3, shadow: f32) -> Vec3 {
     blend.0.iter().map(|term| {
         (term.front - term.shadowed * (1. - shadow)) * normal.dot(term.dir).max(0.)
-            + term.back * normal.dot(-term.dir).max(0.)
+            + term.back * (term.back_offset - normal.dot(term.dir)).clamp(0., 1.)
     }).sum()
 }
 
@@ -135,10 +135,88 @@ fn entering_exiting_and_retargeting_never_move_the_shadow_sun() {
 #[test]
 fn uniform_layout_matches_wgsl_and_remains_within_webgl_limits() {
     assert_eq!(GpuTerm::min_size().get(), 64);
-    assert_eq!(GpuAmbience::min_size().get(), 16 + 64 * MAX_TERMS as u64);
+    // counts, the terms, the height fog colour and heights, the rim colour and direction.
+    assert_eq!(GpuAmbience::min_size().get(), 16 + 64 * MAX_TERMS as u64 + 32 + 32);
     assert!(GpuAmbience::min_size().get() <= 16384);
     let disabled = GpuAmbience::default();
     assert_eq!(disabled.counts.x, 0);
     let active = LightBlend::from(&preset(Vec3::X, 1., 1.)).gpu(&Lighting::default());
     assert_eq!(active.counts, UVec4::new(1, 1, 0, 0));
+}
+
+#[test]
+fn height_fog_reaches_the_gpu_linear_and_only_once_enabled() {
+    // The inactive buffer (views without the level's look) is all zeros: no height fog.
+    assert_eq!(GpuAmbience::default().height_fog_color.w, 0.);
+    let wild = Bubble { height_fog_color: [0.2275, 0.6627, 0.6902, 1.], fog_near_height: -3., fog_far_height: -20., ..default() };
+    let gpu = LightBlend::from(&wild).gpu(&Lighting::default()).with_height_fog(&wild);
+    let c = Color::srgb(0.2275, 0.6627, 0.6902).to_linear();
+    near(gpu.height_fog_color.truncate(), Vec3::new(c.red, c.green, c.blue));
+    assert_eq!(gpu.height_fog_color.w, 1.);
+    assert_eq!(gpu.fog_heights, Vec4::new(-3., -20., 0., 0.));
+}
+
+#[test]
+fn back_light_factor_reaches_the_gpu_and_fades_with_the_zone() {
+    // a0302_wildforest: BackLightFactor 0.3, an orange LightOppositeColor.
+    let wild = Bubble { back_light_factor: 0.3, light_opposite_color: [1., 0.349, 0., 1.], ..preset(Vec3::Y, 0.25, 1.) };
+    let blend = LightBlend::from(&wild);
+    assert_eq!(blend.0[0].back_offset, 0.3);
+    assert_eq!(blend.gpu(&Lighting::default()).terms[0].back.w, 0.3);
+    // The original's sat(BackLightFactor - N.L): a face turned slightly towards
+    // the light (N.L 0.1) still gets two tenths of it, one facing it gets none.
+    let side = Vec3::new(0.995, 0.1, 0.).normalize();
+    near(sample(&blend, side, 1.), blend.0[0].front * side.dot(Vec3::Y) + blend.0[0].back * (0.3 - side.dot(Vec3::Y)));
+    near(sample(&blend, Vec3::Y, 1.) - blend.0[0].front, Vec3::ZERO);
+    // Fading to a zone of the same light direction blends the offset too.
+    let indoor = Bubble { back_light_factor: 0.0, ..wild.clone() };
+    let half = blend.mix(&indoor, 0.5);
+    assert_eq!(half.0.len(), 1);
+    assert!((half.0[0].back_offset - 0.15).abs() < 1e-6);
+}
+
+#[test]
+fn pbr_patch_adds_height_fog_after_distance_fog_on_fogged_materials_only() {
+    let source = r#"
+        var light_contrib = lighting::directional_light(i, &lighting_input, enable_diffuse);
+        direct_light += light_contrib * shadow;
+        let transmitted_light_contrib =
+            lighting::directional_light(i, &transmissive_lighting_input, enable_diffuse);
+        transmitted_light += transmitted_light_contrib * transmitted_shadow;
+    if ((pbr_input.material.flags & pbr_types::STANDARD_MATERIAL_FLAGS_FOG_ENABLED_BIT) != 0u) {
+        output_color = apply_fog(
+            view_bindings::fog,
+            output_color,
+            pbr_input.world_position.xyz,
+            view_bindings::view.world_position.xyz,
+            pbr_input.frag_coord.xy,
+        );
+    }
+#endif  // DISTANCE_FOG
+"#;
+    let patched = blend_function(source).expect("anchors present");
+    let fog = patched.find("output_color = apply_fog(").unwrap();
+    let height = patched.find("output_color = apply_height_fog(output_color, pbr_input.world_position.xyz);").unwrap();
+    let fogged_block_end = patched.find("#endif  // DISTANCE_FOG").unwrap();
+    assert!(fog < height && height < fogged_block_end, "height fog follows distance fog inside its block");
+    assert!(patched.contains("#import dsor::ambience::{ambience, apply_ambience, apply_height_fog}"));
+    // A Bevy version without this fog block must fail loudly, never silently skip.
+    assert!(blend_function(&source.replace("#endif  // DISTANCE_FOG", "#endif")).is_none());
+}
+
+#[test]
+fn rim_light_reaches_the_gpu_in_gamma_with_the_engine_direction() {
+    // The inactive buffer is all zeros: no rim.
+    assert_eq!(GpuAmbience::default().rim_color, Vec4::ZERO);
+    // a0302_wildforest, as the running release261_192 client sends it: c8 =
+    // RimLightColor x RimLightIntensity, c9 = (0.6963, 0.6963, 0.1741, 4).
+    let wild = Bubble { rim_light_color: [0.2275, 0.6627, 0.6902, 1.], rim_light_intensity: 0.5, ..default() };
+    let gpu = GpuAmbience::default().with_rim_light(&wild);
+    near(gpu.rim_color.truncate(), Vec3::new(0.2275, 0.6627, 0.6902) * 0.5);
+    assert!(gpu.rim_color.truncate().distance(Vec3::new(0.1137, 0.3314, 0.3451)) < 1e-3);
+    assert_eq!(gpu.rim_color.w, 0.5);
+    assert!(gpu.rim_dir_spec.truncate().distance(Vec3::new(0.6963, 0.6963, 0.1741)) < 1e-3);
+    assert_eq!(gpu.rim_dir_spec.w, 4.);
+    let off = GpuAmbience::default().with_rim_light(&Bubble { rim_light_intensity: 0., ..wild });
+    assert_eq!(off.rim_color, Vec4::ZERO);
 }

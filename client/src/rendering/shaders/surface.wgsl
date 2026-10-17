@@ -29,6 +29,9 @@
 #ifdef DISTANCE_FOG
 #import bevy_pbr::{mesh_view_bindings as view_bindings, mesh_view_types}
 #endif
+#ifdef DSOR_AMBIENCE
+#import dsor::ambience::rim_light
+#endif
 
 struct Surface {
     p0: vec4<f32>,
@@ -217,6 +220,13 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
         pbr_input.material.base_color = alpha_discard(pbr_input.material, pbr_input.material.base_color);
         let lit = apply_pbr_lighting(pbr_input);
         var shown = 0.75 * to_gamma(lit.rgb) + 0.2625 * base;
+#ifdef DSOR_AMBIENCE
+        // shd:character / characterfalloff (p0.y 1) add the rim light here;
+        // shd:monster / monsterexp have none.
+        if surface.p0.y > 0.5 {
+            shown += rim_light(pbr_input.N, view.view_from_world);
+        }
+#endif
         shown = mix(shown, surface.p3.rgb, surface.p3.a);
         out.color = main_pass_post_lighting_processing(pbr_input, vec4<f32>(to_linear(shown), lit.a));
         return out;

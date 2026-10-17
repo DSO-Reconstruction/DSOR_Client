@@ -26,3 +26,6 @@ dsor-dump*.json
 /.level-editor/
 /.vfx-editor/
 *.glb.orig
+
+# Local Lighting Menu presets; personal settings.
+/lighting-presets.json

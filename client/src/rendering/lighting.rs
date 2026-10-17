@@ -115,8 +115,20 @@ pub struct Bubble {
     pub fog_intensity: f32,
     pub fog_near_dist: f32,
     pub fog_far_dist: f32,
+    /// Height fog, Nebula's second fog layer: by world height, from none at
+    /// `FogNearHeight` to all of `HeightFogColor` at `FogFarHeight`.
+    pub height_fog_color: [f32; 4],
+    pub fog_near_height: f32,
+    pub fog_far_height: f32,
+    /// The characters' rim light (shd:character, characterfalloff only): the
+    /// shader receives `RimLightColor x RimLightIntensity`.
+    pub rim_light_color: [f32; 4],
+    pub rim_light_intensity: f32,
     pub local_light_color: [f32; 4],
     pub local_light_intensity: f32,
+    /// The player light's reach. Not in the level data (always PLAYER_LIGHT_RANGE
+    /// there); the Lighting Menu can override it.
+    pub local_light_range: f32,
     pub vignette_intensity: f32,
     pub vignette_size: f32,
     pub vignette_color: [f32; 4],
@@ -160,8 +172,14 @@ impl Bubble {
             fog_intensity: f(self.fog_intensity, to.fog_intensity),
             fog_near_dist: f(self.fog_near_dist, to.fog_near_dist),
             fog_far_dist: f(self.fog_far_dist, to.fog_far_dist),
+            height_fog_color: mix4(self.height_fog_color, to.height_fog_color, t),
+            fog_near_height: f(self.fog_near_height, to.fog_near_height),
+            fog_far_height: f(self.fog_far_height, to.fog_far_height),
+            rim_light_color: mix4(self.rim_light_color, to.rim_light_color, t),
+            rim_light_intensity: f(self.rim_light_intensity, to.rim_light_intensity),
             local_light_color: mix4(self.local_light_color, to.local_light_color, t),
             local_light_intensity: f(self.local_light_intensity, to.local_light_intensity),
+            local_light_range: f(self.local_light_range, to.local_light_range),
             vignette_intensity: f(self.vignette_intensity, to.vignette_intensity),
             vignette_size: f(self.vignette_size, to.vignette_size),
             vignette_color: mix4(self.vignette_color, to.vignette_color, t),
@@ -225,6 +243,29 @@ mod bubble_tests {
         ambience.bubbles[1].event = 83;
         assert_eq!(ambience.bubble_at(Vec3::ZERO), Some(0));
         assert_eq!(ambience.bubble_at(Vec3::X), None);
+    }
+
+    #[test]
+    fn height_fog_is_read_from_the_level_and_fades_between_bubbles() {
+        // a0302_wildforest's default bubble.
+        let wild: Bubble = serde_json::from_str(r#"{"HeightFogColor":[0.2275,0.6627,0.6902,1.0],"FogNearHeight":-3.0,"FogFarHeight":-20.0}"#).unwrap();
+        assert_eq!((wild.height_fog_color, wild.fog_near_height, wild.fog_far_height), ([0.2275, 0.6627, 0.6902, 1.0], -3.0, -20.0));
+        // Assets without the columns keep Kingshill's, like every other field.
+        let legacy: Bubble = serde_json::from_str("{}").unwrap();
+        assert_eq!((legacy.fog_near_height, legacy.fog_far_height), (Bubble::default().fog_near_height, Bubble::default().fog_far_height));
+        let half = Bubble::default().mix(&wild, 0.5);
+        assert!((half.fog_near_height - (-2.0)).abs() < 1e-5 && (half.fog_far_height - (-25.0)).abs() < 1e-5);
+        assert!((half.height_fog_color[0] - (1.0 + 0.2275) / 2.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn rim_light_is_read_from_the_level_and_fades_between_bubbles() {
+        // a0302_wildforest's default bubble.
+        let wild: Bubble = serde_json::from_str(r#"{"RimLightColor":[0.2275,0.6627,0.6902,1.0],"RimLightIntensity":0.5}"#).unwrap();
+        assert_eq!((wild.rim_light_color, wild.rim_light_intensity), ([0.2275, 0.6627, 0.6902, 1.0], 0.5));
+        let dark: Bubble = serde_json::from_str(r#"{"RimLightIntensity":0.0}"#).unwrap();
+        let half = wild.mix(&dark, 0.5);
+        assert!((half.rim_light_intensity - 0.25).abs() < 1e-5);
     }
 
     #[test]
@@ -347,8 +388,14 @@ impl Default for Bubble {
             fog_intensity: 1.0,
             fog_near_dist: 25.0,
             fog_far_dist: 50.0,
+            height_fog_color: [1.0, 0.961, 0.902, 1.0],
+            fog_near_height: -1.0,
+            fog_far_height: -30.0,
+            rim_light_color: [1.0, 1.0, 0.902, 1.0],
+            rim_light_intensity: 0.5,
             local_light_color: [1.0, 0.71, 0.502, 1.0],
             local_light_intensity: 0.25,
+            local_light_range: PLAYER_LIGHT_RANGE,
             vignette_intensity: 1.0,
             vignette_size: 2.0,
             vignette_color: [0.0, 0.0, 0.0, 1.0],
@@ -434,15 +481,16 @@ impl AssetLoader for AmbienceLoader {
 
 /// The current level's ambience and what of it has been applied.
 #[derive(Resource, Default)]
-struct Level {
-    map: String,
-    ambience: Handle<Ambience>,
+pub(crate) struct Level {
+    pub(crate) map: String,
+    pub(crate) ambience: Handle<Ambience>,
     /// The current post effects, radiance mixture and fixed map shadow direction.
     bubble: Bubble,
     blend: LightBlend,
     shadow_dir: Vec3,
     fade: Option<(Bubble, Bubble, LightBlend, f32)>,
-    inside: Option<usize>,
+    /// The local bubble in effect (None: the global one).
+    pub(crate) inside: Option<usize>,
     bubble_loaded: bool,
     lights_placed: bool,
 }
@@ -492,15 +540,15 @@ impl Default for Lighting {
     }
 }
 
-/// One tunable line: label, step, read, write.
-struct Field {
-    label: &'static str,
-    step: f32,
-    get: fn(&Lighting) -> f32,
-    set: fn(&mut Lighting, f32),
+/// One tunable line: label, step, read, write. Shared with the Lighting Menu.
+pub(crate) struct Field {
+    pub(crate) label: &'static str,
+    pub(crate) step: f32,
+    pub(crate) get: fn(&Lighting) -> f32,
+    pub(crate) set: fn(&mut Lighting, f32),
 }
 
-const FIELDS: &[Field] = &[
+pub(crate) const FIELDS: &[Field] = &[
     Field { label: "Sun x", step: 0.05, get: |l| l.sun, set: |l, v| l.sun = v.max(0.0) },
     Field { label: "Back light x", step: 0.05, get: |l| l.back, set: |l, v| l.back = v.max(0.0) },
     Field { label: "Ambient x", step: 0.05, get: |l| l.ambient, set: |l, v| l.ambient = v.max(0.0) },
@@ -530,7 +578,7 @@ fn load_saved() -> Option<Lighting> {
     }
 }
 
-fn save(l: &Lighting) {
+pub(crate) fn save(l: &Lighting) {
     let Ok(raw) = serde_json::to_string(l) else { return };
     #[cfg(target_arch = "wasm32")]
     if let Some(Ok(Some(store))) = web_sys::window().map(|w| w.local_storage()) {
@@ -579,7 +627,8 @@ impl Plugin for LightingPlugin {
             .init_resource::<Level>()
             .insert_resource(load_saved().unwrap_or_default())
             .add_systems(Update, nebula_falloff)
-            .add_systems(Startup, spawn_panel)
+            // The Lighting Menu replaces this panel when it is on (crate::diagnostics::lighting_menu).
+            .add_systems(Startup, spawn_panel.run_if(|| !crate::diagnostics::lighting_menu::enabled()))
             .add_systems(
                 Update,
                 (
@@ -614,6 +663,7 @@ fn follow_level(
     time: Res<Time>,
     cameras: Query<(&Camera, &GlobalTransform), (With<Camera3d>, Without<crate::rendering::highlight::HighlightCamera>, Without<NoLevelLook>)>,
     players: Query<&GlobalTransform, With<crate::network::net::LocalPlayer>>,
+    menu: Option<Res<crate::diagnostics::lighting_menu::presets::LightingMenuStore>>,
 ) {
     let Some(current) = current else { return };
     if level.map != current.name {
@@ -628,27 +678,47 @@ fn follow_level(
         level.lights_placed = false;
     }
     let Some(ambience) = ambiences.get(&level.ambience) else { return };
-    let global = ambience.global.clone().unwrap_or_default();
+    // The Lighting Menu's working overrides (none without DSOR_STUDIO_PREVIEW):
+    // each bubble is resolved through them before it is faded to.
+    use crate::diagnostics::lighting_menu::presets::resolve_bubble;
+    let edits = menu.as_deref().and_then(|s| s.working_map_overrides.get(&level.map));
+    let global = resolve_bubble(&ambience.global.clone().unwrap_or_default(), edits, None);
+    let resolve = |i: usize| resolve_bubble(&ambience.bubbles[i].look, edits, Some((i, &ambience.bubbles[i])));
+    if menu.as_ref().is_some_and(|s| s.is_changed() && !s.is_added()) && level.bubble_loaded {
+        // A live edit: show it at once, without a fade.
+        let mut now = level.inside.map(resolve).unwrap_or_else(|| global.clone());
+        now.dir = global.dir;
+        level.blend = LightBlend::from(&now);
+        level.bubble = now;
+        level.shadow_dir = blend::direction(ambience.shadow.or(global.dir));
+        level.fade = None;
+    }
     if !level.bubble_loaded {
         level.bubble = global.clone();
         level.blend = LightBlend::from(&global);
         level.shadow_dir = blend::direction(ambience.shadow.or(global.dir));
         level.bubble_loaded = true;
     }
-    if !ambience.bubbles.is_empty() {
+    // The menu's "preview selected zone": that bubble (or the global one) in
+    // effect wherever the observer is, event bubbles included.
+    let preview = menu.as_deref().and_then(|s| s.preview_target);
+    if !ambience.bubbles.is_empty() || preview.is_some() {
         // A spawned player's feet are authoritative, independent of camera
         // offsets, zoom, and whether a camera is available during map handoff.
         // A free camera must enter the volume too: its ground focus moves when
         // looking around and can cross a doorway while the camera is outside.
         let position = observer_position(players.single().ok().map(|p| p.translation()), cameras.iter());
-        let inside = position.and_then(|p| ambience.bubble_at(p));
+        let inside = match preview {
+            Some(target) => target.filter(|&i| i < ambience.bubbles.len()),
+            None => position.and_then(|p| ambience.bubble_at(p)),
+        };
         if inside != level.inside {
             level.inside = inside;
             // A local box never moves the sun: its Transform is its volume, not a
             // light. FAILURE: its z axis (horizontal, ~173 deg from the level's sun
             // on a0007_pastures_pve) was faded to at every border, swinging the sun
             // over the zenith ("le soleil fait des allers-retours").
-            let mut to = inside.map(|i| ambience.bubbles[i].look.clone()).unwrap_or_else(|| global.clone());
+            let mut to = inside.map(resolve).unwrap_or_else(|| global.clone());
             to.dir = global.dir;
             let from = level.bubble.clone();
             level.fade = Some((from, to, level.blend.clone(), 0.0));
@@ -685,7 +755,7 @@ fn apply_look(
     fresh.extend(cameras.iter());
     let (l, b) = (&*lighting, &level.bubble);
     let rgb = |c: [f32; 4]| [c[0], c[1], c[2]];
-    *gpu_ambience = level.blend.gpu(l);
+    *gpu_ambience = level.blend.gpu(l).with_height_fog(b).with_rim_light(b);
     let toward = level.shadow_dir.normalize_or(blend::direction(None));
     for (mut sun, mut tf, mut global_tf) in &mut suns {
         // The single real sun supplies the fixed shadow map. The fragment
@@ -794,7 +864,7 @@ fn player_light(
 ) {
     let b = &level.bubble;
     let make = || {
-        let mut l = point_light([b.local_light_color[0], b.local_light_color[1], b.local_light_color[2]], b.local_light_intensity, PLAYER_LIGHT_RANGE);
+        let mut l = point_light([b.local_light_color[0], b.local_light_color[1], b.local_light_color[2]], b.local_light_intensity, b.local_light_range);
         l.intensity *= lighting.lights;
         l
     };

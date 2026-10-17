@@ -52,7 +52,8 @@ pub enum Kind {
     Scroll = 6,
     /// shd:character, characterfalloff, monster, monsterexp with their dye mask
     /// (tools/embed_character_masks.py): the dyes MatDiffuse (p1) and MatSpecular
-    /// (p2) through the spec map's green and blue, the HitColor flash (p3).
+    /// (p2) through the spec map's green and blue, the HitColor flash (p3), and
+    /// for character / characterfalloff (p0.y 1) the bubble's rim light.
     Character = 7,
 }
 

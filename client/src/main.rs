@@ -281,7 +281,7 @@ pub(crate) fn asset_root() -> String {
 }
 
 /// Diagnostic switches: the web page's `flag=a,b` or DSOR_FLAGS=a,b natively.
-/// noanim (no character animation), noshadows, nonpcs-shadow, noparticles.
+/// noanim (no character animation), noshadows, nonpcs-shadow, noparticles, norim.
 pub static FLAGS: std::sync::OnceLock<std::collections::HashSet<String>> = std::sync::OnceLock::new();
 
 pub fn flag(name: &str) -> bool {
@@ -406,6 +406,7 @@ fn main() {
             hud::HudPlugin,
         ))
         .add_plugins((dump::DumpPlugin, shadow_views::ShadowViewsPlugin, draw_mode::DrawModePlugin::default()))
+        .add_plugins(diagnostics::lighting_menu::LightingMenuPlugin)
         .add_plugins(ui::UiPlugin)
         .add_plugins(ui_input::UiInputPlugin)
         .add_plugins(loading::LoadingPlugin)

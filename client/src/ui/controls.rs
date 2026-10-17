@@ -931,6 +931,12 @@ pub(super) fn edit_text(
     mut input: ResMut<crate::ui::input::UiInput>,
     mut chat: ResMut<crate::network::chat::ChatLog>,
 ) {
+    // A tool window (crate::diagnostics::lighting_menu) has the keyboard: its
+    // Enter must not open the chat.
+    if input.hold_keys {
+        events.clear();
+        return;
+    }
     if pointer.focus.as_ref().is_some_and(|(e, id)| !windows.get(*e).is_ok_and(|(_, _, c, v, _)| *v != Visibility::Hidden
         && c.buttons.iter().any(|b| b.id == *id && c.section_visible(b.section)))) { pointer.focus = None; }
     for event in events.read() {
@@ -970,7 +976,7 @@ pub(super) fn edit_text(
         let typing = u8::from(pointer.focus.as_ref().is_some_and(|(root, _)| *root == e) || draft);
         if c.pages.get("chat_typing") != Some(&typing) { c.pages.insert("chat_typing", typing); }
     }
-    input.typing = pointer.focus.is_some();
+    input.typing = pointer.focus.is_some() || input.hold_keys;
 }
 
 pub(super) fn paint(
@@ -1279,6 +1285,12 @@ mod tests {
             assert!(!controls.covers(Vec2::new(100.0, 550.0), width), "recent text is click-through");
             assert!(!controls.covers(Vec2::new(100.0, 610.0), width), "compact has no entry bar");
         }
+        // A tool window holding the keyboard (the Lighting Menu typing a value)
+        // keeps its Enter: the chat stays as it was.
+        app.world_mut().resource_mut::<crate::ui::input::UiInput>().hold_keys = true;
+        key(&mut app, KeyCode::Enter, None);
+        assert!(!typing(&app) && app.world().get::<WindowControls>(chat).unwrap().chat_compact, "a tool window's Enter is not the chat's");
+        app.world_mut().resource_mut::<crate::ui::input::UiInput>().hold_keys = false;
         key(&mut app, KeyCode::Enter, None);
         assert!(typing(&app), "Enter expands the compact preview and focuses the entry");
         key(&mut app, KeyCode::Escape, None);
