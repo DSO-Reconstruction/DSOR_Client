@@ -24,6 +24,33 @@ fn readable(id: &str) -> String {
     result.trim().to_owned()
 }
 
+/// A Collector's Bag sticker's card, as the original's (the user's release261_192
+/// shots of the Manticore and the armoured war horse): its name and kind in its
+/// rarity's colour, then gui.window consumableUnderTitleInfinite, its description,
+/// noSale and howToUseMount / howToUsePet.
+/// FAILURE (2026-10-24): a bare "Sticker / Shows it in the preview" line.
+pub(super) fn sticker(catalog: &Catalog, layout: Option<&Layout>, template: &str) -> Card {
+    let meta = catalog.items.get(template);
+    let mut card = Card::new(285.0, layout);
+    card.background = Color::srgba(0.01, 0.01, 0.005, 0.985);
+    let (rarity, tint) = rarity(catalog, template, None);
+    // A template has no instance colour; the original writes a Mythic one red.
+    // UNVERIFIED: the exact red, matched by eye on the user's Manticore shot.
+    let tint = if rarity == "Mythic" { Color::srgb(0.86, 0.12, 0.08) } else { tint };
+    card.title(catalog.name(template, None), None, tint);
+    if let Some(m) = meta.filter(|m| !m.category.is_empty()) { card.text(&format!("<i>{}</>", m.category), tint); }
+    card.text("<i>Use, is not depleted when used</>", MUTED);
+    if let Some(m) = meta.filter(|m| !m.description.is_empty()) {
+        let text = if m.description.contains('<') { m.description.clone() } else { format!("<i>{}</>", m.description) };
+        card.text(&text, WHITE);
+    }
+    card.gap(4.0);
+    card.text("Not for sale", WHITE);
+    let pet = meta.is_some_and(|m| matches!(m.item_category.as_str(), "Pet" | "Mercenary"));
+    card.text(if pet { "(Right click to call your Companion over)" } else { "(Right click to mount or equip)" }, Color::srgb(0.95, 0.85, 0.2));
+    card
+}
+
 /// An item's rarity and the colour its name is written in.
 pub(super) fn rarity<'a>(catalog: &'a Catalog, template: &str, item: Option<&ItemInfo>) -> (&'a str, Color) {
     let rarity = item.map(|i| ["Common", "Improved", "Magic", "Extraordinary", "Legendary", "Unique", "Set", "Mythic"].get(i.kind as usize).copied().unwrap_or("Item"))

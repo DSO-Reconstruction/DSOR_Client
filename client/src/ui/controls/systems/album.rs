@@ -63,6 +63,9 @@ pub(in crate::ui) struct Sticker {
     pub book: String,
     pub name: String,
     pub icon: Icon,
+    /// The item template its card shows (crate::ui::controls::tooltips): the tier
+    /// owned, else the sticker's own item.
+    pub template: String,
     pub owned: bool,
     /// The name the server owns it under (Net::stickerbook's key: the item's
     /// resource id, mythical_mount_manticore_01, not the sticker's
@@ -75,6 +78,13 @@ pub(in crate::ui) struct Sticker {
     pub origin: String,
     pub background: String,
     pub offer: String,
+}
+
+impl Album {
+    /// A sticker shown on the page, among the new ones or in the preview.
+    pub(in crate::ui) fn sticker(&self, id: &str) -> Option<&Sticker> {
+        self.stickers.iter().chain(&self.new).chain(&self.preview).find(|s| s.id == id)
+    }
 }
 
 impl Sticker {
@@ -148,6 +158,7 @@ pub(super) fn album(sources: &Sources) -> Album {
         Sticker {
             id: id.clone(), key: entry.map(|e| e.id.clone()).unwrap_or_default(), book: def.book.clone(), name: def.name.clone(),
             icon: tier.or(def.items.first().map(String::as_str)).map(|t| sources.icon(t, None)).unwrap_or_default(),
+            template: tier.or(def.items.first().map(String::as_str)).unwrap_or_default().to_owned(),
             owned, favourite: entry.is_some_and(|e| e.state == StickerbookEntry::FAVOURITE),
             addable: !owned && templates(def).any(|t| !sources.carried(t).is_empty()),
             // Not at its last tier.

@@ -212,6 +212,9 @@ pub struct Net {
     pub guild_answers: Vec<(i8, String)>,
     /// What the server said about our group and guild requests, for the chat.
     pub social_notes: Vec<String>,
+    /// PlayerLogoutInfo's seconds as they come (0: called off), for the
+    /// switch-characters dialog (ui::controls::logout).
+    pub logout_info: Vec<u32>,
     /// Our group as the server last described it (GroupStatus 151); None ungrouped.
     pub group: Option<dsor_proto::commands::social::GroupStatus>,
     /// Our guild (GuildStatus 167); None when in none.
@@ -955,6 +958,7 @@ pub fn start_offline(world: &mut World, class: u8, gender: u8) {
         group_answers: Vec::new(),
         guild_answers: Vec::new(),
         social_notes: Vec::new(),
+        logout_info: Vec::new(),
         group: None,
         guild: None,
         player_query: None,
@@ -1256,6 +1260,7 @@ pub(crate) fn start_session(world: &mut World, config: NetConfig) {
         group_answers: Vec::new(),
         guild_answers: Vec::new(),
         social_notes: Vec::new(),
+        logout_info: Vec::new(),
         group: None,
         guild: None,
         player_query: None,
@@ -1927,11 +1932,7 @@ pub(crate) fn on_command(net: &mut Net, command: ServerCommand, actor: Option<u3
         ServerCommand::OverallRankingPage(p) => net.overall_ranking = Some(p),
         ServerCommand::LocalRanking(l) => net.local_rank = Some(l),
         ServerCommand::TalentCategoryPointsInfo(p) => net.talent_points = Some(p),
-        ServerCommand::PlayerLogoutInfo(l) => net.social_notes.push(if l.seconds > 0 {
-            format!("Leaving for the character screen in {} seconds; a hit cancels it.", l.seconds)
-        } else {
-            "The logout was cancelled.".to_owned()
-        }),
+        ServerCommand::PlayerLogoutInfo(l) => net.logout_info.push(l.seconds),
         ServerCommand::GameCurrencyChanged(c) => {
             net.game_currencies.insert(c.currency.clone(), c.amount);
         }

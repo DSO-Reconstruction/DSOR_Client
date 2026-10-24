@@ -689,6 +689,14 @@ fn perform(
             let from = at + right * o.x + Vec3::Y * o.y - dir * o.z;
             // The point's own ground height, so the grenade lands on it uphill too.
             let to = (skill.kind == "RangedTargetPoint").then(|| Vec3::new(point.x, point.y + o.y, point.z));
+            // Not aimed at an actor, a bullet dips or climbs to the aimed point at the
+            // hand's height: level on flat ground; shot from a cliff it flies down
+            // and its StaticCollision stops it on the ground below.
+            // EVIDENCE: the user's release261_192 recording (a mage on a Wild Forest
+            //   cliff: the missiles go down to the lower ground and burst there).
+            // FAILURE (2026-10-24): shot downhill, ours flew on level at the hand's
+            //   height, over everything below.
+            let aim = aim.or(Some(Vec3::new(point.x, point.y + o.y, point.z)));
             for k in 0..skill.bullet_count.max(1) {
                 commands.spawn(Pending {
                     after: ((skill.loop_start as f32 / FPS).max(skill.emit_delay) + k as f32 * skill.emit_delay) / rate,
@@ -734,7 +742,13 @@ fn perform(
         });
     }
     if skill.kind == "Teleport" {
-        commands.spawn(Pending { after: skill.hit_frame as f32 / FPS / rate, what: PendingKind::Teleport { who: actor, to: point } });
+        // On its hit tick after LoopStartFrame, as the ShiftedSkill it is sent as
+        // (start + LoopStartFrame + HitFrame, 0x946F17): the mage's teleport moves
+        // at frame 4, 0.16 s, after its short cast.
+        // FAILURE (2026-10-24): it moved at HitFrame (0.04 s), "instant" next to the
+        //   original's short cast (the user's release261_192 recording).
+        // UNVERIFIED: the Shifted rule for Teleport skills.
+        commands.spawn(Pending { after: skill.loop_start as f32 / FPS / rate + shifted_hit(skill, rate), what: PendingKind::Teleport { who: actor, to: point } });
     }
     if !skill.impact.is_empty() && skill.impact != "empty_sequence" {
         let impact_at = match skill.kind.as_str() {
@@ -744,7 +758,7 @@ fn perform(
         // Shifted and Jump: on its hit tick, start + LoopStartFrame + HitFrame
         // (0x946F17; lightning strike 44, meteor 65, enraging leap 15).
         let after = match skill.kind.as_str() {
-            "Shifted" | "Jump" => skill.loop_start as f32 / FPS / rate + shifted_hit(skill, rate),
+            "Shifted" | "Jump" | "Teleport" => skill.loop_start as f32 / FPS / rate + shifted_hit(skill, rate),
             _ => skill.hit_frame as f32 / FPS / rate,
         };
         // A bullet's impact is drawn where it ends (fly_bullets), a charge's where
@@ -896,6 +910,24 @@ impl SkillCooldowns {
             _ => 0.0,
         }
     }
+
+    /// The seconds a skill's cooldown still has to run (0 ready).
+    pub fn seconds_left(&self, data: &SkillData, tables: &Assets<SkillTable>, id: &str, now: f64) -> f64 {
+        let Some(skill) = data.by_id.get(id).and_then(|wire| tables.get(&data.skills).and_then(|t| t.0.get(wire))) else { return 0.0 };
+        self.0.get(cooldown_key(skill)).map_or(0.0, |&(_, ready)| (ready - now).max(0.0))
+    }
+}
+
+/// A cooldown's seconds as the original writes them on the slot: whole seconds
+/// ("21 s"), tenths under one ("0.4 s"), in tenths of a second (0: none).
+/// EVIDENCE: the user's release261_192 shots (a quick slot reading "21 s", a
+///   Collector's Bag sticker counting "0.4 s", "0.2 s", "0.1 s").
+pub fn cooldown_tenths(seconds: f64) -> u32 {
+    if seconds <= 0.0 { 0 } else if seconds >= 1.0 { seconds.ceil() as u32 * 10 } else { (seconds * 10.0).ceil() as u32 }
+}
+
+pub fn cooldown_text(tenths: u32) -> String {
+    if tenths >= 10 { format!("{} s", tenths / 10) } else { format!("0.{tenths} s") }
 }
 
 /// Skills of one cooldown category share their cooldown.
@@ -993,28 +1025,34 @@ fn cast_input(
     if !ui.blocks(MouseButton::Left) && buttons.pressed(MouseButton::Left) && hovered.0.is_none() && !shift {
         *queued = None;
     }
-    // Keys: one press, one cast (holding a key re-fired the skill as soon as it
-    // unblocked: "certains sorts se lancent 2x"). Mouse buttons repeat while held,
-    // as in the game, paced by the cast, the cooldown and the resource: Shift or a
-    // monster under the cursor with the left button, the right button anywhere
-    // ("je peux pas rester appuye sur clique droit pour lancer un sort").
-    let slot = if !ui.blocks(MouseButton::Left) && (shift || (settings.current.attack_hovered && hovered.0.is_some())) && buttons.pressed(MouseButton::Left) {
+    // Keys and mouse buttons repeat while held, as in the game, paced by the cast,
+    // the cooldown and the resource: Shift or a monster under the cursor with the
+    // left button, the right button anywhere ("je peux pas rester appuye sur clique
+    // droit pour lancer un sort"). A key pressed (then held) wins over a held mouse
+    // button: right button held, a press of 2 casts 2.
+    // FAILURE (2026-10-24): keys fired once per press ("I cannot hold 1 and continue
+    //   attacking"), and with the right button held a key did nothing ("I cannot
+    //   even press right click and press 2 to hit").
+    let key = settings.current.slot_pressed(&keys).or_else(|| settings.current.slot_held(&keys));
+    let left = key.is_none() && !ui.blocks(MouseButton::Left) && (shift || (settings.current.attack_hovered && hovered.0.is_some())) && buttons.pressed(MouseButton::Left);
+    let right = key.is_none() && !ui.blocks(MouseButton::Right) && buttons.pressed(MouseButton::Right);
+    let slot = if left {
         Some(0)
-    } else if !ui.blocks(MouseButton::Right) && buttons.pressed(MouseButton::Right) {
+    } else if right {
         Some(1)
     } else {
-        settings.current.slot_pressed(&keys)
+        key
     };
     // DSOR_TEST_SLOT=<slot>: that quick slot pressed all the time (testing online
     // without a keyboard; the cooldowns pace it).
     let slot = slot.or(clicked_slot).or_else(|| std::env::var("DSOR_TEST_SLOT").ok().and_then(|v| v.parse().ok()));
-    let (slot, aimed) = match slot {
+    let (slot, aimed, from_queue) = match slot {
         Some(s) => {
             *queued = None;
-            (s, hovered.0.map(|(e, _)| e))
+            (s, hovered.0.map(|(e, _)| e), false)
         }
         None => match *queued {
-            Some((s, e)) => (s, Some(e)),
+            Some((s, e)) => (s, Some(e), true),
             None => return,
         },
     };
@@ -1063,8 +1101,15 @@ fn cast_input(
     // does a melee skill with no target of its own (approaches).
     let targeted = matches!(skill.kind.as_str(), "MeleeTarget" | "RangedTarget");
     let target_actor = if targeted { aimed.map(|(_, _, a, ..)| a) } else { None };
+    // Only the left button walks into reach (a click on a monster: go there and
+    // strike). The right button and the keys strike from where the player stands,
+    // turned to the monster, never stepping: the server decides whether it lands.
+    // FAILURE (2026-10-24): a right click on a monster walked the warrior to it
+    //   ("I right click to use my skill, with my mouse hovering over a monster and
+    //   I walk to it"; clips 20261024-1143-13, 20261024-1259-25).
+    let walks = left || from_queue;
     if let (true, Some((e, at, _, radius, _, footprint))) = (approaches(skill), aimed) {
-        if beyond_reach(skill, tf.translation, at, radius, footprint) {
+        if walks && beyond_reach(skill, tf.translation, at, radius, footprint) {
             player.target = Some(at);
             *queued = Some((slot, e));
             return;
@@ -1118,11 +1163,18 @@ fn cast_input(
     let step = [dir.x * speed, 0.0, dir.z * speed, 0.0];
     let points = vec![point.to_array()];
     let command = match skill.kind.as_str() {
-        // No target is 0 for the release261 server (it drops such a cast,
-        // production services/player_combat.py:585-590), not 0xFFFFFFFF.
-        "MeleeTarget" | "RangedTarget" => {
+        "MeleeTarget" | "RangedTarget" if target_actor.is_some() => {
             ClientCommand::TargetSkill(combat::TargetSkill { base, target: target_actor.unwrap_or(0), server: None })
         }
+        // Without a target (Shift, or the cursor off every monster) it goes out as a
+        // plain skill: the original swings into the air and dismounts (the user, on
+        // release261_192). TargetSkill with target 0 is dropped by the server before
+        // any effect ("target loss is a no-op before mount, resource, cooldown, or
+        // hit side effects").
+        // FAILURE (2026-10-24): it went out as TargetSkill 0: a swing that struck
+        //   nothing and, mounted, did not dismount ("I can still attack while
+        //   mounted"; "I seem to miss a lot of my attacks").
+        "MeleeTarget" | "RangedTarget" => ClientCommand::Skill(combat::Skill { base, server: None }),
         "Ranged" => ClientCommand::BulletSkill(combat::BulletSkill { base, step, orbit: 0, server: None }),
         "RangedTargetPoint" => {
             ClientCommand::TargetPointBulletSkill(combat::TargetPointBulletSkill { base, step, orbit: 0, points, server: None })
@@ -2996,6 +3048,12 @@ mod cooldown_tests {
         assert_eq!(cooldowns.remaining(&data, tables, "unknown", 12.5), 0.0);
         cooldowns.0.insert("bolt".into(), (12.0, 17.0));
         assert_eq!(cooldowns.remaining(&data, tables, "bolt", 13.0), 0.8);
+        // The seconds written on the slot: whole seconds, tenths under one.
+        assert_eq!(cooldowns.seconds_left(&data, tables, "teleport", 12.5), 2.5);
+        assert_eq!(cooldowns.seconds_left(&data, tables, "teleport", 16.0), 0.0);
+        let shown = |s: f64| cooldown_tenths(s);
+        assert_eq!((shown(20.3), shown(1.0), shown(0.95), shown(0.31), shown(0.0)), (210, 10, 10, 4, 0));
+        assert_eq!((cooldown_text(210), cooldown_text(10), cooldown_text(4)), ("21 s".to_owned(), "1 s".to_owned(), "0.4 s".to_owned()));
     }
 }
 
@@ -3003,6 +3061,31 @@ mod cooldown_tests {
 mod combat_idle_tests {
     use super::*;
     use bevy::ecs::system::RunSystemOnce;
+
+    #[test]
+    fn a_bullet_shot_down_from_a_cliff_aims_at_the_point_below_at_hand_height() {
+        let mut world = World::new();
+        let skill: SkillDef = serde_json::from_value(serde_json::json!({
+            "id": "test_missile", "type": "Ranged", "hit_frame": 1, "loop_start": 0,
+            "unblock": 2, "motion_unblock": 2, "range": 10.0, "cooldown": 0.0, "execute": {}, "impact": "",
+            "bullet": {"loop": "", "impact": "", "death": "", "motion": "Straight", "velocity": 20.0,
+                "lifetime": 1.0, "radius": 0.3, "start": [0.0, 1.5, -1.0], "static_collision": true}
+        })).unwrap();
+        let caster = world.spawn_empty().id();
+        // From 4 units up, at a point 8 ahead below; and at an actor's chest.
+        for (aim, expected) in [(None, Vec3::new(0.0, 1.5, 8.0)), (Some(Vec3::new(0.0, 0.9, 8.0)), Vec3::new(0.0, 0.9, 8.0))] {
+            let skill = skill.clone();
+            world.run_system_once(move |mut commands: Commands| {
+                perform(&mut commands, &skill, &SequenceTable(default()), caster, None,
+                    Vec3::Y * 4.0, 0.0, Vec3::new(0.0, 0.0, 8.0), None, aim, None, 1.0);
+            }).unwrap();
+            let mut pending = world.query::<&Pending>();
+            let aims: Vec<_> = pending.iter(&world).filter_map(|p| match &p.what { PendingKind::Bullet { aim, .. } => Some(*aim), _ => None }).collect();
+            assert_eq!(aims, vec![Some(expected)]);
+            let ids: Vec<Entity> = world.query_filtered::<Entity, With<Pending>>().iter(&world).collect();
+            for e in ids { world.despawn(e); }
+        }
+    }
 
     #[test]
     fn casting_unarmed_enters_combat_even_without_an_execute_sequence() {

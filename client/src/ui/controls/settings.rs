@@ -122,6 +122,11 @@ impl Preferences {
     pub(crate) fn slot_pressed(&self, keys: &ButtonInput<KeyCode>) -> Option<usize> {
         (0..17).find(|slot| self.pressed(&format!("slot{slot}"), keys))
     }
+    /// The quick slot whose key is held down (a held skill key keeps attacking).
+    pub(crate) fn slot_held(&self, keys: &ButtonInput<KeyCode>) -> Option<usize> {
+        (0..17).find(|slot| self.bindings.get(&format!("slot{slot}")).filter(|v| !v.is_empty())
+            .is_some_and(|binding| keys.get_pressed().any(|key| chord(keys, *key) == *binding)))
+    }
     pub(crate) fn label(&self, action: &str) -> String {
         self.bindings.get(action).map_or_else(|| "Unbound".into(), |key| display_key(key))
     }
@@ -617,7 +622,7 @@ mod tests {
             .init_resource::<ButtonInput<MouseButton>>().init_resource::<Pointer>()
             .init_resource::<SkillClicks>().init_resource::<crate::network::net::RespawnChoice>()
             .init_resource::<crate::network::chat::ChatLog>().init_resource::<crate::gameplay::dialogue::Dialogue>()
-            .init_resource::<social::SocialUi>().init_resource::<hotbar::Hotbar>().init_resource::<crate::gameplay::quests::QuestUi>()
+            .init_resource::<social::SocialUi>().init_resource::<hotbar::Hotbar>().init_resource::<crate::gameplay::quests::QuestUi>().init_resource::<crate::ui::controls::systems::Views>()
             .init_resource::<super::party::Party>()
             .add_message::<bevy::input::mouse::MouseWheel>().add_systems(Update, interact);
         let primary = app.world_mut().spawn((Window { focused: true, resolution: (1600,900).into(), ..default() }, PrimaryWindow)).id();

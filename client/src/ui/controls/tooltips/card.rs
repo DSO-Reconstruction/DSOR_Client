@@ -42,6 +42,16 @@ impl Card {
 
     pub fn height(&self) -> f32 { self.y + 16.0 }
 
+    /// The body text size (reference pixels), for a card sized to its text.
+    pub fn text_size(&self) -> f32 { self.size }
+
+    /// Every text size times `k` (the one-line tooltips, controls::tooltips).
+    pub fn shrink(&mut self, k: f32) {
+        self.size *= k;
+        self.small *= k;
+        self.title *= k;
+    }
+
     pub fn title(&mut self, value: &str, icon: Option<&str>, color: Color) {
         let start = self.y;
         if let Some(path) = icon {
@@ -224,7 +234,14 @@ pub(in crate::ui::controls) fn placement(anchor: [f32; 4], size: Vec2, viewport:
     let size = size * scale;
     let [l,t,r,b] = anchor;
     let center = (l+r-size.x)*0.5;
-    let candidates = if compact {
+    // A one-line tip opens below its control, but above one in the screen's
+    // lower half (the bottom bar's gauges), as the original's open upwards.
+    // FAILURE (2026-10-24): made smaller, the gauges' tips fitted below the bar
+    //   and covered the skill slots.
+    let low = (t+b)*0.5 > viewport.y*0.5;
+    let candidates = if compact && low {
+        [Vec2::new(center,t-size.y-8.0), Vec2::new(center,b+8.0), Vec2::new(r+8.0,t), Vec2::new(l-size.x-8.0,t)]
+    } else if compact {
         [Vec2::new(center,b+8.0), Vec2::new(center,t-size.y-8.0), Vec2::new(r+8.0,t), Vec2::new(l-size.x-8.0,t)]
     } else {
         [Vec2::new(r+8.0,t), Vec2::new(l-size.x-8.0,t), Vec2::new(center,t-size.y-8.0), Vec2::new(center,b+8.0)]

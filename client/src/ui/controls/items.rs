@@ -151,6 +151,16 @@ fn item_cell(window: &str, action: &Action) -> Option<Cell> {
     }
 }
 
+/// An item a consumable quick slot takes: a potion, an elixir.
+pub(super) fn shortcut(catalog: &Catalog, template: &str) -> bool {
+    catalog.items.get(template).is_some_and(|m| matches!(m.item_category.as_str(), "Consumable" | "InstantConsumable"))
+}
+
+/// The Universal Map (TravelMapItem): it opens the travel map.
+pub(super) fn travel_map(catalog: &Catalog, template: &str) -> bool {
+    catalog.items.get(template).is_some_and(|m| m.item_category == "TravelMapItem")
+}
+
 fn use_consumable(state: &InventoryState, catalog: &Catalog, id: u32) -> Option<dsor_proto::commands::ClientCommand> {
     let item = state.items.get(&id)?;
     let meta = catalog.items.get(&item.template)?;
@@ -485,6 +495,10 @@ pub fn input(mut ui:ResMut<Interaction>,mut pointer:ResMut<Pointer>,mut windows:
                         net.send(&dsor_proto::commands::ClientCommand::Transaction(dsor_proto::commands::inventory::Transaction::sell(&shop,id)));
                         ui.pending=Some((net.inventory.revision,time.elapsed_secs_f64()));
                     }
+                } else if travel_map(catalog,net.inventory.items.get(&id).map_or("",|i|i.template.as_str())) {
+                    // The Universal Map: "(right click to open the travel map)" (gui.window
+                    // howToUseTravelMapItem); the server has no use for it.
+                    pointer.open_window=Some("travelmap");
                 } else if let Some(cmd)=use_consumable(&net.inventory,catalog,id) {
                     if trading { trade.add.push(id); }
                     else { net.send(&cmd);ui.pending=Some((net.inventory.revision,time.elapsed_secs_f64())); }
@@ -520,6 +534,19 @@ pub fn input(mut ui:ResMut<Interaction>,mut pointer:ResMut<Pointer>,mut windows:
         let on_trade=windows.iter().filter(|(_,n,_,v,_)|n.0==super::trade::WINDOW && **v!=Visibility::Hidden)
             .any(|(_,_,c,_,_)|c.hovered.is_some_and(|b|matches!(c.buttons[b].action,Action::Social(super::social::Social::TradeMine(_)))));
         if on_trade {if let Some(d)=ui.drag.take().filter(|d|d.active) {trade.add.push(d.id);}}
+        // Dropped on the bar: a shortcut to it there (super::stickers::apply_drop),
+        // the item staying in the bag. The Universal Map on a skill slot (the user
+        // kept it on 2 to travel fast), potions and elixirs on the consumable slots.
+        // FAILURE (2026-10-24): items could not be put on the bar at all ("the map
+        //   I can't put in the slots"; "I meant the skill slots").
+        let on_bar=windows.iter().filter(|(_,n,_,v,_)|n.0=="bottombar" && **v!=Visibility::Hidden)
+            .find_map(|(_,_,c,_,_)|c.hovered.and_then(|b|match c.buttons[b].action {Action::Skill(s)=>Some(s),_=>None}));
+        // Only an item that fits takes the drop (an essence on its socket goes on
+        // to the normal equipment move below).
+        let fits=|i:&ItemInfo,slot:usize| if travel_map(catalog,&i.template) {slot<super::stickers::SKILL_SLOTS} else {shortcut(catalog,&i.template) && super::stickers::CONSUMABLE_SLOTS.contains(&slot)};
+        let shortcut_drop=on_bar.zip(ui.drag.as_ref().filter(|d|d.active).and_then(|d|net.inventory.items.get(&d.id)))
+            .filter(|(slot,item)|fits(item,*slot)).map(|(slot,item)|(item.template.clone(),slot));
+        if let Some((template,slot))=shortcut_drop {ui.drag=None;pointer.sticker_drop=Some((1,template,slot));}
         if let Some(d)=ui.drag.take().filter(|d|d.active && !busy) {
             if let Some((root,cell))=hovered {
                 let (_,_,c,_,_)=windows.get(root).unwrap();
@@ -709,6 +736,10 @@ pub(in crate::ui) mod pins;
 #[cfg(test)]
 mod interaction_tests;
 
+pub(super) fn sticker_card(catalog:&Catalog, layout:Option<&Layout>, template:&str)->tooltips::card::Card {
+    preview::sticker(catalog,layout,template)
+}
+
 pub(super) fn preview_card(catalog:&Catalog, layout:Option<&Layout>, template:&str, item:Option<&ItemInfo>, amount:u32, advanced:bool)->tooltips::card::Card {
     preview::card(&DisplayItem { item,template,amount,unlock:0,read_only:false,waiting:false },catalog,layout,advanced)
 }
@@ -849,7 +880,7 @@ mod tests {
         assert_eq!(*app.world().get::<Visibility>(skills).unwrap(), Visibility::Inherited, "typing must consume shortcuts");
 
         let mut values = app.world_mut().query::<(&Value, &Text2d)>();
-        for (kind, expected, count) in [(ValueKind::WisdomLevel, "0", 2), (ValueKind::WisdomProgress, "0%", 1), (ValueKind::WisdomPoints, "Available Points: 0", 1)] {
+        for (kind, expected, count) in [(ValueKind::WisdomLevel, "0", 1), (ValueKind::BarWisdomLevel, "Wisdom Level 0", 1), (ValueKind::WisdomProgress, "", 1), (ValueKind::WisdomPoints, "Available Points: 0", 1)] {
             let actual: Vec<_> = values.iter(app.world()).filter(|(v, _)| v.0 == kind).map(|(_, t)| t.0.as_str()).collect();
             assert_eq!(actual, vec![expected; count]);
         }

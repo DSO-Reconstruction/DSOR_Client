@@ -6,6 +6,7 @@ use bevy::window::{MonitorSelection, WindowMode};
 use bevy::input::keyboard::KeyboardInput;
 mod panels;
 pub(super) mod spells;
+pub(super) mod stickers;
 pub(super) mod items;
 pub(super) mod sheet;
 pub(super) mod social;
@@ -19,6 +20,7 @@ pub(super) mod hotbar;
 pub(super) mod effects;
 pub(super) mod currency;
 pub(super) mod message;
+pub(super) mod logout;
 mod tooltips;
 pub(super) use tooltips::overlay as tooltips;
 
@@ -266,8 +268,10 @@ enum Action {
     QuestCompact(bool),
     /// The party frames' toggle: compact (the button alone) or full.
     PartyCompact(bool),
-    /// The game menu's switch character / logout (social::answer sends it).
+    /// The game menu's switch character / logout (logout::dialog asks first).
     Logout,
+    /// logout::WINDOW's buttons: confirm (true) or cancel.
+    LogoutAnswer(bool),
     /// A talent card of skilltalentswindow: buy one rank (spells::apply_drop sends it).
     Talent(String),
     /// The travel map's destination (social::answer sends it).
@@ -329,6 +333,9 @@ fn action(window: &str, w: &Widget) -> Action {
         return ["Map", "Region", "Party", "Guild", "Whisper"].iter()
             .position(|c| w.event.strip_prefix("SelectChannel") == Some(c))
             .map_or(Action::Unavailable, |i| Action::ChatChannel(i as u8));
+    }
+    if window == logout::WINDOW {
+        return match w.event.as_str() { "confirm" => Action::LogoutAnswer(true), "cancel" => Action::LogoutAnswer(false), _ => Action::Unavailable };
     }
     if window == items::DESTROY_DIALOG {
         return match w.event.as_str() { "confirm" => Action::Destroy(true), "cancel" => Action::Destroy(false), _ => Action::Unavailable };
@@ -454,6 +461,8 @@ pub(super) struct WindowControls {
     spells: spells::Model,
     chat_compact: bool,
     chat_channels: [bool; 5],
+    /// logout::WINDOW waiting for its countdown.
+    waiting: bool,
 }
 
 impl WindowControls {
@@ -475,7 +484,7 @@ impl WindowControls {
                     .filter_map(|s| s.state.as_deref().and_then(State::parse)).fold(0, |bits, state| bits | state.bit()),
             }).collect();
         let mut controls = Self { map_mode: local_map::MapMode::Compact, buttons, regions: Vec::new(), drag_handle: DragHandle::from_layout(layout), inventory: 0, character: 0, bag: 0, bag_pages: 8, premium_bag: false, overflow_page: 0, overflow_pages: 1, ingredient: 0, rarity: 1, locked: false, hovered: None, pressed: None,
-            pages: HashMap::new(), toggles: default(), open_windows: Vec::new(), entries: HashMap::new(), spells: default(), chat_compact: false, chat_channels: [false; 5] };
+            pages: HashMap::new(), toggles: default(), open_windows: Vec::new(), entries: HashMap::new(), spells: default(), chat_compact: false, chat_channels: [false; 5], waiting: false };
         // The chat's entry starts empty, not with its "Enter text" sample.
         // Start unobtrusively at login; screenshots can opt into expanded mode.
         if layout.window == CHAT_WINDOW {
@@ -582,6 +591,8 @@ impl WindowControls {
             Action::Bag(page) => page < self.bag_pages,
             Action::Page(-1) => self.bag == items::OVERFLOW && self.overflow_page > 0,
             Action::Page(1) => self.bag == items::OVERFLOW && self.overflow_page + 1 < self.overflow_pages,
+            // Counting down, the dialog's confirm is greyed (its cancel stays).
+            Action::LogoutAnswer(true) => !self.waiting,
             _ => true,
         }
     }
@@ -660,12 +671,23 @@ pub(super) struct Pointer {
     focus: Option<(Entity, String)>,
     spell_drag: Option<spells::DragSpell>,
     spell_drop: Option<spells::DropSpell>,
+    /// A Collector's Bag sticker being dragged, and the shortcut dropped on a quick
+    /// slot (kind 2 + sticker id, or kind 1 + item template; slot), for
+    /// stickers::apply_drop.
+    sticker_drag: Option<stickers::StickerDrag>,
+    sticker_drop: Option<(i32, String, usize)>,
+    /// A sticker or item shortcut dragged from a quick slot: onto another slot, or
+    /// off the bar (None), for stickers::apply_drop.
+    slot_move: Option<(usize, Option<usize>)>,
+    /// A window to toggle (the Universal Map's travel map), for keyboard.
+    open_window: Option<&'static str>,
     item_command: Option<i32>,
     /// The destroy dialog's answer, for items::input.
     destroy: Option<bool>,
     slider: Option<settings::SliderDrag>,
-    /// The game menu's logout, for social::answer.
+    /// The game menu's logout, and its dialog's answer, for logout::dialog.
     logout: bool,
+    logout_answer: Option<bool>,
     /// A talent to buy a rank of, and a (preset, category) to switch to, for
     /// spells::apply_drop.
     talent: Option<String>,
@@ -689,7 +711,7 @@ impl Pointer {
 
     /// The (bar, slot) a spell is being dragged from (spells::DragSpell::lifted).
     pub(super) fn lifted_slot(&self) -> Option<(usize, usize)> {
-        self.spell_drag.as_ref().and_then(|d| d.lifted())
+        self.spell_drag.as_ref().and_then(|d| d.lifted()).or_else(|| self.sticker_drag.as_ref().and_then(|d| d.lifted()))
     }
 }
 
@@ -816,6 +838,7 @@ fn toggle(name: &str, windows: &mut Windows) {
 pub(super) fn keyboard(keys: Res<ButtonInput<KeyCode>>, mut windows: Windows, mut pointer: ResMut<Pointer>, mut items: ResMut<items::Interaction>,
     cameras: Query<Has<crate::diagnostics::debug::DetachedCamera>, With<crate::FreeCamera>>, mut players: Query<&mut crate::network::net::LocalPlayer>, mut dialogue: ResMut<crate::gameplay::dialogue::Dialogue>,
     mut settings: ResMut<settings::Settings>) {
+    if let Some(name) = pointer.open_window.take() { toggle(name, &mut windows); }
     if settings.keyboard(&keys) { return; }
     if keys.just_pressed(KeyCode::Escape) && items.cancel_drag() { pointer.down = None; return; }
     if keys.just_pressed(KeyCode::Escape) && pointer.spell_drag.take().is_some() {
@@ -953,7 +976,7 @@ pub(super) fn interact(
     mut settings: ResMut<settings::Settings>,
     mut hotbar: ResMut<hotbar::Hotbar>,
     mut audio: Option<ResMut<crate::audio::AudioRequests>>,
-    (mut quest_ui, mut party): (ResMut<crate::gameplay::quests::QuestUi>, ResMut<party::Party>),
+    (mut quest_ui, mut party, views): (ResMut<crate::gameplay::quests::QuestUi>, ResMut<party::Party>, Res<systems::Views>),
 ) {
     let Ok(mut window) = primary.single_mut() else { return };
     let blocked = panels.iter().any(|(cursor, visible)| visible.get() && cursor.cursor_over());
@@ -1041,6 +1064,9 @@ pub(super) fn interact(
     if spells::drag(&mut pointer, &windows, &mouse, hit, top.map(|(e, _, _)| e), point, window.focused && !blocked && modal.is_none()) {
         clicked = None;
     }
+    if stickers::drag(&mut pointer, &windows, &views, &mouse, hit, top.map(|(e, _, _)| e), point, window.focused && !blocked && modal.is_none()) {
+        clicked = None;
+    }
     if settings::drag_slider(&mut pointer, &windows, &mouse, point, width, window.focused && !blocked, &mut settings) {
         clicked = None;
     }
@@ -1086,6 +1112,7 @@ pub(super) fn interact(
         Action::Item(_) | Action::SplitSlider => {},
         Action::Split(delta) => pointer.item_command = Some(delta),
         Action::Destroy(confirm) => pointer.destroy = Some(confirm),
+        Action::LogoutAnswer(answer) => pointer.logout_answer = Some(answer),
         Action::Close => *visibility = Visibility::Hidden,
         Action::Inventory(page) => controls.inventory = page,
         Action::Character(page) => controls.character = page,
@@ -1450,7 +1477,7 @@ mod tests {
     #[test]
     fn dragging_a_window_moves_its_gauge_clip_without_changing_the_fill() {
         let mut app = App::new();
-        app.init_resource::<Figures>().init_resource::<party::Party>().init_resource::<quests::Quests>().init_resource::<crate::gameplay::quests::QuestUi>()
+        app.init_resource::<Figures>().init_resource::<party::Party>().init_resource::<quests::Quests>().init_resource::<crate::gameplay::quests::QuestUi>().init_resource::<crate::ui::controls::systems::Views>()
             .init_resource::<crate::actors::monsters::HoverInfo>()
             .init_resource::<Screen>()
             .init_resource::<Assets<UiMaterial>>()
@@ -1486,7 +1513,7 @@ mod tests {
             .init_resource::<crate::gameplay::dialogue::Dialogue>()
             .init_resource::<crate::network::net::RespawnChoice>()
             .init_resource::<local_map::MapSettings>()
-            .init_resource::<crate::gameplay::quests::QuestUi>()
+            .init_resource::<crate::gameplay::quests::QuestUi>().init_resource::<crate::ui::controls::systems::Views>()
             .init_resource::<party::Party>()
             .add_systems(Update, (sync_chat, keyboard, interact, edit_text, order_windows, paint).chain());
         let primary = app.world_mut().spawn((Window { focused: true, resolution: (1024, 768).into(), ..default() }, PrimaryWindow)).id();

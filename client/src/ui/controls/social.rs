@@ -593,12 +593,6 @@ pub(in crate::ui) fn answer(
         });
     }
     for line in std::mem::take(&mut net.social_notes) { chat.push(Kind::System, line); }
-    // The game menu's switch character: the server's only logout moves us to the
-    // character screen, after a countdown outside towns (PlayerLogoutInfo).
-    if std::mem::take(&mut pointer.logout) {
-        net.send(&ClientCommand::Logout(dsor_proto::commands::player::Logout { cancel: false, plain: false }));
-        chat.push(Kind::System, "Returning to the character screen...".into());
-    }
     // The travel map's destination: the server moves us when the map is discovered.
     if let Some(map) = pointer.travel.take() {
         net.send(&ClientCommand::Travel(dsor_proto::commands::player::Travel::to_map(&map)));

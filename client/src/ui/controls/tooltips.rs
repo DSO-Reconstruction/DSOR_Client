@@ -58,11 +58,16 @@ pub(super) fn clean_text(raw: &str) -> String {
 }
 
 #[allow(clippy::too_many_arguments)]
+/// One-line tooltips (a bar's "58832 / 58832 Health Points", a button's name)
+/// at 0.62 of the card's text size: measured on the user's release261_192 shot
+/// beside ours (against the bar's width), 2026-10-24 ("its so big").
+const COMPACT_TEXT: f32 = 0.62;
+
 pub(in crate::ui) fn overlay(mut commands: Commands, windows: Query<(&Window2018, &WindowControls, &Visibility, &Transform), Without<Tooltip>>,
     primary: Query<&Window, With<PrimaryWindow>>, screen: Res<Screen>, settings: Res<settings::Settings>,
     (pointer,keys,figures,shown):(Res<Pointer>,Res<ButtonInput<KeyCode>>,Res<Figures>,Res<currency::Shown>),
     net: Option<NonSend<crate::network::net::Net>>, hotbar: Res<hotbar::Hotbar>,
-    (data, catalogs, dialogue): (Res<items::Data>, Res<Assets<items::Catalog>>, Res<dialogue::Presentation>), layouts: Res<Assets<Layout>>, loaded: Res<Loaded>,
+    (data, catalogs, dialogue, views): (Res<items::Data>, Res<Assets<items::Catalog>>, Res<dialogue::Presentation>, Res<super::systems::Views>), layouts: Res<Assets<Layout>>, loaded: Res<Loaded>,
     (skill_tables, status_bar, status_catalogs, status_slots): (Res<Assets<crate::gameplay::skills::SkillTable>>,
         Res<effects::StatusBar>, Res<Assets<effects::Catalog>>, Query<&effects::EffectSlot>), assets: Res<AssetServer>,
     (old, mut transforms): (Query<Entity, With<Tooltip>>, Query<&mut Transform, With<Tooltip>>),
@@ -155,6 +160,11 @@ pub(in crate::ui) fn overlay(mut commands: Commands, windows: Query<(&Window2018
                 Action::QuestCompact(compact) => heading = if *compact { "Hide the objectives" } else { "Show the objectives" }.into(),
                 Action::PartyCompact(compact) => heading = if *compact { "Hide the group" } else { "Show the group" }.into(),
                 Action::QuestTrack(delta) => heading = if *delta < 0 { "Previous quest" } else { "Next quest" }.into(),
+                // A sticker: its item's card, as the original's.
+                Action::System(super::systems::Request::Pick(id, _)) if catalog.is_some() && views.album.sticker(id).is_some_and(|s| !s.template.is_empty()) => {
+                    let template = &views.album.sticker(id).unwrap().template;
+                    detail = Some(items::sticker_card(catalog.unwrap(), layouts.get(&data.tooltip), template));
+                }
                 Action::System(request) => match super::systems::tooltip(request) {
                     Some((title, text)) => { heading = title.into(); body = text; }
                     None => return,
@@ -213,7 +223,7 @@ pub(in crate::ui) fn overlay(mut commands: Commands, windows: Query<(&Window2018
                 anchor = Some(rect);
                 above = true;
             // Non-button gauges and currency amounts also explain themselves.
-            } else if let Some((w,_,_,tf)) = windows.iter().filter(|(_,c,v,tf)| **v != Visibility::Hidden && c.covers(p-window_offset(tf),screen.width))
+            } else if let Some((w,wc,_,tf)) = windows.iter().filter(|(_,c,v,tf)| **v != Visibility::Hidden && c.covers(p-window_offset(tf),screen.width))
                 .max_by(|a,b|a.3.translation.z.total_cmp(&b.3.translation.z)) {
                 if let Some(layout) = loaded.layouts.iter().filter_map(|(h,_,_)| layouts.get(h)).find(|l|l.window==w.0) {
                     // The currency bar as drawn in game (its layout keeps other money displays).
@@ -221,8 +231,17 @@ pub(in crate::ui) fn overlay(mut commands: Commands, windows: Query<(&Window2018
                     for widget in layout.widgets.iter().rev().filter(|x| drawn(x) && contains(x.k,x.rect,p-window_offset(tf),screen.width)) {
                         let tip = if w.0 == currency::BAR { currency::tip(&widget.id, &figures.wallet) }
                         else if widget.id.contains("andermant") { Some("Andermant".into()) } else if widget.id.contains("VirtualCurrency") { Some("Coins: 100 copper = 1 silver; 100 silver = 1 gold".into()) }
-                        else if widget.id.contains("bottombar_xp_bar") { Some("Experience: earn experience to level up".into()) } else if widget.id.contains("bottombar_wisdom_bar") { Some("Ancient Wisdom".into()) }
-                        else { match gauge_of(&widget.id) { Some(Gauge::Health | Gauge::HealthBar) => Some("Health".into()), Some(Gauge::Resource | Gauge::ResourceBar) => Some("Skill resource".into()), _ => None } };
+                        // The bars' own lines (gui.window bottomBarXp, bottomBarHealth,
+                        // bottomBarRage / Mana / Stamina / MechanicResource).
+                        // FAILURE (2026-10-24): "Health", "Experience: earn experience to
+                        //   level up" without the numbers (the user's shots beside the original's).
+                        else if widget.id.contains("bottombar_xp_bar") { Some(figures.xp_points.map_or_else(|| "Experience points".to_owned(), |(n, of)| format!("{n} / {of} Experience points"))) }
+                        else if widget.id.contains("bottombar_wisdom_bar") { Some("Ancient Wisdom".into()) }
+                        else { match gauge_of(&widget.id) {
+                            Some(Gauge::Health | Gauge::HealthBar) => Some(format!("{:.0} / {:.0} Health Points", figures.health.0, figures.health.1)),
+                            Some(Gauge::Resource | Gauge::ResourceBar) => Some(format!("{:.0} / {:.0} {}", figures.resource.0, figures.resource.1,
+                                ["Rage points", "Mana points", "concentration", "Steam"][wc.spells.class.min(3) as usize])),
+                            _ => None } };
                         if let Some(tip) = tip {
                             content=Some((tip,String::new(),None));
                             let [l,t,r,b] = widget.rect;
@@ -238,12 +257,16 @@ pub(in crate::ui) fn overlay(mut commands: Commands, windows: Query<(&Window2018
     let compact = detail.is_none() && content.as_ref().is_some_and(|(_,_,icon)| icon.is_none());
     let card = detail.or_else(|| content.map(|(heading,body,icon)| {
         let mut card = if compact {
-            let width = heading.lines().chain(body.lines()).map(|s| crate::network::chat::text_width(s,12.0))
-                .fold(0.0,f32::max).ceil()+32.0;
-            Card::new(width.clamp(70.0,260.0),template)
+            // Sized to its text at the size it is drawn.
+            let mut card = Card::new(260.0,template);
+            card.shrink(COMPACT_TEXT);
+            let width = heading.lines().chain(body.lines()).map(|s| crate::network::chat::text_width(s,card.text_size()))
+                .fold(0.0,f32::max).ceil()+28.0;
+            card.width = width.clamp(48.0,260.0);
+            card
         } else { Card::new(320.0,template) };
         if compact {
-            card.y = 12.0;
+            card.y = 9.0;
             card.centered(&heading,WHITE,false);
             if !body.is_empty() { card.centered(&body,if body.starts_with("(Press ") || body.starts_with("Press ") { Color::srgb(1.0,0.9,0.0) } else { WHITE },false); }
             card.y -= 4.0;

@@ -84,6 +84,14 @@ pub(super) fn essence(inventory: &InventoryState, index: usize) -> Option<&ItemI
     inventory.at(Place::Equipment(if index == PRIMARY_ESSENCE { 35 } else { 34 }))
 }
 
+/// A sticker shortcut's background (its rarity's or its icon configuration's),
+/// drawn under its picture as the Collector's Bag draws it; the original's slot
+/// shows the sticker's whole picture (the user's release261_192 bar, a snowman).
+pub(in crate::ui) fn backdrop(index: usize, bar: usize, net: Option<&crate::network::net::Net>, catalog: Option<&items::Catalog>) -> Option<String> {
+    let s = net.and_then(|n| slot(n, bar, index)).filter(|s| s.kind == 2)?;
+    catalog?.icon(s.id.as_deref()?, None).1.map(str::to_owned)
+}
+
 /// A render key includes amount, so decrements and emptied stacks redraw as well.
 pub(in crate::ui) fn appearance(index: usize, bar: usize, net: Option<&crate::network::net::Net>, figures: &Figures,
     catalog: Option<&items::Catalog>, skills: &SkillIcons) -> Option<(String, u32)> {
@@ -111,7 +119,8 @@ pub(in crate::ui) fn appearance(index: usize, bar: usize, net: Option<&crate::ne
 }
 
 pub(in crate::ui) fn input(mut bar: ResMut<Hotbar>, keys: Res<ButtonInput<KeyCode>>, settings: Res<settings::Settings>,
-    mut pointer: ResMut<Pointer>, windows: Query<(&Window2018, &Visibility)>, mut clicks: ResMut<SkillClicks>, net: Option<NonSendMut<crate::network::net::Net>>) {
+    mut pointer: ResMut<Pointer>, windows: Query<(&Window2018, &Visibility)>, mut clicks: ResMut<SkillClicks>, net: Option<NonSendMut<crate::network::net::Net>>,
+    (data, catalogs): (Res<items::Data>, Res<Assets<items::Catalog>>)) {
     let Some(mut net) = net else { return; };
     let blocked = pointer.focus.is_some() || settings.open || windows.iter().any(|(w,v)| *v != Visibility::Hidden && matches!(w.0.as_str(), "gamemenu" | "unstackwindow"));
     if blocked { bar.change = 0; bar.swap_essence = false; clicks.0 = None; return; }
@@ -136,7 +145,11 @@ pub(in crate::ui) fn input(mut bar: ResMut<Hotbar>, keys: Res<ButtonInput<KeyCod
     if let Some(index) = requested {
         if index >= PRIMARY_ESSENCE { clicks.0 = None; return; }
         if let Some(s) = slot(&net, bar.active, index) {
+            // The Universal Map's slot opens the travel map, as its right click does.
+            let map = s.kind == 1 && item(s, &net.inventory).zip(catalogs.get(&data.catalog)).is_some_and(|(i, c)| items::travel_map(c, &i.template));
+            if map { pointer.open_window = Some("travelmap"); }
             let command = match s.kind {
+                1 if map => None,
                 1 => item(s, &net.inventory).map(|i| crate::gameplay::inventory::command(i.id, dsor_proto::commands::inventory::Inventory::USE, vec![])),
                 2 => s.id.clone().map(|template| ClientCommand::UseStickerBookItem(UseStickerBookItem { template })),
                 _ => None,

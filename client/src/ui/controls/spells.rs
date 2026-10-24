@@ -210,7 +210,8 @@ pub(in crate::ui) struct SpellOverlay;
 pub(in crate::ui) fn overlay(
     mut commands: Commands, pointer: Res<Pointer>,
     primary: Query<&Window, With<PrimaryWindow>>, screen: Res<Screen>, assets: Res<AssetServer>,
-    old: Query<Entity, With<SpellOverlay>>, mut last: Local<Option<(String, bool, u32)>>,
+    old: Query<Entity, With<SpellOverlay>>, mut last: Local<Option<(String, bool, u32)>>, views: Res<super::systems::Views>,
+    net: Option<NonSend<crate::network::net::Net>>, (data, catalogs): (Res<super::items::Data>, Res<Assets<super::items::Catalog>>),
     mut transforms: Query<&mut Transform, With<SpellOverlay>>,
 ) {
     let window = primary.single().ok();
@@ -218,11 +219,19 @@ pub(in crate::ui) fn overlay(
         .and_then(|w| w.cursor_position().map(|p| p * (BASE_H / w.height())));
     let dragged = pointer.spell_drag.as_ref().filter(|d| d.active).map(|d| &d.spell);
     let description = dragged.map(|s| (s, true));
-    let key = description.map(|(s, available)| (format!("{}:{}", s.id, available), dragged.is_some(), screen.scale.to_bits()));
-    let position = point.map(|p| if dragged.is_some() { p } else { Vec2::new((p.x + 20.0).min(screen.width - 265.0).max(0.0), (p.y + 20.0).min(BASE_H - 75.0)) });
+    // A Collector's Bag sticker dragged to the bar (super::stickers): its icon.
+    let sticker = super::stickers::dragged(&pointer, &views, net.as_deref(), catalogs.get(&data.catalog)).filter(|_| dragged.is_none());
+    let sticker = sticker.as_deref();
+    let key = description.map(|(s, available)| (format!("{}:{}", s.id, available), dragged.is_some(), screen.scale.to_bits()))
+        .or_else(|| sticker.map(|icon| (format!("sticker:{icon}"), true, screen.scale.to_bits())));
+    let position = point.map(|p| if dragged.is_some() || sticker.is_some() { p } else { Vec2::new((p.x + 20.0).min(screen.width - 265.0).max(0.0), (p.y + 20.0).min(BASE_H - 75.0)) });
     if *last != key || point.is_none() {
         for e in &old { commands.entity(e).despawn(); }
         *last = if point.is_some() { key } else { None };
+        if let (Some(icon), Some(p)) = (sticker, position) {
+            commands.spawn((SpellOverlay, Sprite { image: assets.load(icon.to_owned()), custom_size: Some(Vec2::splat(34.0)), ..default() },
+                Transform::from_translation(screen.world(0.0, p.x, p.y).extend(800.0)), RenderLayers::layer(LAYER)));
+        }
         if let (Some((s, available)), Some(p)) = (description, position) {
             let tf = Transform::from_translation(screen.world(0.0, p.x, p.y).extend(800.0));
             if dragged.is_some() {
