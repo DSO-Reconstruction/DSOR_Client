@@ -87,6 +87,8 @@ fn input(
     let typing = ui.as_ref().is_some_and(|u| u.typing);
     if !typing && keys.just_pressed(KeyCode::F8) { preview.open = !preview.open; }
     if !preview.open { wheel.clear(); return; }
+    // Enter: the pick again from its start.
+    if !typing && keys.just_pressed(KeyCode::Enter) { preview.playing = None; }
     if !typing && keys.just_pressed(KeyCode::Home) {
         preview.mode = match preview.mode { Mode::Clips => Mode::Sequences, Mode::Sequences => Mode::Emotes, Mode::Emotes => Mode::Clips };
     }
@@ -199,7 +201,7 @@ fn panel(mut commands: Commands, mut preview: ResMut<Preview>, panels: Query<Ent
         Mode::Clips => format!("Clips {}/{} ({} unused by the classes)\nHome: sequences   F8: close", selected + 1, rows, preview.unused),
         Mode::Sequences => format!("Sequences {}/{} (animation, effects, sounds)\nSet: {}  (Left / Right)\nHome: emotes   F8: close",
             selected + 1, rows, preview.sets.get(preview.set).map_or("-", String::as_str)),
-        Mode::Emotes => format!("Emotes {}/{} (animation, prop, sound)\nHome: clips   F8: close", selected + 1, rows),
+        Mode::Emotes => format!("Emotes {}/{} (animation, prop, sound)\nEnter: again   Home: clips   F8: close", selected + 1, rows),
     };
     commands.spawn((
         Panel, crate::ui::input::BlocksWorldInput,
@@ -272,7 +274,9 @@ fn play(
         anim.replay();
         let sequence = skills.as_ref().and_then(|s| emotes.get(s.emotes())).and_then(|t| t.sequence(&name, &character)).cloned();
         if let Some(seq) = sequence.as_ref().and_then(|n| skills.as_ref().and_then(|s| sequences.get(s.sequences())).and_then(|t| t.0.get(n))) {
-            preview.sequence = Some(crate::gameplay::skills::play(&mut commands, seq.clone(), Some(entity), entity, true));
+            // Once, as in game (Enter plays it again): looped, a new gremlin
+            // came back to our hands after each throw.
+            preview.sequence = Some(crate::gameplay::skills::play(&mut commands, seq.clone(), Some(entity), entity, false));
         }
         info!("previewing emote {name} ({sequence:?})");
         return;

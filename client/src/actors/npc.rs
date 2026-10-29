@@ -296,6 +296,12 @@ struct ModelNpc {
     anim_set: String,
     state: String,
     speed: f32,
+    /// A sequence's model plays its clip once and holds the last pose
+    /// (spawn_sequence_model); level NPCs loop theirs.
+    once: bool,
+    /// When a sequence placed it (Time's seconds): its clip starts that far in
+    /// once the model is in, in step with the sequence that placed it.
+    born: Option<f32>,
 }
 
 /// A whole model a sequence's character track places (CharacterTrackBar
@@ -303,13 +309,13 @@ struct ModelNpc {
 /// meanie_rascal/event_olympia_meanie_rascal_01/event_olympia_throw), playing
 /// that clip. crate::gameplay::skills::play_sequences removes it at the
 /// track's end.
-pub(crate) fn spawn_sequence_model(commands: &mut Commands, assets: &AssetServer, object: &str, speed: f32, transform: Transform) -> Option<Entity> {
+pub(crate) fn spawn_sequence_model(commands: &mut Commands, assets: &AssetServer, object: &str, speed: f32, transform: Transform, now: f32) -> Option<Entity> {
     let mut parts = object.splitn(3, '/');
     let (skeleton, set, clip) = (parts.next()?, parts.next()?, parts.next()?);
     let graphics = format!("characters/{skeleton}");
     let path = crate::rendering::model_variant::path(&graphics, set);
     let e = commands.spawn((Name::new(format!("sequence model {object}")), transform, Visibility::default(),
-        ModelNpc::new(assets, &graphics, set, "", clip, speed))).id();
+        ModelNpc { once: true, born: Some(now), ..ModelNpc::new(assets, &graphics, set, "", clip, speed) })).id();
     commands.spawn((WorldAssetRoot(assets.load(GltfAssetLabel::Scene(0).from_asset(path))), ChildOf(e), Transform::default(), Visibility::default()));
     Some(e)
 }
@@ -322,6 +328,8 @@ impl ModelNpc {
             anim_set: anim_set.to_owned(),
             state: state.to_owned(),
             speed,
+            once: false,
+            born: None,
         }
     }
 }
@@ -677,11 +685,12 @@ fn animate_models(
     library: Option<Res<CharacterLibrary>>,
     tables: Res<Assets<AnimTable>>,
     mut graphs: ResMut<Assets<AnimationGraph>>,
-    (assets, sets, joints, skinned): (
+    (assets, sets, joints, skinned, time): (
         Res<AssetServer>,
         Res<Assets<crate::actors::monsters::ModelSets>>,
         Query<(&Transform, Option<&ChildOf>)>,
         Query<&bevy::mesh::skinning::SkinnedMesh>,
+        Res<Time>,
     ),
 ) {
     for (entity, npc) in &npcs {
@@ -727,7 +736,15 @@ fn animate_models(
         let sound_clips = gltf.named_animations.iter().find(|(_, h)| *h == clip)
             .map(|(name, _)| (node, name.to_string())).into_iter().collect();
         let mut anim = AnimationPlayer::default();
-        anim.play(node).repeat().set_speed(npc.speed);
+        // FAILURE: looped, an emote's thrown gremlin came back to the thrower's
+        //   hands for the rest of the track ("il devrait pas reapparaitre a
+        //   cote de moi").
+        // FAILURE: started once its model had loaded, the gremlin ran behind
+        //   the thrower's own animation.
+        if npc.once {
+            let late = npc.born.map_or(0.0, |born| (time.elapsed_secs() - born).max(0.0) * npc.speed);
+            anim.play(node).set_speed(npc.speed).seek_to(late);
+        } else { anim.play(node).repeat().set_speed(npc.speed); }
         commands.entity(player).insert((AnimationGraphHandle(graphs.add(graph)), anim,
             crate::audio::AnimationAudio::new(entity, &npc.gltf.path().unwrap().path().to_string_lossy(), "", sound_clips),
             crate::rendering::anim_cull::PendingFirstPose::default()));

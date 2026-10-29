@@ -2134,8 +2134,13 @@ pub(crate) fn play_sequences(
                             Transform::from_rotation(entity_rotation(0.0)).to_matrix()
                         } else { Mat4::IDENTITY };
                         let now = bodies.get(p.anchor).map(|t| GlobalTransform::from(*t)).ok().or_else(|| transforms.get(p.anchor).ok().copied());
-                        let world = now.map_or(Mat4::IDENTITY, |g| g.to_matrix()) * base * track_transform(at).to_matrix();
-                        p.spawned[i] = crate::actors::npc::spawn_sequence_model(&mut commands, &assets, object, *speed * p.rate, Transform::from_matrix(world));
+                        // The models face a quarter turn from the effects' frame:
+                        // the thrower's hands hold the gremlin only so turned.
+                        // FAILURE: "y'a un probleme de rotation a 90".
+                        let world = now.map_or(Mat4::IDENTITY, |g| g.to_matrix()) * base * track_transform(at).to_matrix()
+                            * Mat4::from_rotation_y(-std::f32::consts::FRAC_PI_2);
+                        p.spawned[i] = crate::actors::npc::spawn_sequence_model(&mut commands, &assets, object, *speed * p.rate,
+                            Transform::from_matrix(world), time.elapsed_secs());
                     }
                     Track::Phase { .. } | Track::Anim { .. } | Track::Color { .. } | Track::Character { .. } => {}
                 }
