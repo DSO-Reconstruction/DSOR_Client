@@ -2130,19 +2130,13 @@ pub(crate) fn play_sequences(
                     // (A level's decorative sequences have no actor: their
                     // characters come from maps/<map>.deco.json, crate::actors::npc.)
                     Track::Character { object, at, speed, .. } if p.actor.is_some() && !object.starts_with("uniskel") && !object.is_empty() => {
-                        let base = if characters.contains(p.anchor) || remotes.contains(p.anchor) || pets.contains(p.anchor) {
-                            Transform::from_rotation(entity_rotation(0.0)).to_matrix()
-                        } else { Mat4::IDENTITY };
+                        // The character's own frame, offset by the track: its clip
+                        // was animated with the actor's, in the same space (the
+                        // gremlin of the Gremlin Toss lies in the thrower's hands
+                        // only so). Not the effects' frame (entity_rotation): that
+                        // half turn sent it away, "eloigne de ma main".
                         let now = bodies.get(p.anchor).map(|t| GlobalTransform::from(*t)).ok().or_else(|| transforms.get(p.anchor).ok().copied());
-                        // The models stand 135 degrees from the effects' frame,
-                        // fitted on the Gremlin Toss by the user's eye in game.
-                        // UNVERIFIED: why. DSOR_SEQ_MODEL_YAW=<degrees> overrides it
-                        // (trying angles without a rebuild).
-                        // FAILURE: "rotation a 90", "decalage de 45 degres", then
-                        //   "c a 180 degres qu'il faut le mettre" (from -45).
-                        let yaw = std::env::var("DSOR_SEQ_MODEL_YAW").ok().and_then(|v| v.parse::<f32>().ok()).unwrap_or(135.0);
-                        let world = now.map_or(Mat4::IDENTITY, |g| g.to_matrix()) * base * track_transform(at).to_matrix()
-                            * Mat4::from_rotation_y(yaw.to_radians());
+                        let world = now.map_or(Mat4::IDENTITY, |g| g.to_matrix()) * track_transform(at).to_matrix();
                         p.spawned[i] = crate::actors::npc::spawn_sequence_model(&mut commands, &assets, object, *speed * p.rate,
                             Transform::from_matrix(world), time.elapsed_secs());
                     }
