@@ -201,7 +201,17 @@ pub enum Track {
     Sound { #[serde(default)] name: String, #[serde(default = "sound_volume")] volume: f32, start: i32, end: i32 },
     /// CharacterTrackBar: a character a level's sequence places (guards, pigeons),
     /// drawn by crate::actors::npc from maps/<map>.deco.json; nothing for the player.
-    Character { start: i32, end: i32 },
+    Character {
+        /// "<skeleton>/<set>/<clip>" (crate::actors::npc::spawn_sequence_model).
+        #[serde(default)]
+        object: String,
+        #[serde(default = "unit_placement")]
+        at: [f32; 9],
+        #[serde(default = "unit_speed")]
+        speed: f32,
+        start: i32,
+        end: i32,
+    },
     /// ColorShaderParameterTrackBar: a shader colour of the actor (HitColor, the
     /// flash of a hit) while it runs, its alpha x the intensity curve; `default`
     /// once it ends.
@@ -218,6 +228,8 @@ pub enum Track {
 }
 
 fn sound_volume() -> f32 { 100. }
+fn unit_placement() -> [f32; 9] { [0., 0., 0., 0., 0., 0., 1., 1., 1.] }
+fn unit_speed() -> f32 { 1. }
 
 impl Track {
     fn span(&self) -> (i32, i32) {
@@ -229,7 +241,7 @@ impl Track {
             | Track::Shake { start, end, .. }
             | Track::Hide { start, end }
             | Track::Sound { start, end, .. }
-            | Track::Character { start, end }
+            | Track::Character { start, end, .. }
             | Track::Color { start, end, .. } => (*start, *end),
         }
     }
@@ -2110,6 +2122,20 @@ pub(crate) fn play_sequences(
                                 audio.effect(name, position, anchor, e, volume, duration);
                             }
                         });
+                    }
+                    // A model the sequence places (an emote's gremlin), left where
+                    // its anchor stands now, as an unattached effect; a dressed
+                    // character (uniskel) is not drawn yet.
+                    // FAILURE: "gremlin toss ... je vois pas le gremlin spawn".
+                    // (A level's decorative sequences have no actor: their
+                    // characters come from maps/<map>.deco.json, crate::actors::npc.)
+                    Track::Character { object, at, speed, .. } if p.actor.is_some() && !object.starts_with("uniskel") && !object.is_empty() => {
+                        let base = if characters.contains(p.anchor) || remotes.contains(p.anchor) || pets.contains(p.anchor) {
+                            Transform::from_rotation(entity_rotation(0.0)).to_matrix()
+                        } else { Mat4::IDENTITY };
+                        let now = bodies.get(p.anchor).map(|t| GlobalTransform::from(*t)).ok().or_else(|| transforms.get(p.anchor).ok().copied());
+                        let world = now.map_or(Mat4::IDENTITY, |g| g.to_matrix()) * base * track_transform(at).to_matrix();
+                        p.spawned[i] = crate::actors::npc::spawn_sequence_model(&mut commands, &assets, object, *speed * p.rate, Transform::from_matrix(world));
                     }
                     Track::Phase { .. } | Track::Anim { .. } | Track::Color { .. } | Track::Character { .. } => {}
                 }

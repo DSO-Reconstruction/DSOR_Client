@@ -298,6 +298,22 @@ struct ModelNpc {
     speed: f32,
 }
 
+/// A whole model a sequence's character track places (CharacterTrackBar
+/// "<skeleton>/<set>/<clip>": the gremlin of the Gremlin Toss emote,
+/// meanie_rascal/event_olympia_meanie_rascal_01/event_olympia_throw), playing
+/// that clip. crate::gameplay::skills::play_sequences removes it at the
+/// track's end.
+pub(crate) fn spawn_sequence_model(commands: &mut Commands, assets: &AssetServer, object: &str, speed: f32, transform: Transform) -> Option<Entity> {
+    let mut parts = object.splitn(3, '/');
+    let (skeleton, set, clip) = (parts.next()?, parts.next()?, parts.next()?);
+    let graphics = format!("characters/{skeleton}");
+    let path = crate::rendering::model_variant::path(&graphics, set);
+    let e = commands.spawn((Name::new(format!("sequence model {object}")), transform, Visibility::default(),
+        ModelNpc::new(assets, &graphics, set, "", clip, speed))).id();
+    commands.spawn((WorldAssetRoot(assets.load(GltfAssetLabel::Scene(0).from_asset(path))), ChildOf(e), Transform::default(), Visibility::default()));
+    Some(e)
+}
+
 impl ModelNpc {
     fn new(assets: &AssetServer, graphics: &str, set: &str, anim_set: &str, state: &str, speed: f32) -> Self {
         Self {
@@ -695,6 +711,8 @@ fn animate_models(
             .and_then(|t| t.0.get(&npc.anim_set))
             .and_then(|set| set.get(&npc.state))
             .and_then(|clip| gltf.named_animations.get(clip.as_str()));
+        // A sequence's model names its clip itself (spawn_sequence_model).
+        let from_table = from_table.or_else(|| npc.anim_set.is_empty().then(|| gltf.named_animations.get(npc.state.as_str())).flatten());
         let clip = from_table.or_else(|| {
             let mut names: Vec<&str> = gltf.named_animations.keys().map(|k| k.as_ref()).collect();
             names.sort();
