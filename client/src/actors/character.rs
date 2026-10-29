@@ -596,6 +596,9 @@ pub struct Character {
     /// the character's own -- its Idle / Run clips have rider twins of the same
     /// name in the uniskel skeletons (mount_idle_polarbear_01-loop...).
     pub(crate) riding: Option<String>,
+    /// An animation set to wear for the preview's sequences (anim_preview):
+    /// over the riding and the own one.
+    preview_set: Option<String>,
 }
 
 #[derive(Clone)]
@@ -750,7 +753,7 @@ pub(crate) fn attach_character(commands: &mut Commands, entity: Entity, desc: Ch
     let displayed_set = desc.animation_set();
     commands.entity(entity).insert(Character {
         desc, built: false, bones: None, pending_parts: Vec::new(), generation: 0,
-        skeleton: None, displayed_set, drawn_parts: Vec::new(), pending_outfit: None, riding: None,
+        skeleton: None, displayed_set, drawn_parts: Vec::new(), pending_outfit: None, riding: None, preview_set: None,
     });
 }
 
@@ -1113,7 +1116,7 @@ fn update_animation_sets(
 ) {
     let Some(library) = library else { return };
     for (entity, character, mut anim) in &mut characters {
-        let set = character.riding.as_ref().unwrap_or(&character.displayed_set);
+        let set = character.preview_set.as_ref().or(character.riding.as_ref()).unwrap_or(&character.displayed_set);
         if anim.set.as_ref() == Some(set) { continue; }
         let Some(player) = anim.player else { continue };
         let Ok(handle) = players.get(player) else { continue };
