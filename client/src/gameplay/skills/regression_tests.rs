@@ -128,7 +128,7 @@ fn casting_app(class: u8) -> (App, Entity) {
     })).unwrap();
     let skills = app.world_mut().resource_mut::<Assets<SkillTable>>().add(SkillTable([(1, skill)].into_iter().collect()));
     let sequences = app.world_mut().resource_mut::<Assets<SequenceTable>>().add(SequenceTable(default()));
-    app.insert_resource(SkillData { skills, sequences, status: default(), by_id: [("repeat_attack".into(), 1)].into_iter().collect() });
+    app.insert_resource(SkillData { skills, sequences, status: default(), emotes: default(), by_id: [("repeat_attack".into(), 1)].into_iter().collect() });
     {
         let mut net = app.world_mut().non_send_mut::<Net>();
         net.bar[1] = Some("repeat_attack".into());

@@ -254,7 +254,7 @@ impl CharacterDesc {
     pub(crate) fn class_name(&self) -> &'static str {
         CLASSES.get(self.class as usize).copied().unwrap_or("warrior")
     }
-    fn gender_name(&self) -> &'static str {
+    pub(crate) fn gender_name(&self) -> &'static str {
         if self.gender == 1 { "female" } else { "male" }
     }
     /// "<class>_<gender>" or "<class>_<gender>_<ethnicity>": the body set's stem.

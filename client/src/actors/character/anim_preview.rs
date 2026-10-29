@@ -2,18 +2,21 @@
 //!   - Clips: our skeleton's (characters/<skeleton>/__animations.glb), those
 //!     no player animation set uses first (bosses, NPCs, mounts, emotes),
 //!     looping, bare.
-//!   - Sequences (Home switches): skills/sequences.json's with an animation,
+//!   - Sequences (Home cycles Clips, Sequences, Emotes): skills/sequences.json's with an animation,
 //!     played whole -- their effects, lights, sounds and shakes -- in an
 //!     animation set worn for it (its states are the set's: a boss sequence's
 //!     Skill08_execute is gameentry_boss_grimmag's clip, not our class's). The
 //!     set is guessed from the sequence's name; Left / Right change it.
+//!   - Emotes: an emote played as the game does -- its animation, and its
+//!     sequence for our class and gender (emotes.json: the vuvuzela in hand,
+//!     its sound).
 //! Picking: a click on a row, the wheel over the list, or Up / Down (Shift:
 //! ten at a time).
 //! FAILURE: "tu peux me faire un menu rapidement pour que je puisse les
 //!   preview sur mon charactere?"; then "y'a des FX ou des props qui sont pas
 //!   affiches" (a clip alone has none).
 use super::*;
-use crate::gameplay::skills::{SequencePlayer, SequenceTable, SkillData, Track};
+use crate::gameplay::skills::{EmoteTable, SequencePlayer, SequenceTable, SkillData, Track};
 use bevy::input::mouse::MouseWheel;
 
 /// On our character while a bare clip plays: drive_animations leaves it.
@@ -29,7 +32,7 @@ struct Row(usize);
 const ROWS: usize = 24;
 
 #[derive(Default, PartialEq, Clone, Copy)]
-enum Mode { #[default] Clips, Sequences }
+enum Mode { #[default] Clips, Sequences, Emotes }
 
 #[derive(Resource, Default)]
 struct Preview {
@@ -43,7 +46,9 @@ struct Preview {
     sequences: Vec<String>,
     sets: Vec<String>,
     set: usize,
-    selected: [usize; 2],
+    /// The emotes (emotes.json's names).
+    emotes: Vec<String>,
+    selected: [usize; 3],
     /// What the panel shows (first row, selected, open, mode, set).
     shown: Option<(usize, usize, bool, u8, usize)>,
     /// What plays: the mode, its clip or sequence, the set.
@@ -56,7 +61,9 @@ struct Preview {
 }
 
 impl Preview {
-    fn rows(&self) -> &[String] { if self.mode == Mode::Clips { &self.clips } else { &self.sequences } }
+    fn rows(&self) -> &[String] {
+        match self.mode { Mode::Clips => &self.clips, Mode::Sequences => &self.sequences, Mode::Emotes => &self.emotes }
+    }
     fn index(&self) -> usize { self.selected[self.mode as usize] }
 }
 
@@ -81,7 +88,7 @@ fn input(
     if !typing && keys.just_pressed(KeyCode::F8) { preview.open = !preview.open; }
     if !preview.open { wheel.clear(); return; }
     if !typing && keys.just_pressed(KeyCode::Home) {
-        preview.mode = if preview.mode == Mode::Clips { Mode::Sequences } else { Mode::Clips };
+        preview.mode = match preview.mode { Mode::Clips => Mode::Sequences, Mode::Sequences => Mode::Emotes, Mode::Emotes => Mode::Clips };
     }
     let sets = preview.sets.len().max(1) as i32;
     if !typing && keys.just_pressed(KeyCode::ArrowRight) { preview.set = (preview.set as i32 + 1).rem_euclid(sets) as usize; }
@@ -126,10 +133,21 @@ fn list(
     gltfs: Res<Assets<Gltf>>,
     tables: Res<Assets<AnimTable>>,
     skills: Option<Res<SkillData>>,
-    sequences: Res<Assets<SequenceTable>>,
+    (sequences, emotes): (Res<Assets<SequenceTable>>, Res<Assets<EmoteTable>>),
     local: Query<&Character, With<crate::network::net::LocalPlayer>>,
 ) {
     if !preview.open { return; }
+    if preview.emotes.is_empty() {
+        if let Some(table) = skills.as_ref().and_then(|s| emotes.get(s.emotes())) {
+            let mut names: Vec<String> = table.0.keys().cloned().collect();
+            names.sort();
+            if let Some(i) = std::env::var("DSOR_PREVIEW").ok().and_then(|n| names.iter().position(|s| *s == n)) {
+                preview.mode = Mode::Emotes;
+                preview.selected[Mode::Emotes as usize] = i;
+            }
+            preview.emotes = names;
+        }
+    }
     if preview.sequences.is_empty() {
         if let Some(table) = skills.as_ref().and_then(|s| sequences.get(s.sequences())) {
             let mut names: Vec<String> = table.0.iter()
@@ -179,8 +197,9 @@ fn panel(mut commands: Commands, mut preview: ResMut<Preview>, panels: Query<Ent
     let font = |size: f32| TextFont { font_size: bevy::text::FontSize::Px(size), ..default() };
     let heading = match preview.mode {
         Mode::Clips => format!("Clips {}/{} ({} unused by the classes)\nHome: sequences   F8: close", selected + 1, rows, preview.unused),
-        Mode::Sequences => format!("Sequences {}/{} (animation, effects, sounds)\nSet: {}  (Left / Right)\nHome: clips   F8: close",
+        Mode::Sequences => format!("Sequences {}/{} (animation, effects, sounds)\nSet: {}  (Left / Right)\nHome: emotes   F8: close",
             selected + 1, rows, preview.sets.get(preview.set).map_or("-", String::as_str)),
+        Mode::Emotes => format!("Emotes {}/{} (animation, prop, sound)\nHome: clips   F8: close", selected + 1, rows),
     };
     commands.spawn((
         Panel, crate::ui::input::BlocksWorldInput,
@@ -213,7 +232,7 @@ fn play(
     mut graphs: ResMut<Assets<AnimationGraph>>,
     mut local: Query<(Entity, &mut Character, &mut CharacterAnim), With<crate::network::net::LocalPlayer>>,
     mut players: Query<(&mut AnimationPlayer, &AnimationGraphHandle)>,
-    (skills, sequences, mut sequence_players): (Option<Res<SkillData>>, Res<Assets<SequenceTable>>, Query<&mut SequencePlayer>),
+    (skills, sequences, emotes, mut sequence_players): (Option<Res<SkillData>>, Res<Assets<SequenceTable>>, Res<Assets<EmoteTable>>, Query<&mut SequencePlayer>),
 ) {
     let Ok((entity, mut character, mut anim)) = local.single_mut() else { return };
     // A sequence waits for its set's clips (update_animation_sets binds them).
@@ -245,6 +264,17 @@ fn play(
     if mode == Mode::Sequences as u8 {
         character.preview_set = preview.sets.get(set).cloned();
         preview.pending = Some(name);
+        return;
+    }
+    // An emote: its animation state in our own set, and our class's sequence.
+    if mode == Mode::Emotes as u8 {
+        anim.state = AnimState::Named(name.clone());
+        anim.replay();
+        let sequence = skills.as_ref().and_then(|s| emotes.get(s.emotes())).and_then(|t| t.sequence(&name, &character)).cloned();
+        if let Some(seq) = sequence.as_ref().and_then(|n| skills.as_ref().and_then(|s| sequences.get(s.sequences())).and_then(|t| t.0.get(n))) {
+            preview.sequence = Some(crate::gameplay::skills::play(&mut commands, seq.clone(), Some(entity), entity, true));
+        }
+        info!("previewing emote {name} ({sequence:?})");
         return;
     }
     let Some((mut player, handle)) = anim.player.and_then(|p| players.get_mut(p).ok()) else { return };

@@ -327,11 +327,29 @@ json_loader!(SkillTableLoader, SkillTable, "skills.json");
 json_loader!(StatusTableLoader, StatusTable, "status_effects.json");
 json_loader!(SequenceTableLoader, SequenceTable, "sequences.json");
 
+/// The emotes' sequences by "<class>_<gender>" (data/tables/emotesequence.xml,
+/// tools/export_skills.py): an emote's status effect starts the sequence
+/// "Emote", the client's cue to look its own up here by the emote's name.
+/// FAILURE: "le vuvuzela j'ai pas l'item dans la main" (no sequence "Emote":
+///   the emote played without its prop and sound).
+#[derive(Asset, TypePath, Deserialize, Debug, Default)]
+#[serde(transparent)]
+pub struct EmoteTable(pub HashMap<String, HashMap<String, String>>);
+json_loader!(EmoteTableLoader, EmoteTable, "emotes.json");
+
+impl EmoteTable {
+    /// An emote's sequence for a character's class and gender.
+    pub(crate) fn sequence(&self, emote: &str, character: &Character) -> Option<&String> {
+        self.0.get(emote)?.get(&format!("{}_{}", character.desc.class_name(), character.desc.gender_name()))
+    }
+}
+
 #[derive(Resource)]
 pub struct SkillData {
     skills: Handle<SkillTable>,
     status: Handle<StatusTable>,
     sequences: Handle<SequenceTable>,
+    emotes: Handle<EmoteTable>,
     /// Skill id -> wire index, built once the table is in.
     by_id: HashMap<String, u32>,
 }
@@ -339,12 +357,16 @@ pub struct SkillData {
 impl SkillData {
     #[cfg(test)]
     pub(crate) fn for_test(sequences: Handle<SequenceTable>) -> Self {
-        Self { skills: default(), status: default(), sequences, by_id: default() }
+        Self { skills: default(), status: default(), sequences, emotes: default(), by_id: default() }
     }
 
     /// Every sequence of the sequencer's data (sequences.json).
     pub(crate) fn sequences(&self) -> &Handle<SequenceTable> {
         &self.sequences
+    }
+    /// The emotes' sequences (emotes.json).
+    pub(crate) fn emotes(&self) -> &Handle<EmoteTable> {
+        &self.emotes
     }
     /// The status effects by wire index (status_effects.json).
     pub(crate) fn status(&self) -> &Handle<StatusTable> {
@@ -579,6 +601,8 @@ impl Plugin for SkillsPlugin {
         app.init_asset::<SkillTable>()
             .init_resource::<SkillCooldowns>()
             .init_asset::<SequenceTable>()
+            .init_asset::<EmoteTable>()
+            .register_asset_loader(EmoteTableLoader)
             .init_asset::<StatusTable>()
             .register_asset_loader(StatusTableLoader)
             .register_asset_loader(SkillTableLoader)
@@ -612,6 +636,7 @@ fn load(mut commands: Commands, assets: Res<AssetServer>) {
         skills: assets.load("skills/skills.json"),
         status: assets.load("skills/status_effects.json"),
         sequences: assets.load("skills/sequences.json"),
+        emotes: assets.load("skills/emotes.json"),
         by_id: HashMap::new(),
     });
 }
@@ -2595,7 +2620,7 @@ fn status_visuals(
     net: Option<NonSendMut<Net>>,
     data: Res<SkillData>,
     statuses: Res<Assets<StatusTable>>,
-    seqs: Res<Assets<SequenceTable>>,
+    (seqs, emotes, characters): (Res<Assets<SequenceTable>>, Res<Assets<EmoteTable>>, Query<&Character>),
     actors: Query<(Entity, Option<&LocalPlayer>, Option<&RemotePlayer>, Option<&crate::actors::npc::Npc>)>,
     mut visuals: Query<(Entity, &mut StatusVisual)>,
     mut players: Query<&mut SequencePlayer>,
@@ -2682,7 +2707,13 @@ fn status_visuals(
             }
         }
         let end = StatusDef::first(&def.done).or_else(|| StatusDef::first(&def.stop)).cloned();
-        let Some(seq) = StatusDef::first(&def.start).or_else(|| StatusDef::first(&def.tick)).and_then(|n| sequences.0.get(n)) else {
+        // "Emote": the holder's own sequence of this emote (EmoteTable).
+        let emote = |n: &String| if n == "Emote" {
+            let character = holder.and_then(|h| characters.get(h).ok());
+            let name = if def.animation.is_empty() { &def.id } else { &def.animation };
+            character.and_then(|c| emotes.get(data.emotes()).and_then(|t| t.sequence(name, c))).cloned().unwrap_or_else(|| n.clone())
+        } else { n.clone() };
+        let Some(seq) = StatusDef::first(&def.start).or_else(|| StatusDef::first(&def.tick)).map(emote).and_then(|n| sequences.0.get(&n)) else {
             // Nothing while it lasts, only its end: skill_grenade_damage_aura (0 s)
             // is the grenade's explosion, dwarf_grenade_explode -- dropped with
             // the effect, the grenade landed without one.
@@ -3300,7 +3331,7 @@ mod bullet_tests {
             })).unwrap();
             let skills = app.world_mut().resource_mut::<Assets<SkillTable>>().add(SkillTable([(1, skill)].into_iter().collect()));
             let sequences = app.world_mut().resource_mut::<Assets<SequenceTable>>().add(SequenceTable(default()));
-            app.insert_resource(SkillData { skills, sequences, status: default(), by_id: default() });
+            app.insert_resource(SkillData { skills, sequences, status: default(), emotes: default(), by_id: default() });
             let stop = Vec3::new(2., 0., 1.);
             let root = app.world_mut().spawn((Transform::default(), CharacterAnim::default(),
                 RemotePlayer { actor: 41, target: stop, last_record: Some((stop, 100)), ..default() })).id();

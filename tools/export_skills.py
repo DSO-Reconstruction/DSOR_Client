@@ -447,6 +447,16 @@ with open(os.path.join(assets, "skills", "sequences.json"), "w") as f:
     json.dump(sequences, f, separators=(",", ":"))
 with open(os.path.join(assets, "skills", "skills.json"), "w") as f:
     json.dump(skills, f, separators=(",", ":"))
+# The emotes' sequences by class and gender (data/tables/emotesequence.xml): an
+# emote's status effect starts the sequence "Emote", which the client resolves
+# here by the emote's name (its prop -- the vuvuzela -- and sound).
+sheet = ET.parse(os.path.join(export, "data", "tables", "emotesequence.xml")).getroot().find("ss:Worksheet", ns)
+rows = sheet.findall(".//ss:Row", ns)
+header = cells(rows[0])
+emotes = {c[0]: {header[i]: c[i] for i in range(1, min(len(c), len(header))) if c[i]}
+          for c in (cells(r) for r in rows[1:]) if c and c[0]}
+with open(os.path.join(assets, "skills", "emotes.json"), "w") as f:
+    json.dump(emotes, f, separators=(",", ":"))
 used = {s for k in skills.values() for m in (k["execute"], k["pre"], k["post"]) for s in m.values()}
 print({"sequences": len(sequences), "skills": len(skills), "mappings": len(mapping),
        "execute sequences missing": len([s for s in used if s not in sequences])})
