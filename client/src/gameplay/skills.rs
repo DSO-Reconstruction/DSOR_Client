@@ -2134,14 +2134,15 @@ pub(crate) fn play_sequences(
                             Transform::from_rotation(entity_rotation(0.0)).to_matrix()
                         } else { Mat4::IDENTITY };
                         let now = bodies.get(p.anchor).map(|t| GlobalTransform::from(*t)).ok().or_else(|| transforms.get(p.anchor).ok().copied());
-                        // The models stand 45 degrees from the effects' frame: so
-                        // turned, the thrown gremlin flies inside the throw's own
-                        // trail (an effect, rightly placed). UNVERIFIED: why; the
-                        // angle is fitted on this emote.
-                        // FAILURE: "y'a un probleme de rotation a 90", then "y'a
-                        //   toujours un decalage de 45 degres".
+                        // The models stand 135 degrees from the effects' frame,
+                        // fitted on the Gremlin Toss by the user's eye in game.
+                        // UNVERIFIED: why. DSOR_SEQ_MODEL_YAW=<degrees> overrides it
+                        // (trying angles without a rebuild).
+                        // FAILURE: "rotation a 90", "decalage de 45 degres", then
+                        //   "c a 180 degres qu'il faut le mettre" (from -45).
+                        let yaw = std::env::var("DSOR_SEQ_MODEL_YAW").ok().and_then(|v| v.parse::<f32>().ok()).unwrap_or(135.0);
                         let world = now.map_or(Mat4::IDENTITY, |g| g.to_matrix()) * base * track_transform(at).to_matrix()
-                            * Mat4::from_rotation_y(-std::f32::consts::FRAC_PI_4);
+                            * Mat4::from_rotation_y(yaw.to_radians());
                         p.spawned[i] = crate::actors::npc::spawn_sequence_model(&mut commands, &assets, object, *speed * p.rate,
                             Transform::from_matrix(world), time.elapsed_secs());
                     }
