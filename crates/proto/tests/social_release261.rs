@@ -114,3 +114,21 @@ fn requests_encode_as_the_server_decodes_them() {
     }
     assert_eq!(seen, 7);
 }
+
+/// An appearance update after the weapon is put away, as DSOR_Server
+/// encode_remote_player_info writes it (a torso, then a torso and a mace).
+/// FAILURE: "je retire mon arme l'autre me voit toujours avec l'arme".
+#[test]
+fn remote_player_info_carries_the_weapon_and_then_its_absence() {
+    let cases = [
+        ("85220000000200000002010000000f0077617272696f725f746f72736f5f78028080000007803bb0b93934b7b92f99342fb6b0b1b2c000200fc000000ff373130f8000200fc4401dd85c9c9a5bdc97cc9a17ddd9585c1bdb8000000000000000190000000115ffc0400140008000064000000ffffffff0000000000000005000200ff0", 1044, 2),
+        ("85220000000100000002010000000f0077617272696f725f746f72736f5f7808803bb0b93934b7b92f99342fbbb2b0b837b7000000000000000032000000022bff808002800100000c8000001fffffffe000000000000000a000401fe0", 739, 1),
+    ];
+    for (hex, bits, slots) in cases {
+        let data: Vec<u8> = (0..hex.len()).step_by(2).map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap()).collect();
+        let commands = decode_message(&data, bits).unwrap();
+        let (ServerCommand::RemotePlayerInfo(info), actor) = &commands[0] else { panic!("{commands:?}") };
+        assert_eq!(*actor, Some(0x20005));
+        assert_eq!(info.equipment.len(), slots, "{:?}", info.equipment);
+    }
+}
