@@ -37,6 +37,7 @@ const COMBAT_IDLE_SECONDS: f32 = 5.0;
 
 #[cfg(test)]
 mod idle_tests;
+pub(crate) mod anim_preview;
 
 const BODY_PARTS: [&str; 12] = [
     "ears", "feet", "hands", "head", "hips", "lowerarms", "lowerlegs", "midbody", "neck",
@@ -688,7 +689,8 @@ impl Plugin for CharacterPlugin {
                 PostUpdate,
                 apply_variations.after(bevy::app::AnimationSystems).before(TransformSystems::Propagate),
             )
-            .add_observer(on_instance_ready);
+            .add_observer(on_instance_ready)
+            .add_plugins(anim_preview::AnimPreviewPlugin);
     }
 }
 
@@ -1472,7 +1474,7 @@ fn track_player_combat(
 pub(crate) fn drive_animations(
     time: Res<Time>,
     mut frame: Local<u32>,
-    mut characters: Query<(Entity, &mut CharacterAnim, &GlobalTransform, &InheritedVisibility, Option<&mut AnimLod>, Option<&crate::screens::selection::Preview>, Option<&crate::actors::npc::NpcVisualPending>, Option<&Character>, Has<RelaxedIdle>)>,
+    mut characters: Query<(Entity, &mut CharacterAnim, &GlobalTransform, &InheritedVisibility, Option<&mut AnimLod>, Option<&crate::screens::selection::Preview>, Option<&crate::actors::npc::NpcVisualPending>, Option<&Character>, Has<RelaxedIdle>), Without<anim_preview::Previewing>>,
     visibility: Option<Res<crate::rendering::anim_cull::AnimationVisibility>>,
     targets: Query<(Entity, &AnimatedBy)>,
     mut commands: Commands,
