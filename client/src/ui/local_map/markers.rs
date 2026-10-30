@@ -74,6 +74,9 @@ impl MapMarkers {
         }
     }
 
+    /// A quest's state in our log (QuestLogInfo / QuestUpdate): 2 closed.
+    pub(crate) fn quest_state(&self, id: &str) -> Option<u8> { self.quests.get(&id.to_lowercase()).copied() }
+
     pub(crate) fn npc_style(&self, actor: u32, icon: &str) -> Option<Style> {
         let Some(info) = self.npcs.get(&actor) else { return Style::authored(icon) };
         if !info.enabled { return None; }

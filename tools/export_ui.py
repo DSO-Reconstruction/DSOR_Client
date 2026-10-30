@@ -223,13 +223,16 @@ def travel_details(loca):
         # (gui.window.dungeonaccess_<key>), the resistances, the possible rewards
         # and the items the travel item's teleport takes (TeleportKeyId).
         access = lambda key: en.get(f"gui.window.dungeonaccess_{key}", "") if key else ""
-        for row, group, difficulty, key, bg, desc, desc2, res, rewards, needs in db.execute(
+        for row, group, difficulty, key, bg, desc, desc2, res, rewards, needs, quest in db.execute(
                 "SELECT Id, AccessGroup, Difficulty, KeyId, BackgroundImage, DescriptionText, DescriptionText2, Resistances,"
-                " RewardItems, TeleportKeyId FROM _Template_MapAccessGroup"):
+                " RewardItems, TeleportKeyId, UnlockingQuest FROM _Template_MapAccessGroup"):
             out[f"access_group:{row}"] = group or ""
             out[f"access_diff:{row}"] = str(int(difficulty or 0))
             if key: out[f"access_key:{row}"] = key
-            for name, value in (("bg", bg), ("desc", access(desc)), ("desc2", access(desc2)), ("res", res), ("rewards", rewards), ("needs", needs)):
+            # UnlockingQuest: the quest whose completion opens the row (DSOR_Server
+            # map_unlocks.map_unlocking_quests refuses the travel before it).
+            for name, value in (("bg", bg), ("desc", access(desc)), ("desc2", access(desc2)), ("res", res), ("rewards", rewards), ("needs", needs),
+                                ("quest", quest)):
                 if value: out[f"access_{name}:{row}"] = value
         for group, level, players in db.execute("SELECT AccessGroup, MapLevel, MaxPlayer FROM _Template_MapTemplate"):
             out[f"access_level:{group}"] = str(int(level or 0))
@@ -239,7 +242,8 @@ def travel_details(loca):
         # MapAccessWidget::SetDifficultyInfoText's icon lines (_Template_DifficultyFactors).
         for row in db.execute("SELECT Id, MonsterDMG, MonsterHP, RMESecondaryMin, RMESecondaryMax, XPGain, VCStackSize FROM _Template_DifficultyFactors"):
             out[f"difficulty_factors:{row[0]}"] = ",".join(repr(float(v or 0)) for v in row[1:])
-        for key in ("possibleRewardsAndRisks", "dungeonPrerequisites", "maxGroupSize", "enterDungeon", "difficultyModifications", "recommendedLevel"):
+        for key in ("possibleRewardsAndRisks", "dungeonPrerequisites", "maxGroupSize", "enterDungeon", "difficultyModifications", "recommendedLevel",
+                    "enterDungeonDisabledTooltip"):
             out[f"access_text:{key}"] = access(key)
         for level, name in db.execute("SELECT Id, Name FROM _Template_MapDifficulty"):
             out[f"difficulty:{level}"] = name or ""

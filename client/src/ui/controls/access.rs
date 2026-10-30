@@ -17,6 +17,12 @@
 //! icons/difficulties_damage ... _items_epic; values _Template_DifficultyFactors,
 //! matching the retail Grimmag Bloodshed screenshot: 1100%, 2500%, 5 - 6, 45,
 //! 1100%, 0/14/54/10%, 600%), else the text list (retail Heredur screenshot).
+//! A row whose UnlockingQuest is not closed in our log names it under the
+//! entry requirements and refuses Enter with the original's
+//! enterDungeonDisabledTooltip (DSOR_Server refuses that travel anyway,
+//! map_unlocks._map_quest_accessible).
+//! FAILURE: "tp bearach ... ca me dit pas pourquoi ca marche pas, juste ca me
+//!   tp pas" (pw012 needs pw010-unlock-pw011-n).
 //! UNVERIFIED: the rule choosing the icon pane (a Parallel World difficulty)
 //!   and hiding the recommended level with it is inferred from two
 //!   screenshots; the key order (KeyId first) likewise; no tooltips; the
@@ -80,6 +86,7 @@ pub(in crate::ui) fn dialog(
     (assets, screen, mouse): (Res<AssetServer>, Res<Screen>, Res<ButtonInput<MouseButton>>),
     (data, catalogs, mut materials, mut meshes): (Res<items::Data>, Res<Assets<items::Catalog>>, ResMut<Assets<UiMaterial>>, ResMut<Assets<Mesh>>),
     (elements, players): (Query<(&Element, &MeshMaterial2d<UiMaterial>)>, Query<&crate::actors::character::Character, With<crate::network::net::LocalPlayer>>),
+    (presentation, dialogue_catalogs, mut refused): (Res<crate::ui::dialogue::Presentation>, Res<Assets<crate::ui::dialogue::Catalog>>, Local<bool>),
     primary: Query<&Window, With<bevy::window::PrimaryWindow>>,
     old: Query<Entity, With<AccessText>>,
     (mut asked, mut shown, mut art): (Local<Option<Asked>>, Local<Option<(usize, usize, u32, u32, bool, u64)>>, Local<Option<Handle<Image>>>),
@@ -94,15 +101,29 @@ pub(in crate::ui) fn dialog(
         let tiers = names.map(|n| n.access_tiers(&row)).unwrap_or_default();
         let picked = tiers.iter().position(|t| t.0 == row).unwrap_or(0);
         *asked = Some(Asked { item, tiers, picked });
+        *refused = false;
     }
+    // The picked row's unlocking quests while none of them is closed.
+    let locked = |a: &Asked, net: &crate::network::net::Net| -> Vec<String> {
+        let Some((row, _, _)) = a.tiers.get(a.picked) else { return Vec::new() };
+        let quests: Vec<String> = names.map(|n| n.access("quest", row)).unwrap_or_default()
+            .split([';', ',']).map(str::trim).filter(|q| !q.is_empty()).map(str::to_owned).collect();
+        if quests.iter().any(|q| net.map_markers.quest_state(q) == Some(2)) { Vec::new() } else { quests }
+    };
     if let Some(yes) = pointer.access_answer.take() {
-        if let Some(a) = asked.take().filter(|_| yes) {
-            if let Some((row, _, _)) = a.tiers.get(a.picked) {
-                net.send(&crate::gameplay::inventory::command(a.item, dsor_proto::commands::inventory::Inventory::USE, vec![]));
-                net.send(&ClientCommand::UseTravelItem(dsor_proto::commands::inventory::UseTravelItem { item: a.item, map: row.clone() }));
+        if yes && asked.as_ref().is_some_and(|a| !locked(a, &net).is_empty()) {
+            // Refused: the window stays and says why.
+            *refused = true;
+            *shown = None;
+        } else {
+            if let Some(a) = asked.take().filter(|_| yes) {
+                if let Some((row, _, _)) = a.tiers.get(a.picked) {
+                    net.send(&crate::gameplay::inventory::command(a.item, dsor_proto::commands::inventory::Inventory::USE, vec![]));
+                    net.send(&ClientCommand::UseTravelItem(dsor_proto::commands::inventory::UseTravelItem { item: a.item, map: row.clone() }));
+                }
             }
+            *asked = None;
         }
-        *asked = None;
     }
     let Some((root, _, _, mut v, tf)) = windows.iter_mut().find(|(_, n, ..)| n.0 == WINDOW) else { return };
     if asked.is_some() && shown.is_some() && *v == Visibility::Hidden { *asked = None; }
@@ -232,6 +253,18 @@ pub(in crate::ui) fn dialog(
     }
     if let Some([l, t, r, _]) = rect("/EntryRequirements/GroupsizeText") {
         let players = text("players", &group_id);
+        // An unlocking quest still open: named in red, and Enter's refusal.
+        let quests = locked(a, &net);
+        if !quests.is_empty() {
+            let catalog = dialogue_catalogs.get(presentation.catalog());
+            let titles: Vec<String> = quests.iter().map(|q| catalog.map_or_else(|| q.clone(), |c| c.title(q))).collect();
+            let mut line = format!("Requires quest: {}", titles.join(", "));
+            if *refused { line.push_str(&format!("\n{}", text("text", "enterDungeonDisabledTooltip"))); }
+            // Under the description (the requirements pane has no room left).
+            if let Some([dl, _, dr, db]) = rect(&format!("{ART}/TextList")) {
+                put(&mut commands, line, Vec2::new(dl, db - 40.0), dr - dl - 16.0, 11.0, Color::srgb(1.0, 0.35, 0.3), false);
+            }
+        }
         if !players.is_empty() && players != "0" { put(&mut commands, text("text", "maxGroupSize").replace("{0:i}", &players), Vec2::new((l + r) * 0.5, t + 32.0), r - l, 12.0, pale, true); }
     }
     let Some(catalog) = catalog else { return };
