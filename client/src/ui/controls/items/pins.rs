@@ -14,7 +14,7 @@ const MOST: usize = 8;
 /// Over the windows and the hover tooltip's 800.
 const PIN_Z: f32 = 820.0;
 /// The close mark, a square at the card's top right (reference pixels).
-const CLOSE: f32 = 18.0;
+const CLOSE: f32 = 22.0;
 
 pub(in crate::ui) struct Pin {
     root: Entity,
@@ -82,10 +82,28 @@ pub(in crate::ui) fn update(
                 crate::ui::input::UiRegions(vec![(0.0, [at.x, at.y, at.x + size.x, at.y + size.y])]),
             )).id();
             card.draw(&mut commands, &assets, &screen, &mut meshes, &mut materials, root, layouts.get(&data.tooltip));
-            commands.spawn((Text2d::new("x"), TextFont { font: assets.load("fonts/tahoma.ttf").into(),
-                font_size: bevy::text::FontSize::Px(14.0 * screen.scale), ..default() }, TextColor(Color::srgb(0.85, 0.75, 0.55)),
-                Anchor::TOP_LEFT, Transform::from_xyz(size.x - CLOSE + 4.0, -2.0, 2.0).with_scale(Vec3::splat(1.0 / screen.scale)),
-                RenderLayers::layer(LAYER), ChildOf(root)));
+            // The windows' own close button (a Close button's normal art,
+            // deco_elemente_5), in the card's top right corner.
+            // FAILURE: "mettre la bonne texture de croix aussi" (a typed "x").
+            // The inventory's (a square red one; some windows have a round one).
+            let mut ordered: Vec<&Layout> = layouts.iter().map(|(_, l)| l).collect();
+            ordered.sort_by_key(|l| l.window != "inventory");
+            let close_art = ordered.into_iter().find_map(|l| {
+                let button = l.widgets.iter().find(|w| w.event == "Close")?;
+                l.widgets.iter().find(|w| w.id == format!("{}/normal", button.id)).and_then(|w| w.art.clone().map(|a| (a, w.rect)))
+            });
+            if let Some((mut art, from)) = close_art {
+                let to = [size.x - CLOSE - 2.0, 2.0, size.x - 2.0, CLOSE + 2.0];
+                for p in art.pos.chunks_exact_mut(2) {
+                    p[0] = to[0] + (p[0] - from[0]) / (from[2] - from[0]) * (to[2] - to[0]);
+                    p[1] = -(to[1] + (p[1] - from[1]) / (from[3] - from[1]) * (to[3] - to[1]));
+                }
+                let atlas = art.tex.as_ref().map(|t| assets.load(t.clone()));
+                let mut run = crate::ui::Run::default();
+                run.push(&art, 0.0);
+                commands.spawn((Mesh2d(meshes.add(run.mesh())), MeshMaterial2d(materials.add(crate::ui::material(atlas))),
+                    Transform::from_xyz(0.0, 0.0, 2.0), RenderLayers::layer(LAYER), ChildOf(root)));
+            }
             pins.cards.push(Pin { root, at, size });
             if pins.cards.len() > MOST {
                 let old = pins.cards.remove(0);

@@ -65,6 +65,26 @@ impl Card {
         }
     }
 
+    /// Dofus's item heading: the item's icon large on the left (its layers:
+    /// rarity background, image, frame), its name to the right in its rarity's
+    /// colour, under it "Level 45 \u{2022} Belt"; a rule below.
+    /// FAILURE: "je veux l'image comme sur dofus le nom a droite, le niveau le
+    ///   type comme sur dofus principalement".
+    pub fn header(&mut self, name: &str, color: Color, icons: &[String], subtitle: &str) {
+        const ICON: f32 = 64.0;
+        let start = self.y;
+        for path in icons {
+            self.parts.push(Part::Icon { path: path.clone(), at: Vec2::new(14.0, start), size: ICON });
+        }
+        let left = if icons.is_empty() { 16.0 } else { 14.0 + ICON + 12.0 };
+        self.y += 6.0;
+        self.paragraph(name, color, self.title, left, false, true);
+        self.y += 2.0;
+        self.paragraph(subtitle, WHITE, self.size, left, false, false);
+        self.y = self.y.max(start + ICON + 4.0);
+        self.rule();
+    }
+
     pub fn text(&mut self, value: &str, color: Color) {
         self.paragraph(value, color, self.size, 16.0, false, false);
     }
@@ -183,7 +203,7 @@ impl Card {
         meshes: &mut Assets<Mesh>, materials: &mut Assets<UiMaterial>, root: Entity, layout: Option<&Layout>) {
         if let Some(layout) = layout { items::frame(commands, assets, meshes, materials, root, layout, self.width, self.height(), self.background); }
         else { background(commands, root, self.width, self.height(), [4.0; 4], self.background); }
-        for part in &self.parts {
+        for (order, part) in self.parts.iter().enumerate() {
             match part {
                 Part::Text { value, at, size, color, italic, bold } => {
                     commands.spawn((Text2d::new(value.clone()), TextFont { font: assets.load("fonts/tahoma.ttf").into(),
@@ -193,8 +213,10 @@ impl Card {
                         Anchor::TOP_LEFT, Transform::from_xyz(at.x, -at.y, 1.0).with_scale(Vec3::splat(1.0 / screen.scale)),
                         RenderLayers::layer(LAYER), ChildOf(root)));
                 }
+                // Layered icons (a header's background, image, frame) stack in
+                // the order they were added.
                 Part::Icon { path, at, size } => { commands.spawn((Sprite { image: assets.load(path.clone()), custom_size: Some(Vec2::splat(*size)), ..default() },
-                    Anchor::TOP_LEFT, Transform::from_xyz(at.x, -at.y, 1.0), RenderLayers::layer(LAYER), ChildOf(root))); }
+                    Anchor::TOP_LEFT, Transform::from_xyz(at.x, -at.y, 1.0 + 0.01 * order as f32), RenderLayers::layer(LAYER), ChildOf(root))); }
                 Part::Art { template, rect } => {
                     let Some(widget) = layout.and_then(|l| l.widgets.iter().find(|w| w.id == format!("Canvas/BGLabel/{template}"))) else { continue; };
                     let Some(mut art) = widget.art.clone() else { continue; };

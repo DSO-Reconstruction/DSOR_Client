@@ -77,7 +77,7 @@ pub(super) fn run(mut commands: Commands, mut replay: Local<Replay>,
             window.resolution.set(width as f32, height as f32);
         }
         if let Some(name) = step.key.as_deref() {
-            if let Some(key) = match name { "Escape" => Some(KeyCode::Escape), "F1" => Some(KeyCode::F1), "V" => Some(KeyCode::KeyV), "I" => Some(KeyCode::KeyI), "C" => Some(KeyCode::KeyC), "Q" => Some(KeyCode::KeyQ), "U" => Some(KeyCode::KeyU), "E" => Some(KeyCode::KeyE), "L" => Some(KeyCode::KeyL), "J" => Some(KeyCode::KeyJ), "F" => Some(KeyCode::KeyF), "9" => Some(KeyCode::Digit9), "S" => Some(KeyCode::KeyS), "N" => Some(KeyCode::KeyN), "F8" => Some(KeyCode::F8), "Down" => Some(KeyCode::ArrowDown), "Tab" => Some(KeyCode::Tab), "Delete" => Some(KeyCode::Delete), _ => None } {
+            if let Some(key) = match name { "Escape" => Some(KeyCode::Escape), "F1" => Some(KeyCode::F1), "V" => Some(KeyCode::KeyV), "I" => Some(KeyCode::KeyI), "C" => Some(KeyCode::KeyC), "Q" => Some(KeyCode::KeyQ), "U" => Some(KeyCode::KeyU), "E" => Some(KeyCode::KeyE), "L" => Some(KeyCode::KeyL), "J" => Some(KeyCode::KeyJ), "F" => Some(KeyCode::KeyF), "9" => Some(KeyCode::Digit9), "S" => Some(KeyCode::KeyS), "N" => Some(KeyCode::KeyN), "F8" => Some(KeyCode::F8), "Alt" => Some(KeyCode::AltLeft), "Down" => Some(KeyCode::ArrowDown), "Tab" => Some(KeyCode::Tab), "Delete" => Some(KeyCode::Delete), _ => None } {
                 keys.press(key);
                 replay.key = Some(key);
             }

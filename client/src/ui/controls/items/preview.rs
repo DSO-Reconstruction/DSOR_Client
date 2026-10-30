@@ -65,10 +65,27 @@ pub(super) fn card(d: &DisplayItem, catalog: &Catalog, layout: Option<&Layout>, 
     let mut card = Card::new(if advanced { 370.0 } else { 285.0 },layout);
     card.background = Color::srgba(0.01, 0.01, 0.005, 0.985);
     let (rarity, tint) = rarity(catalog, d.template, d.item);
-    card.title(catalog.name(d.template,d.item),None,tint);
-    card.text(&format!("{rarity} Item"),tint);
-    if let Some(m) = meta.filter(|m|!m.category.is_empty()) { card.text(&format!("<i>({})</>",m.category),MUTED); }
-    if let Some(i) = d.item { card.text(&format!("Item level: {}",i.durability),Color::srgb(0.85,0.75,0.5)); }
+    // The heading as Dofus draws it: icon, name, "Level n \u{2022} type"
+    // (the item's level, else the level it requires; the rarity in the name's colour).
+    let (icon, background, frame) = catalog.icon_parts(d.template, d.item);
+    let icons: Vec<String> = [background, icon, frame].into_iter().flatten().map(str::to_owned).collect();
+    let level = d.item.map(|i| i.durability).filter(|l| *l > 0).or_else(|| meta.map(|m| m.required_level.max(d.unlock)));
+    // "EquipmentGem" -> "Equipment Gem".
+    let kind = meta.map(|m| m.category.as_str()).filter(|c| !c.is_empty()).map(|c| {
+        let mut out = String::new();
+        for (i, ch) in c.chars().enumerate() {
+            if i > 0 && ch.is_uppercase() && !out.ends_with(' ') { out.push(' '); }
+            out.push(ch);
+        }
+        out
+    });
+    let subtitle = match (level, kind) {
+        (Some(l), Some(k)) => format!("Level {l} \u{2022} {k}"),
+        (Some(l), None) => format!("Level {l}"),
+        (None, Some(k)) => k,
+        (None, None) => String::new(),
+    };
+    card.header(catalog.name(d.template,d.item), tint, &icons, &subtitle);
     if let Some(m) = meta {
         if m.required_level.max(d.unlock)>1 { card.hint(&format!("Required level: {}",m.required_level.max(d.unlock))); }
         if m.max_stack>1 { card.text(&format!("Quantity: {} / {}",d.amount,m.max_stack),WHITE); }
