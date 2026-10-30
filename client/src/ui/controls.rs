@@ -55,7 +55,23 @@ impl DragHandle {
             "inventory" | "charactersheet" => "/FrameLabel/BorderLabel",
             "skilltalentswindow" => "/BackGroundLabel/Frame/Frame2",
             "gamemenu" => "Canvas/CenterLabel",
-            other => panels::frame_suffix(other)?,
+            other => match panels::frame_suffix(other) {
+                Some(suffix) => suffix,
+                // Any other window with a title bar moves by it (the workbench,
+                // the gem and transmog desks, the map access window, the bank,
+                // dialogs...); the HUD's (bars, the map overlay) have none or
+                // stay put.
+                // FAILURE: "pourquoi y'a des UI que je peux pas drag ?"
+                None => {
+                    if matches!(other, "locationmap" | "gamebar" | "bottombar" | "currencybar" | "currencybag" | "tooltip" | "minimap") { return None; }
+                    const TITLES: [&str; 9] = ["/WindowTitleLabel", "/WindowTitleBar", "/TitlaLabel", "/Headline", "/WindowTitle",
+                        "/TitleBarLabel", "/LabelWindowTitle", "/WindowTitleBackgroundLabel", "/TextLabel_title"];
+                    let title = TITLES.iter().find_map(|s| layout.widgets.iter().find(|w| !w.hidden && w.rect[1] >= 0.0
+                        && !w.id.contains("Template") && w.id.ends_with(s)))?;
+                    let [l, t, r, _] = title.rect;
+                    return Some(Self { k: title.k, rect: [l, t, r, t + DRAG_HANDLE_HEIGHT], section: Section::Always });
+                }
+            },
         };
         let frame = layout.widgets.iter().find(|w| !w.hidden && w.id.ends_with(suffix))?;
         let mut rect = frame.art.as_ref().map(|a| bounds(&a.pos)).unwrap_or(frame.rect);
