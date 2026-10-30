@@ -1360,6 +1360,7 @@ fn remote_skills(
     // Monsters too (crate::actors::monsters): they move as remote actors, without a Character.
     mut remotes: Query<(Entity, &mut Transform, &mut RemotePlayer, Option<&Character>, &CharacterAnim, Option<&crate::actors::monsters::Monster>)>,
     locals: Query<(&Transform, &LocalPlayer), Without<RemotePlayer>>,
+    (nav, navmeshes): (Option<Res<CurrentNav>>, Option<Res<Assets<NavMesh>>>),
 ) {
     let Some(mut net) = net else { return };
     if net.skill_events.is_empty() {
@@ -1402,6 +1403,16 @@ fn remote_skills(
             .first()
             .map(|p| Vec3::from(*p))
             .unwrap_or(tf.translation + Quat::from_rotation_y(facing) * Vec3::Z * skill.range.min(15.0));
+        // A point without its own height (BulletSkill's: straight ahead of the
+        // caster) takes the ground's there: a bullet dips or climbs to it as a
+        // player's does to the ground under the cursor (perform), not level at
+        // the caster's height.
+        // FAILURE: "les projectiles ... des fois ca passe au dessus de mon
+        //   perso parfois pas" (a monster above shot over the player's head).
+        let point = if ev.points.is_empty() {
+            let mesh = nav.as_ref().zip(navmeshes.as_ref()).and_then(|(n, all)| all.get(&n.0));
+            match mesh.and_then(|m| m.ground(point.x, point.z, point.y, 6.0)) { Some(y) => Vec3::new(point.x, y, point.z), None => point }
+        } else { point };
         // Aimed at an actor (TargetSkill, TargetBulletSkill), its bullet dips or
         // climbs to that actor's chest, as the local player's own do: from high
         // ground a monster's bullet flew flat at its hand's height, over or past
