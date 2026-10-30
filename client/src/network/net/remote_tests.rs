@@ -288,3 +288,24 @@ fn move_records_with_a_speed_carry_their_travel() {
     assert!((seconds - 1.).abs() < 1e-6);
     assert_eq!(net.remote_moves[1].4, None, "a standing record is a position only");
 }
+
+/// A status effect past its end tick goes, ours and another actor's, with the
+/// removals its visuals and transformations follow; a permanent one stays.
+/// FAILURE: "j'ai un slow ca me l'enleve jamais".
+#[test]
+fn status_effects_that_ran_out_are_removed() {
+    use dsor_proto::commands::combat::{StatusEffectElement, StatusEffectTail};
+    let mut app = app();
+    let mut net = app.world_mut().non_send_mut::<Net>();
+    let effect = |instance, end| StatusEffectElement { index: 5, instance, end, tail: Some(StatusEffectTail::default()), ..Default::default() };
+    net.stat_effects.insert(1, effect(1, 100));
+    net.stat_effects.insert(2, effect(2, 0));
+    net.apply_actor_effects(41, false, &[effect(3, 100)]);
+    net.status_events.clear();
+    net.expire_effects(105);
+    assert_eq!(net.stat_effects.len(), 2, "not yet: half a second of grace");
+    net.expire_effects(200);
+    assert!(!net.stat_effects.contains_key(&1) && net.stat_effects.contains_key(&2));
+    assert!(!net.actor_effects.contains_key(&41));
+    assert_eq!(net.status_events.iter().filter(|e| e.removed).count(), 2);
+}

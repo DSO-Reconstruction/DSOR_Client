@@ -901,13 +901,21 @@ impl Plugin for NetPlugin {
                     .in_set(NetSystems)
                     .run_if(net_exists),
             );
-        app.add_systems(Update, pvp_names.after(NetSystems).run_if(net_exists));
+        app.add_systems(Update, (pvp_names, expire_status_effects).after(NetSystems).run_if(net_exists));
         #[cfg(not(target_arch = "wasm32"))]
         app.add_systems(Update, replay_equipment.before(NetSystems).run_if(net_exists));
     }
 }
 
 /// Players' names in open battle (Net::pvp): "Name (PvP)", red unless an admin.
+/// Status effects that ran out (Net::expire_effects).
+fn expire_status_effects(net: Option<NonSendMut<Net>>, time: Res<Time<Real>>) {
+    let Some(mut net) = net else { return };
+    if net.stat_effects.is_empty() && net.actor_effects.is_empty() { return; }
+    let now = net.server_tick(now_ms(&time));
+    net.expire_effects(now);
+}
+
 fn pvp_names(net: NonSend<Net>, mut players: Query<(&mut Nameplate, Option<&LocalPlayer>, Option<&RemotePlayer>)>) {
     for (mut plate, local, remote) in &mut players {
         let actor = remote.map(|r| r.actor).or(local.and(net.local_actor));
@@ -1430,6 +1438,43 @@ impl Net {
             if e.tail.is_some() { effects.elements.insert(e.instance, e.clone()); } else { effects.elements.remove(&e.instance); }
         }
         if effects.elements.is_empty() { self.actor_effects.remove(&holder); }
+    }
+
+    /// Status effects past their end tick, by half a second, go as if the
+    /// server had removed them (their bar slot, their looping visual, a
+    /// transformation): the server sends no removal for those that simply
+    /// run out (a monster's slow or root on us).
+    /// FAILURE: "le client retire jamais les debuff ?? j'ai un slow ca me
+    ///   l'enleve jamais j'ai le debuff rooted en boucle".
+    /// UNVERIFIED: that the original expires them itself; its StatusEffect
+    ///   elements carry the end tick this reads.
+    pub fn expire_effects(&mut self, now: u32) {
+        const GRACE: i32 = 12;
+        let past = |e: &dsor_proto::commands::combat::StatusEffectElement| e.end != 0 && (now.wrapping_sub(e.end) as i32) > GRACE;
+        let mut gone: Vec<(u32, u16, u32)> = Vec::new();
+        if let Some(local) = self.local_actor {
+            let expired: Vec<u32> = self.stat_effects.iter().filter(|(_, e)| past(e)).map(|(i, _)| *i).collect();
+            for instance in expired {
+                if let Some(e) = self.stat_effects.remove(&instance) { gone.push((local, e.index, instance)); }
+            }
+        }
+        if !gone.is_empty() { self.stat_revision = self.stat_revision.wrapping_add(1); }
+        let mut touched = false;
+        for (holder, effects) in self.actor_effects.iter_mut() {
+            let expired: Vec<u32> = effects.elements.iter().filter(|(_, e)| past(e)).map(|(i, _)| *i).collect();
+            for instance in expired {
+                if let Some(e) = effects.elements.remove(&instance) { gone.push((*holder, e.index, instance)); touched = true; }
+            }
+        }
+        if touched {
+            self.actor_effects_stamp += 1;
+            self.actor_effects.retain(|_, e| !e.elements.is_empty());
+        }
+        for (holder, index, instance) in gone {
+            self.mount_events.push((holder, index, instance, false));
+            self.pet_events.push((holder, index, instance, false));
+            self.status_events.push(StatusEvent { holder, index, instance, seconds: 0.0, removed: true });
+        }
     }
 
     /// Whether two flagged players may fight here: not in a town (rule set 5),
