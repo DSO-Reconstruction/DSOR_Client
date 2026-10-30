@@ -1509,7 +1509,7 @@ fn pump(
     roots: Query<Entity, With<MapRoot>>,
     assets: Res<AssetServer>,
     manifests: Res<Assets<MapManifest>>,
-    left_behind: Query<Entity, Or<(With<crate::actors::npc::Npc>, With<RemotePlayer>, With<LocalPlayer>)>>,
+    left_behind: Query<Entity, Or<(With<crate::actors::npc::Npc>, With<RemotePlayer>, With<LocalPlayer>, With<crate::world::drops::GroundItem>)>>,
     mut loading: ResMut<crate::screens::loading::LoadingScreen>,
     mut selection: ResMut<crate::screens::selection::Selection>,
 ) {
@@ -1598,14 +1598,20 @@ fn pump(
                 loading.map(name.clone());
                 info!("map {name} (rule set {rule_set})");
                 net.rule_set = rule_set;
-                if current.as_ref().is_some_and(|c| c.name == name) {
-                    continue;
+                // The same map again (a dungeon left and entered anew) is a new
+                // instance: its level stays loaded, but nothing of the old one's
+                // actors and ground items may remain -- the server sends the new
+                // instance's own.
+                // FAILURE: "quand je rerentre dans une map je vois toujours le
+                //   drop sur la map".
+                let same = current.as_ref().is_some_and(|c| c.name == name);
+                if !same {
+                    for root in &roots {
+                        commands.entity(root).despawn();
+                    }
                 }
-                for root in &roots {
-                    commands.entity(root).despawn();
-                }
-                // The old map's NPCs and players go with it: the new map server has
-                // its own actors, and nobody would ever say these had left.
+                // The old map's NPCs, players and drops go with it: the new map
+                // server has its own, and nobody would ever say these had left.
                 for e in &left_behind {
                     commands.entity(e).despawn();
                 }
@@ -1626,6 +1632,11 @@ fn pump(
                 net.revives.clear();
                 net.player_deaths.clear();
                 net.death = default();
+                net.item_drops.clear();
+                net.items_gone.clear();
+                if same {
+                    continue;
+                }
                 // Nothing may stand on the old map's ground (the new player snaps to
                 // the first mesh it sees); crate::world::nav loads the new one.
                 commands.remove_resource::<CurrentNav>();
