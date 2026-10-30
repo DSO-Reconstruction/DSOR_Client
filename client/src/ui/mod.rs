@@ -1491,7 +1491,7 @@ fn follow_screen(
 
 /// The server's figures, or a resting HUD offline.
 fn read_figures(net: Option<NonSend<crate::network::net::Net>>, mut figures: ResMut<Figures>, resource_max: Res<crate::gameplay::stats::ResourceMax>,
-    mut wallet_seen: Local<Option<u64>>, systems: Option<Res<controls::systems::State>>, talents: Option<Res<Assets<crate::gameplay::talents::TalentCatalog>>>) {
+    mut wallet_seen: Local<Option<u64>>, mut resource_peak: Local<(f32, f32)>, systems: Option<Res<controls::systems::State>>, talents: Option<Res<Assets<crate::gameplay::talents::TalentCatalog>>>) {
     let Some(net) = net else {
         if !figures.online && figures.health.1 == 0.0 {
             // Offline (the map viewer): a full-looking HUD, so it can be seen.
@@ -1528,8 +1528,17 @@ fn read_figures(net: Option<NonSend<crate::network::net::Net>>, mut figures: Res
     let test = net.offline.then(|| std::env::var("DSOR_TEST_RESOURCE").ok().and_then(|v| v.parse::<f32>().ok())).flatten();
     if let Some(r) = net.resource.or(test) {
         // Against the class's maximum (rage starts empty: the largest value seen
-        // made 10 rage look like a full bar).
-        let max = resource_max.0.max(r);
+        // alone made 10 rage look like a full bar), or the largest pool the
+        // server gave since that maximum last changed, when it is larger: the
+        // server's maximum counts sources the character page does not, and
+        // the bar stayed full until the mana fell under the page's figure.
+        // FAILURE: "Reste pleine longtemps" (the mana globe).
+        // UNVERIFIED: which source the page misses.
+        if resource_peak.1 != resource_max.0 {
+            *resource_peak = (0.0, resource_max.0);
+        }
+        resource_peak.0 = resource_peak.0.max(r);
+        let max = resource_max.0.max(resource_peak.0);
         if figures.resource != (r, max) {
             figures.resource = (r, max);
         }
