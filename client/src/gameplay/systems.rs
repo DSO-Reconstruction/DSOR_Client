@@ -179,6 +179,9 @@ pub struct StickerDef {
     pub upgrades: Vec<String>,
     #[serde(default)]
     pub priority: i32,
+    /// Its row in the database: the album's order within a book and priority.
+    #[serde(default)]
+    pub order: u32,
     /// Its origin's icon and preview background (texture references).
     #[serde(default)]
     pub origin: String,

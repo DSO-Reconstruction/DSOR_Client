@@ -47,11 +47,15 @@ GENERIC = {
                         "damageFactorPvEAbsolutPlus", "damageFactorPvEAbsolutMinus"),
     "DamagePermeabilityPvP": ("damagePermeabilityPvPRelativePlus", "damagePermeabilityPvPRelativeMinus",
                               "damagePermeabilityPvPAbsolutPlus", "damagePermeabilityPvPAbsolutMinus"),
+    # The Cute Doggy's pet effect: "Selling price of items increased by 20.00%".
+    "VCSellPrice": ("vcSellPriceRelativePlus", "vcSellPriceRelativeMinus", "vcSellPriceAbsolutPlus", "vcSellPriceAbsolutMinus"),
 }
 
 
 def _number(token, relative, variables, scaled):
-    """A modifier's value: {"p": n} a wire parameter, {"v": x} a known value, {} unknown."""
+    """A modifier's value: {"p": n} a wire parameter, {"v": x} a known value,
+    {"var": name} a mutable actor variable (the client may know it: the pets'
+    Collector's Bag bonuses, crate::ui::controls::systems::album), {} unknown."""
     scale = {"scale": 100.0} if relative else {}
     token = (token or "").strip()
     if scaled:
@@ -61,7 +65,7 @@ def _number(token, relative, variables, scaled):
         if name.isdigit():
             return {"p": int(name), **scale}
         value = variables.get(name)
-        return {"v": round(value, 6), **scale} if value is not None else scale
+        return {"v": round(value, 6), **scale} if value is not None else {"var": name, **scale}
     try:
         values = [float(v) for v in token.split("|")]
     except ValueError:
@@ -137,6 +141,33 @@ def lines(raw, local, variables, item_name, tick=False):
         relative = (len(args) > 1 and args[1].lower() == "relative") or "forceShowAsPercentage" in args
         scaled = "LevelModifier" in args
         value = _number(args[0], relative, variables, scaled) if args and args[0] else None
+        # The class's resource (Rage, Mana, Concentration, Steam): one text per
+        # class, the warrior's as the default (the Mortis Doll's pet effect).
+        if kind == "MaxSkillResource" and not key and value is not None:
+            mode = "Relative" if relative else "Absolut"
+            classes = {c.lower(): local(f"gui.statuseffects.modifier_maxSkillResource{mode}Plus{c}")
+                       for c in ("Warrior", "Mage", "Ranger", "Dwarf")}
+            minus = local(f"gui.statuseffects.modifier_maxSkillResource{mode}MinusWarrior")
+            if classes["warrior"]:
+                out.append(dict(text=classes["warrior"], minus=minus, args=[value], classes=classes))
+            continue
+        # A text of its own ("Localize:pet_PRK_special_drop": "Opening a Waste
+        # Box has a 10% chance..."), the pets' special effects.
+        # FAILURE (2026-10-31): 95 pet effects dropped, a "Pet Effect:" with
+        # nothing under it (the Asar's "Reduces Boss armor values by 3%").
+        if kind == "Localize" and not key and args and args[0]:
+            text = local("gui.statuseffects.modifier_" + args[0])
+            if text:
+                out.append(dict(text=text, args=[]))
+            continue
+        # "Enables auto-pickup for Gems, Jewels, Runes and Mystic Cubes": the
+        # modifier's own text with what it picks up (gui.window.tooltip), the
+        # Summer Dog's and the Gem Gnome's pet effects.
+        if kind == "AutoPickupModifier" and not key and len(args) > 1:
+            text, what = local("gui.statuseffects.modifier_autoPickUpModifier"), local("gui.window.tooltip_" + args[1])
+            if text and what:
+                out.append(dict(text=text, args=[what]))
+            continue
         generic = _generic(kind, args, local, item_name)
         if key:
             text = local("gui.statuseffects.modifier_" + key)
@@ -145,6 +176,10 @@ def lines(raw, local, variables, item_name, tick=False):
             leading = generic[0][2] if generic else []
             needed = max((int(n) for n in re.findall(r"\{(\d+):", text)), default=-1) + 1
             numbers = [value] if value is not None and needed > len(leading) else []
+            # The number in its own place: "+ {1:s}% Coins drop stack size"
+            # names the coins itself (the parrots' ParrotStatueEffect).
+            if numbers and len(leading) < needed - 1:
+                leading = leading + [item_name(args[2]) if kind == "DropAmount" and len(args) > 2 else ""] * (needed - 1 - len(leading))
             out.append(dict(text=text, args=leading + numbers))
             continue
         for plus_key, minus_key, leading in generic:

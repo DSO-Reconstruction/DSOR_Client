@@ -62,7 +62,7 @@ impl Notice {
         let text = text.replace("{0:i}", &receipt.amount.to_string()).replace("{0:s}", catalog.name(&receipt.template, item));
         let (image, background, frame) = catalog.icon_parts(&receipt.template, item);
         let part = |p: Option<&str>| p.unwrap_or_default().to_owned();
-        Some(Self { text, icon: Icon { background: part(background), image: part(image), frame: part(frame) } })
+        Some(Self { text, icon: Icon { background: part(background), image: part(image), frame: part(frame), ..Default::default() } })
     }
 }
 
@@ -187,7 +187,7 @@ mod tests {
         let notice = Notice::of(&Receipt { amount: 1, template: chest.template.clone(), item: Some(chest) }, &catalog, &texts).unwrap();
         assert_eq!(notice.text, "Daily Login Chest received");
         assert_eq!(notice.icon, Icon { background: "textures/icons_toolkit/bg_rarity_uncommon.png".into(),
-            image: "textures/icons/all_chest_giftbox_01.png".into(), frame: "textures/icons_toolkit/frame_slim_basic.png".into() });
+            image: "textures/icons/all_chest_giftbox_01.png".into(), frame: "textures/icons_toolkit/frame_slim_basic.png".into(), ..Default::default() });
         let andermant = Notice::of(&Receipt { amount: 25, template: "money_rc_no_auto_use".into(), item: None }, &catalog, &texts).unwrap();
         assert_eq!(andermant.text, "25 Andermant received");
         assert_eq!(andermant.icon.background, "textures/icons_toolkit/bg_currency.png");
@@ -200,7 +200,7 @@ mod tests {
     fn the_window_holds_the_item_line_alone() {
         let mut messages = ItemMessages::default();
         assert!(prepare(&layout(), &messages).widgets.is_empty());
-        let icon = Icon { background: "bg.png".into(), image: "chest.png".into(), frame: "frame.png".into() };
+        let icon = Icon { background: "bg.png".into(), image: "chest.png".into(), frame: "frame.png".into(), ..Default::default() };
         messages.shown = Some((Notice { text: "Daily Login Chest received".into(), icon }, 0.0));
         let prepared = prepare(&layout(), &messages);
         assert_eq!(prepared.widgets.iter().map(|w| w.id.rsplit('/').next().unwrap()).collect::<Vec<_>>(),

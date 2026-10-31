@@ -35,6 +35,16 @@ mod remote_tests;
 
 /// How far up or down one step may go (stairs, slopes).
 const MAX_STEP: f32 = 1.2;
+/// The left button held past its press on the ground: the walk follows the
+/// cursor straight, as the original steers (click_to_move); a click alone
+/// walks its route round walls (walk_local).
+#[derive(Resource, Default)]
+pub struct HeldWalk(pub bool);
+
+/// A walk's route is found again when its target moves this far, or moves at
+/// all after this many seconds (the button held, following the cursor).
+const ROUTE_SLACK: f32 = 1.0;
+const ROUTE_REFRESH: f32 = 0.25;
 /// Seconds ANOTHER player keeps running after they last moved: just over the 40 ms
 /// between two of their records. SEE: move_remotes. The player's own run stops the
 /// moment they stop ("elle devrait s'arreter quand j'arrete de marcher").
@@ -224,6 +234,12 @@ pub struct Net {
     /// PlayerLogoutInfo's seconds as they come (0: called off), for the
     /// switch-characters dialog (ui::controls::logout).
     pub logout_info: Vec<u32>,
+    /// The switch of characters is confirmed and counting down: the player
+    /// cannot walk (click_to_move), as in the original.
+    pub logout_pending: bool,
+    /// Maps entered so far (each MapChange, the same map again too: a switch of
+    /// characters back to one on the same map).
+    pub map_entries: u32,
     /// Our group as the server last described it (GroupStatus 151); None ungrouped.
     pub group: Option<dsor_proto::commands::social::GroupStatus>,
     /// Our guild (GuildStatus 167); None when in none.
@@ -341,6 +357,8 @@ pub struct Net {
     /// Full modifier parameters must survive consumption of the visual events.
     pub stat_effects: HashMap<u32, dsor_proto::commands::combat::StatusEffectElement>,
     pub stat_revision: u64,
+    /// The server tick when the commands now being read arrived (set by pump).
+    pub arrival_tick: u32,
     /// The effects running on other actors in view (StatusEffectCommand on
     /// them), for the hovered monster's effect row (crate::ui::controls::effects).
     pub actor_effects: HashMap<u32, ActorEffects>,
@@ -659,6 +677,94 @@ mod pointer_tests {
         app.update();
         assert!(app.world().get::<LocalPlayer>(player).unwrap().target.is_some(), "hidden menus must not intercept input");
     }
+
+    #[test]
+    fn a_walk_held_over_a_monster_goes_on_and_a_press_on_one_is_no_walk() {
+        let mut app = App::new();
+        app.add_plugins(UiInputPlugin)
+            .init_resource::<ButtonInput<MouseButton>>()
+            .init_resource::<ButtonInput<KeyCode>>()
+            .init_resource::<Assets<NavMesh>>()
+            .init_resource::<Time>()
+            .init_resource::<crate::actors::monsters::Hovered>()
+            .add_systems(Update, click_to_move);
+        let mut window = Window { resolution: (1024, 768).into(), ..default() };
+        window.set_cursor_position(Some(Vec2::new(400.0, 400.0)));
+        app.world_mut().spawn((window, PrimaryWindow));
+        app.world_mut().spawn((Camera3d::default(), Camera {
+            computed: ComputedCameraValues {
+                clip_from_view: Mat4::perspective_infinite_reverse_rh(1.0, 1024.0 / 768.0, 0.1),
+                target_info: Some(RenderTargetInfo { physical_size: UVec2::new(1024, 768), scale_factor: 1.0 }),
+                ..default()
+            },
+            ..default()
+        }, GlobalTransform::from(Transform::from_xyz(0.0, 10.0, 10.0).looking_at(Vec3::ZERO, Vec3::Y))));
+        let player = app.world_mut().spawn((Transform::default(), LocalPlayer {
+            actor: 1, target: None, facing: 0.0, last_sent_tick: 0, snapped: true, casting: 0.0,
+        })).id();
+        let monster = app.world_mut().spawn_empty().id();
+        let target = |app: &App| app.world().get::<LocalPlayer>(player).unwrap().target;
+        // Pressed on the ground, then the cursor crosses a monster: still a walk.
+        app.world_mut().resource_mut::<ButtonInput<MouseButton>>().press(MouseButton::Left);
+        app.update();
+        assert!(target(&app).is_some());
+        app.world_mut().get_mut::<LocalPlayer>(player).unwrap().target = None;
+        app.world_mut().resource_mut::<crate::actors::monsters::Hovered>().0 = Some((monster, 7));
+        app.world_mut().resource_mut::<ButtonInput<MouseButton>>().clear();
+        app.update();
+        assert!(target(&app).is_some(), "a held walk stopped over a monster");
+        // A fresh press on the monster attacks it: no walk.
+        app.world_mut().get_mut::<LocalPlayer>(player).unwrap().target = None;
+        let mut buttons = app.world_mut().resource_mut::<ButtonInput<MouseButton>>();
+        buttons.release(MouseButton::Left);
+        buttons.clear();
+        buttons.press(MouseButton::Left);
+        app.update();
+        assert!(target(&app).is_none(), "a press on a monster walked");
+    }
+}
+
+#[cfg(test)]
+mod walk_route_tests {
+    use super::*;
+
+    #[test]
+    fn a_click_behind_a_hole_walks_round_it() {
+        // A U of 1 m cells: a hole at x 1..2, z 0..2 between the start and the click.
+        let cells = [(0, 0), (0, 1), (0, 2), (1, 2), (2, 2), (2, 1), (2, 0)];
+        let v = |x: i32, z: i32| Vec3::new(x as f32, 0.0, z as f32);
+        let triangles = cells.iter().flat_map(|&(x, z)| [[v(x, z), v(x + 1, z), v(x + 1, z + 1)], [v(x, z), v(x + 1, z + 1), v(x, z + 1)]]).collect();
+        let mut app = App::new();
+        app.init_resource::<Assets<NavMesh>>()
+            .insert_resource(Time::<()>::default())
+            .add_systems(Update, walk_local);
+        let mesh = app.world_mut().resource_mut::<Assets<NavMesh>>().add(NavMesh::new(triangles));
+        app.insert_resource(CurrentNav(mesh));
+        let target = Vec3::new(2.5, 0.0, 0.5);
+        let player = app.world_mut().spawn((Transform::from_xyz(0.5, 0.0, 0.5), CharacterAnim::default(), LocalPlayer {
+            actor: 1, target: Some(target), facing: 0.0, last_sent_tick: 0, snapped: true, casting: 0.0,
+        })).id();
+        for _ in 0..200 {
+            app.world_mut().resource_mut::<Time>().advance_by(std::time::Duration::from_millis(20));
+            app.update();
+            let p = app.world().get::<Transform>(player).unwrap().translation;
+            assert!(!(p.x > 1.02 && p.x < 1.98 && p.z < 1.98), "walked into the hole at {p}");
+            if app.world().get::<LocalPlayer>(player).unwrap().target.is_none() { break; }
+        }
+        let p = app.world().get::<Transform>(player).unwrap().translation;
+        assert!(p.xz().distance(target.xz()) < 0.1, "stopped at {p}, short of {target}");
+        // The button held, the walk steers straight and stops at the hole's edge.
+        app.insert_resource(HeldWalk(true));
+        app.world_mut().get_mut::<Transform>(player).unwrap().translation = Vec3::new(0.5, 0.0, 0.5);
+        app.world_mut().get_mut::<LocalPlayer>(player).unwrap().target = Some(target);
+        for _ in 0..200 {
+            app.world_mut().resource_mut::<Time>().advance_by(std::time::Duration::from_millis(20));
+            app.update();
+            if app.world().get::<LocalPlayer>(player).unwrap().target.is_none() { break; }
+        }
+        let p = app.world().get::<Transform>(player).unwrap().translation;
+        assert!(p.x < 1.01 && p.z < 1.0, "a held walk went round to {p}");
+    }
 }
 
 #[cfg(test)]
@@ -885,7 +991,7 @@ impl Plugin for NetPlugin {
         app.init_resource::<RespawnChoice>().init_resource::<crate::gameplay::dialogue::Dialogue>();
         // DSOR_ZOOM=<height>: start at another zoom (debugging screenshots).
         let zoom = std::env::var("DSOR_ZOOM").ok().and_then(|z| z.parse().ok()).unwrap_or(CAM_HEIGHT_DEFAULT);
-        app.insert_resource(CameraZoom::new(zoom))
+        app.insert_resource(CameraZoom::new(zoom)).init_resource::<HeldWalk>()
             .add_systems(Startup, connect.run_if(resource_exists::<NetConfig>))
             .add_systems(PreUpdate, finish_login.run_if(resource_exists::<LoggingIn>))
             .add_systems(
@@ -1005,6 +1111,8 @@ pub fn start_offline(world: &mut World, class: u8, gender: u8) {
         guild_answers: Vec::new(),
         social_notes: Vec::new(),
         logout_info: Vec::new(),
+        logout_pending: false,
+        map_entries: 0,
         group: None,
         guild: None,
         player_query: None,
@@ -1046,6 +1154,7 @@ pub fn start_offline(world: &mut World, class: u8, gender: u8) {
         status_events: Vec::new(),
         stat_effects: HashMap::new(),
         stat_revision: 0,
+        arrival_tick: 0,
         actor_effects: HashMap::new(),
         actor_effects_stamp: 0,
         ui_revision: 0,
@@ -1316,6 +1425,8 @@ pub(crate) fn start_session(world: &mut World, config: NetConfig) {
         guild_answers: Vec::new(),
         social_notes: Vec::new(),
         logout_info: Vec::new(),
+        logout_pending: false,
+        map_entries: 0,
         group: None,
         guild: None,
         player_query: None,
@@ -1357,6 +1468,7 @@ pub(crate) fn start_session(world: &mut World, config: NetConfig) {
         status_events: Vec::new(),
         stat_effects: HashMap::new(),
         stat_revision: 0,
+        arrival_tick: 0,
         actor_effects: HashMap::new(),
         actor_effects_stamp: 0,
         ui_revision: 0,
@@ -1486,6 +1598,18 @@ impl Net {
         actor.or(self.local_actor).and_then(|a| self.pvp.get(&a)).copied().unwrap_or(false)
     }
 
+    /// Let our timed effects run out at their end tick, as the native client
+    /// does: the server removes only the counted ones (rage stacks), so a
+    /// timed buff such as Furious Battle Cry's speed otherwise stayed in the
+    /// statistics until the next map.
+    fn expire_stat_effects(&mut self, now: u64) {
+        if self.clock_offset.is_none() { return; }
+        let tick = self.server_tick(now);
+        if expire_effects(&mut self.stat_effects, tick) {
+            self.stat_revision = self.stat_revision.wrapping_add(1);
+        }
+    }
+
     /// The server's game tick now.
     pub fn server_tick(&self, now: u64) -> u32 {
         let local = self.session.local_tick(now) as i64;
@@ -1562,6 +1686,7 @@ fn pump(
     let now = now_ms(&time);
     let mut changed_map = false;
     let net = &mut *net;
+    net.expire_stat_effects(now);
     for request in std::mem::take(&mut selection.requests) {
         use crate::screens::selection::Request;
         match request {
@@ -1687,6 +1812,7 @@ fn pump(
                 commands.remove_resource::<CurrentNav>();
                 net.centre = None;
                 changed_map = true;
+                net.map_entries += 1;
                 commands.insert_resource(CurrentMap::new(name.clone(), assets.load(format!("maps/{name}.map.json"))));
             }
             SessionEvent::Clock(tick) => {
@@ -1697,6 +1823,7 @@ fn pump(
                 // What a chain held before a command we cannot read still counts
                 // (the player initialization batch starts with NewPlayer).
                 let (list, error) = dsor_proto::commands::decode_message_partial(&data, bits);
+                net.arrival_tick = net.server_tick(now);
                 for (command, actor) in list {
                     on_command(net, command, actor);
                 }
@@ -1812,6 +1939,9 @@ pub(crate) fn on_command(net: &mut Net, command: ServerCommand, actor: Option<u3
             // gameplay_commands.py writes them there; CurrencyChanged repeats them).
             net.glyphs = Some(p.long_376);
             net.game_currencies = p.entries_384.iter().cloned().collect();
+            // Another character: the last one's maximum health is not this one's.
+            // FAILURE (2026-10-24): the mage showed the warrior's 330055 maximum.
+            if net.local_name.as_deref() != Some(p.name.as_str()) { net.max_health = None; }
             net.local_name = Some(p.name.clone());
             // The third leading bool is the admin byte (OverheadAdminColor name).
             let admin = p.leading_flags[2];
@@ -1893,8 +2023,9 @@ pub(crate) fn on_command(net: &mut Net, command: ServerCommand, actor: Option<u3
         ServerCommand::StatusEffect(c) => {
             if actor.is_some() && actor == net.local_actor {
                 if c.header { net.stat_effects.clear(); }
+                let tick = net.arrival_tick;
                 for effect in &c.elements {
-                    if effect.tail.is_some() { net.stat_effects.insert(effect.instance, effect.clone()); }
+                    if effect.tail.is_some() { net.stat_effects.insert(effect.instance, timed_from(effect, tick)); }
                     else { net.stat_effects.remove(&effect.instance); }
                 }
                 net.stat_revision = net.stat_revision.wrapping_add(1);
@@ -2542,8 +2673,20 @@ fn click_to_move(
     time: Res<Time>,
     dialogue: Option<Res<crate::gameplay::dialogue::Dialogue>>,
     item: Option<Res<crate::world::drops::ItemHover>>,
+    // The left button's press went down off any monster: a walk to the end.
+    mut on_ground: Local<bool>,
+    held: Option<ResMut<HeldWalk>>,
 ) {
+    if buttons.just_pressed(MouseButton::Left) { *on_ground = !hovered.as_ref().is_some_and(|h| h.0.is_some()); }
+    let holding = buttons.pressed(MouseButton::Left) && !buttons.just_pressed(MouseButton::Left) && *on_ground;
+    if let Some(mut held) = held { if held.0 != holding { held.0 = holding; } }
     if dialogue.is_some_and(|d| d.held) { return; }
+    // Switching characters: the original holds the player in place until the
+    // countdown ends or its Cancel is pressed.
+    if net.as_ref().is_some_and(|n| n.logout_pending) {
+        for (_, mut player) in &mut players { if player.target.is_some() { player.target = None; } }
+        return;
+    }
     // An item (or its name) under the cursor: crate::world::drops walks to it.
     if item.is_some_and(|i| i.0.is_some()) { return; }
     if ui.blocks(MouseButton::Left) || !buttons.pressed(MouseButton::Left) || keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight) {
@@ -2560,8 +2703,9 @@ fn click_to_move(
     if net.as_ref().is_some_and(|n| n.death.dead || time.elapsed_secs() < n.death.held_until) {
         return;
     }
-    // A monster under the cursor: the click attacks it (crate::gameplay::skills), it is no walk.
-    if hovered.is_some_and(|h| h.0.is_some()) {
+    // A monster under the cursor: the click attacks it (crate::gameplay::skills),
+    // it is no walk; a walk already held goes on over it.
+    if hovered.is_some_and(|h| h.0.is_some()) && !*on_ground {
         return;
     }
     let Ok(window) = windows.single() else { return };
@@ -2591,6 +2735,10 @@ fn walk_local(
     mut players: Query<(&mut Transform, &mut LocalPlayer, &mut CharacterAnim, Option<&crate::actors::mounts::Riding>)>,
     mut autowalked: Local<bool>,
     stats: Option<Res<crate::gameplay::stats::CharacterStats>>,
+    // The walk's route on the navigation mesh: (the target it leads to, its
+    // waypoints, when it was found).
+    mut route: Local<Option<(Vec3, Vec<Vec3>, f32)>>,
+    held: Option<Res<HeldWalk>>,
 ) {
     let _profile = crate::diagnostics::hud::FrameSpan::new("net::walk_local");
     let mesh = nav.as_ref().and_then(|n| meshes.get(&n.0));
@@ -2620,8 +2768,43 @@ fn walk_local(
             continue;
         }
         let mut moving = false;
+        // Held, the walk steers straight at the cursor and stops at a wall.
+        // FAILURE (2026-10-29): routed while held, at a landing's corner the
+        //   cursor over the stairs below sent the warrior down them on his own.
+        if player.target.is_none() || held.as_ref().is_some_and(|h| h.0) { *route = None; }
         if let Some(target) = player.target {
             let here = tf.translation;
+            // Round walls and obstacles along the navigation mesh, to the walkable
+            // point nearest the click, as the original walks; a straight line
+            // where there is no route (another floor, no mesh yet).
+            // FAILURE (2026-10-29): a click behind a wall walked straight into it
+            //   and stopped there.
+            let now = time.elapsed_secs();
+            if let (Some(m), false) = (mesh, held.as_ref().is_some_and(|h| h.0)) {
+                let stale = route.as_ref().is_none_or(|(at, _, when)| {
+                    let moved = at.xz().distance(target.xz());
+                    moved > ROUTE_SLACK || (moved > 0.01 && now - when > ROUTE_REFRESH)
+                });
+                if stale {
+                    // Off the ground (a chest, a wall): the walkable point
+                    // before it on the straight line, not the nearest anywhere
+                    // round it (a detour to the chest's far side).
+                    let goal = m.nearest(target, 0.3)
+                        .or_else(|| m.reachable_along(here, target))
+                        .or_else(|| m.nearest(target, 4.0))
+                        .unwrap_or(target);
+                    *route = m.path(here, goal).map(|points| (target, points, now));
+                }
+            }
+            let waypoints = route.as_mut().map(|(_, points, _)| {
+                while points.len() > 1 && points[0].xz().distance(here.xz()) < 0.05 { points.remove(0); }
+                (points.first().copied(), points.last().copied())
+            });
+            let (aim, end) = match waypoints {
+                Some((Some(aim), Some(end))) => (aim, end),
+                _ => (target, target),
+            };
+            let target = aim;
             let mut to = target - here;
             to.y = 0.0;
             let speed = stats.as_ref().and_then(|s| s.movement_speed())
@@ -2645,7 +2828,7 @@ fn walk_local(
                         player.facing = dir.x.atan2(dir.z);
                     }
                     moving = true;
-                    if Vec2::new(target.x - p.x, target.z - p.z).length() < 0.05 {
+                    if Vec2::new(end.x - p.x, end.z - p.z).length() < 0.05 {
                         player.target = None;
                     }
                 }
@@ -2709,10 +2892,15 @@ fn follow_camera(
     }
 }
 
-/// One MoveCommand per game tick, as the 2018 client sends them: where the player
-/// is, speed 0 (the 2018 client never fills it), heading and facing in 256ths of a
+/// One MoveCommand per game tick: where the player is, its speed (0 standing,
+/// 0x40 at the run speed, more under a movement buff, as release261 fills it and
+/// remote players are read: RUN_SPEED_BYTE), heading and facing in 256ths of a
 /// turn, the tick, and a 20-tick duration.
-fn send_moves(mut net: NonSendMut<Net>, time: Res<Time<Real>>, mut players: Query<(&Transform, &mut LocalPlayer)>) {
+/// FAILURE (2026-10-24): sent 0 always (the 2018 client never fills it), so the
+///   server, which cancels a mount cast on a move with a speed (services/world.py
+///   "movement interrupted cast"), mounted the player who walked away.
+fn send_moves(mut net: NonSendMut<Net>, time: Res<Time<Real>>, mut players: Query<(&Transform, &mut LocalPlayer)>,
+    stats: Option<Res<crate::gameplay::stats::CharacterStats>>) {
     let Ok((tf, mut player)) = players.single_mut() else { return };
     if net.centre.is_none() {
         return;
@@ -2728,7 +2916,9 @@ fn send_moves(mut net: NonSendMut<Net>, time: Res<Time<Real>>, mut players: Quer
         x,
         elevation,
         y,
-        speed: 0,
+        speed: if player.target.is_some() {
+            (RUN_SPEED_BYTE * stats.as_ref().and_then(|s| s.movement_speed()).unwrap_or(RUN_SPEED) / RUN_SPEED).round().clamp(1.0, 255.0) as u8
+        } else { 0 },
         heading: turn(player.facing),
         facing: turn(player.facing),
         start_tick: tick,
@@ -3038,6 +3228,57 @@ pub fn hidden_bar(base: &[dsor_proto::commands::inventory::QuickSlot], skills: &
         }
     }
     bar
+}
+
+/// One of our effects, timed from its arrival (`now`) for its own duration.
+/// The server dates it from the last tick it learned from us (a move's or a
+/// cast's), which can be seconds old: Battle Anger (5 s) then showed no
+/// countdown, and would have run out on arrival. End 0 stays permanent.
+fn timed_from(effect: &dsor_proto::commands::combat::StatusEffectElement, now: u32) -> dsor_proto::commands::combat::StatusEffectElement {
+    let mut effect = effect.clone();
+    if effect.end != 0 && effect.duration > 0 {
+        effect.start = now;
+        effect.end = now.wrapping_add(effect.duration);
+    }
+    effect
+}
+
+/// Drop the effects whose end tick has been reached (end 0: permanent);
+/// whether any went.
+fn expire_effects(effects: &mut HashMap<u32, dsor_proto::commands::combat::StatusEffectElement>, now: u32) -> bool {
+    let before = effects.len();
+    effects.retain(|_, e| e.end == 0 || (now.wrapping_sub(e.end) as i32) < 0);
+    effects.len() != before
+}
+
+#[cfg(test)]
+mod effect_expiry_tests {
+    use dsor_proto::commands::combat::StatusEffectElement;
+    use std::collections::HashMap;
+
+    #[test]
+    fn timed_effects_run_out_at_their_end_and_permanent_ones_stay() {
+        // Furious Battle Cry's speed buff: 10 s from tick 1000; the server
+        // never sends its removal.
+        let buff = StatusEffectElement { index: 5176, instance: 1, start: 1000, end: 1250, duration: 250, tail: Some(Default::default()), ..Default::default() };
+        let mount = StatusEffectElement { index: 1, instance: 2, end: 0, tail: Some(Default::default()), ..Default::default() };
+        let mut effects: HashMap<u32, StatusEffectElement> = [(1, buff), (2, mount)].into();
+        assert!(!super::expire_effects(&mut effects, 1249));
+        assert_eq!(effects.len(), 2);
+        assert!(super::expire_effects(&mut effects, 1250));
+        assert_eq!(effects.keys().copied().collect::<Vec<_>>(), [2]);
+        assert!(!super::expire_effects(&mut effects, u32::MAX));
+    }
+
+    #[test]
+    fn an_effect_dated_in_the_past_still_lasts_its_duration_from_arrival() {
+        // Stamped at the last move's tick, 6 s before it arrived at 1150.
+        let anger = StatusEffectElement { index: 5670, instance: 3, start: 1000, end: 1125, duration: 125, tail: Some(Default::default()), ..Default::default() };
+        let timed = super::timed_from(&anger, 1150);
+        assert_eq!((timed.start, timed.end), (1150, 1275));
+        let permanent = StatusEffectElement { end: 0, duration: 0, ..anger };
+        assert_eq!(super::timed_from(&permanent, 1150).end, 0);
+    }
 }
 
 #[cfg(test)]

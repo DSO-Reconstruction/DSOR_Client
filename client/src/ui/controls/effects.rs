@@ -28,7 +28,7 @@ use bevy::asset::{io::Reader, AssetLoader, LoadContext};
 use crate::actors::monsters::{HoverInfo, Hovered};
 use crate::network::net::Net;
 use dsor_proto::commands::combat::StatusEffectElement;
-use tooltips::card::{Card, WHITE};
+use tooltips::card::{Card, WHITE, MUTED, BLUE};
 
 /// Slots per row (Slot1..Slot6).
 const SLOTS: usize = 6;
@@ -78,6 +78,9 @@ struct Line {
     text: String,
     #[serde(default)]
     minus: String,
+    /// The text by class ("warrior", "mage"...), for a class's own resource.
+    #[serde(default)]
+    classes: HashMap<String, String>,
     #[serde(default)]
     args: Vec<Arg>,
 }
@@ -93,6 +96,9 @@ enum Arg {
         p: Option<usize>,
         #[serde(default)]
         v: Option<f32>,
+        /// A mutable actor variable the client may know (card_lines).
+        #[serde(default)]
+        var: Option<String>,
         #[serde(default = "one")]
         scale: f32,
     },
@@ -347,6 +353,63 @@ fn fill(text: &str, args: &[Option<String>]) -> String {
     out
 }
 
+/// A status effect's lines on an item's card (a pet's Effect section,
+/// items::preview::sticker): (text, a header). `params` are the item's values
+/// ($0..), `vars` the actor variables known (the pets' Collector's Bag bonuses,
+/// systems::album). A line whose value is zero is left out (the original's
+/// card had no Andermant line, a bonus its owner had not earned).
+/// EVIDENCE: the original's Cute Doggy card (the user's recording
+///   20261030-1714-37): "Pet Effect:" and "Collector's Bag Effect:" white, the
+///   lines blue, figures with two decimals ("20.00%", "+ 33.00% Health
+///   Points"), the resistances' three ("+ 15.000% all resistance values").
+pub(in crate::ui) fn card_lines(catalog: &Catalog, status: &str, params: &[f32], vars: &HashMap<String, f32>, class: &str) -> Vec<(String, bool)> {
+    // Markup off ("<GemBlueStart>Rage</>"): the card colours the line itself.
+    let plain = |text: &str| {
+        let mut out = String::new();
+        let mut rest = text;
+        while let Some(open) = rest.find('<') {
+            out.push_str(&rest[..open]);
+            match rest[open..].find('>') { Some(close) => rest = &rest[open + close + 1..], None => { rest = ""; } }
+        }
+        out.push_str(rest);
+        out
+    };
+    let Some(effect) = catalog.effects.values().find(|e| e.id == status) else { return Vec::new() };
+    let mut out = Vec::new();
+    for line in &effect.lines {
+        // A header is written white ("<WhiteStart>Pet Effect:</>"); a text of
+        // its own ("Enables auto-pickup for Mystic Cubes") is an effect line.
+        if line.args.is_empty() {
+            let header = line.text.contains("<WhiteStart>");
+            out.push((plain(&line.text), header));
+            continue;
+        }
+        let decimals = if line.args.iter().any(|a| matches!(a, Arg::Text(t) if t.contains("resistance"))) { 3 } else { 2 };
+        let mut first = None;
+        let args: Vec<Option<String>> = line.args.iter().map(|arg| match arg {
+            Arg::Text(text) => Some(text.clone()),
+            Arg::Number { p, v, var, scale } => {
+                let value = p.map(|i| params.get(i).copied().unwrap_or(0.0)).or(*v)
+                    .or_else(|| var.as_ref().map(|name| vars.get(name).copied().unwrap_or(0.0)))
+                    .map(|x| x * scale);
+                first.get_or_insert(value);
+                value.map(|x| format!("{:.*}", decimals, x.abs()))
+            }
+        }).collect();
+        let negative = match first {
+            Some(Some(x)) if x.abs() < 1e-6 => continue,
+            Some(Some(x)) => x < 0.0,
+            _ => false,
+        };
+        // A value only the server knows (the Christmas Elf's resistances, by
+        // the wearer's level) is left out rather than written as a dash.
+        if line.args.iter().zip(&args).any(|(a, v)| matches!(a, Arg::Number { .. }) && v.is_none()) { continue; }
+        let text = if negative && !line.minus.is_empty() { &line.minus } else { line.classes.get(class).unwrap_or(&line.text) };
+        out.push((plain(&fill(text, &args)), false));
+    }
+    out
+}
+
 /// A figure as the modifier texts print it: at most two decimals.
 fn number(value: f32) -> String {
     let text = format!("{value:.2}");
@@ -361,7 +424,7 @@ fn line(line: &Line, params: &[f32], stacks: u32, debuff: bool) -> Option<String
     let mut first: Option<Option<f32>> = None;
     let args: Vec<Option<String>> = line.args.iter().map(|arg| match arg {
         Arg::Text(text) => Some(text.clone()),
-        Arg::Number { p, v, scale } => {
+        Arg::Number { p, v, scale, .. } => {
             let value = p.map_or(*v, |i| params.get(i).copied()).map(|x| x * scale * stacks as f32);
             first.get_or_insert(value);
             value.map(|x| number(x.abs()))
@@ -452,7 +515,8 @@ fn count(commands: &mut Commands, assets: &AssetServer, screen: &Screen, slot: E
 /// gives a row's window offset, None while it is hidden), anchored to its slot.
 #[allow(clippy::too_many_arguments)]
 pub(in crate::ui) fn card(point: Vec2, offset_of: impl Fn(usize) -> Option<Vec2>, width: f32, bar: &StatusBar,
-    catalog: Option<&Catalog>, slots: &Query<&EffectSlot>, net: Option<&Net>, template: Option<&Layout>) -> Option<(Card, [f32; 4])> {
+    catalog: Option<&Catalog>, slots: &Query<&EffectSlot>, net: Option<&Net>, template: Option<&Layout>,
+    bag: &HashMap<String, f32>, class: &str) -> Option<(Card, [f32; 4])> {
     let catalog = catalog?;
     let (slot, shown, rect) = slots.iter().find_map(|s| {
         let shown = bar.slots[s.row][s.slot]?;
@@ -468,19 +532,32 @@ pub(in crate::ui) fn card(point: Vec2, offset_of: impl Fn(usize) -> Option<Vec2>
     } else { net.map(|n| &n.stat_effects) };
     let params = effects.and_then(|e| e.values().filter(|e| e.index == shown.index).max_by_key(|e| e.instance))
         .and_then(|e| e.tail.as_ref()).map_or(&[][..], |t| t.parameters.as_slice());
-    let mut card = Card::new(300.0, template);
-    card.title(&def.name, Some(&def.icon), WHITE);
-    let lines: Vec<String> = def.lines.iter().filter_map(|l| line(l, params, shown.stacks, def.debuff)).collect();
-    if !lines.is_empty() {
-        card.rule();
-        for text in &lines { card.text(text, WHITE); }
-    }
+    // The original's buff card: the small hand of the sticker cards, its name
+    // in italics, "Effect", the headers white and the lines blue; a pet's
+    // Collector's Bag lines with the bonuses earned, the class's own resource.
+    // EVIDENCE: the original's Loving Kraken and Mortis Doll buff cards (the
+    //   user's recording 20261031-1536-17 and screenshot): lines 22 px apart at
+    //   3838 px wide, ours 45; no icon; "+ 30.00% Mana" all blue.
+    // FAILURE (2026-10-31): twice the original's size, "+ —% Health Points"
+    //   lines and "—: value unavailable" ("ours looks so big").
+    let mut card = super::items::small_card(template);
+    let headed = def.lines.iter().any(|l| l.text.contains("<WhiteStart>"));
+    let lines: Vec<(String, bool)> = if headed { card_lines(catalog, &def.id, params, bag, class) }
+        else { def.lines.iter().filter_map(|l| line(l, params, shown.stacks, def.debuff)).map(|t| (t, false)).collect() };
     let time = &bar.times[slot.row][slot.slot];
     let mut hints = Vec::new();
     if shown.stacks > 1 { hints.push(format!("Stacks: {} / {}", shown.stacks, def.stacks)); }
     if !time.is_empty() { hints.push(format!("Remaining: {time}")); }
     // As the skill cards say it (tooltips::overlay).
-    if lines.iter().any(|l| l.contains('—')) { hints.push("—: value unavailable".into()); }
+    if lines.iter().any(|(l, _)| l.contains('—')) { hints.push("—: value unavailable".into()); }
+    let title = format!("<i>{}</>", def.name);
+    super::items::fit_small(&mut card, std::iter::once(title.as_str()).chain(lines.iter().map(|(t, _)| t.as_str())).chain(hints.iter().map(String::as_str)));
+    card.text(&title, WHITE);
+    if !lines.is_empty() {
+        card.rule();
+        card.centered("Effect", MUTED, false);
+        for (text, header) in &lines { card.text(text, if *header { WHITE } else { BLUE }); }
+    }
     if !hints.is_empty() { card.gap(4.0); }
     for hint in &hints { card.hint(hint); }
     let x = slot.k * (width - BASE_W);
@@ -558,6 +635,30 @@ pub(in crate::ui) fn fixture(net: Option<NonSendMut<Net>>, bar: Res<StatusBar>, 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_pet_card_shows_its_own_bonus_and_the_collectors_bag_bonuses_earned() {
+        let catalog: Catalog = serde_json::from_value(serde_json::json!({
+            "units": ["{0:s} s", "{0:i} m", "{0:i} hr", "{0:i} d"], "configs": {},
+            "effects": {"494": {"id": "pet_dog_01", "debuff": false, "icon": "i.png", "name": "Cute Doggy (Pet)", "stacks": 1, "lines": [
+                {"text": "<WhiteStart>Pet Effect:</>", "args": []},
+                {"text": "Selling price of items increased by {0:s}%", "minus": "", "args": [{"p": 0, "scale": 100.0}]},
+                {"text": "<WhiteStart>Collector's Bag Effect:</>", "args": []},
+                {"text": "+ {0:s}% Health Points", "args": [{"var": "pet_hitpoint_01", "scale": 100.0}]},
+                {"text": "+ {1:s}% {0:s}", "args": ["all resistance values", {"var": "pet_resistance_01", "scale": 100.0}]},
+                {"text": "+ {1:s}% Andermant drop stack size while accompanied by a pet", "args": ["Andermant", {"var": "pet_andermant_01", "scale": 100.0}]}]}}
+        })).unwrap();
+        let bag = HashMap::from([("pet_hitpoint_01".to_owned(), 0.33), ("pet_resistance_01".to_owned(), 0.15)]);
+        let lines = card_lines(&catalog, "pet_dog_01", &[0.2], &bag, "warrior");
+        assert_eq!(lines, vec![
+            ("Pet Effect:".to_owned(), true),
+            ("Selling price of items increased by 20.00%".to_owned(), false),
+            ("Collector's Bag Effect:".to_owned(), true),
+            ("+ 33.00% Health Points".to_owned(), false),
+            ("+ 15.000% all resistance values".to_owned(), false),
+        ], "no Andermant earned: no Andermant line");
+        assert!(card_lines(&catalog, "pet_cat_01", &[], &bag, "warrior").is_empty());
+    }
 
     fn catalog() -> Catalog {
         serde_json::from_value(serde_json::json!({

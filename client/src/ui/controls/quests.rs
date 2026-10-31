@@ -210,7 +210,7 @@ pub(in crate::ui) fn sync(
         let item_templates: Vec<String> = def.map(|d| d.items.iter().filter(|i| i.class.is_empty() || i.class.eq_ignore_ascii_case(class_name)).take(4).map(|i| i.item.clone()).collect()).unwrap_or_default();
         let reward_items = def.map(|d| d.items.iter().filter(|i| i.class.is_empty() || i.class.eq_ignore_ascii_case(class_name)).take(4).map(|i| {
             let (image, background, frame) = items.map(|c| c.icon_parts(&i.item, None)).unwrap_or_default();
-            (i.amount, Icon { background: background.unwrap_or_default().into(), image: image.unwrap_or_default().into(), frame: frame.unwrap_or_default().into() })
+            (i.amount, Icon { background: background.unwrap_or_default().into(), image: image.unwrap_or_default().into(), frame: frame.unwrap_or_default().into(), ..Default::default() })
         }).collect()).unwrap_or_default();
         QuestView { id: id.clone(), title: catalog.title(id), level: def.map_or(0, |d| d.level), state: entry.state,
             kind: group(def.map_or("world", |d| d.kind.as_str())).to_owned(), zone, description,

@@ -44,7 +44,7 @@ fn full_loadouts_match_authoritative_server_vectors() {
 
 #[test]
 fn animation_rate_uses_the_server_breakpoints() {
-    for (raw, expected) in [(0.7,0.7),(1.0,1.0),(1.0255,1.0),(1.0256,1.25),(2.1053,2.5),(3.6364,4.1667)] {
+    for (raw, expected) in [(0.7,0.7),(1.0,1.0),(1.0255,1.0),(1.0256,1.25),(2.1053,2.5),(3.6364,4.1667),(6.0,4.1667),(99.0,4.1667)] {
         let stats = CharacterStats([("SkillExecutionSpeed".into(),raw)].into_iter().collect());
         assert!((stats.animation_speed()-expected).abs() < 1e-6);
     }

@@ -19,7 +19,7 @@
 pub(super) mod boards;
 pub(super) mod shop;
 pub(super) mod events;
-pub(super) mod album;
+pub(in crate::ui) mod album;
 pub(super) mod transmog;
 pub(super) mod desks;
 pub(super) mod log;
@@ -98,6 +98,8 @@ pub(crate) enum Request {
     Banner(usize),
     Favorite(String, bool),
     Upgrade(String),
+    /// The album book's n-th reward, hovered for its card.
+    Reward(usize),
     /// Add the carried item that fills this sticker.
     AddSticker(String),
     Salvage,
@@ -246,6 +248,9 @@ pub(crate) struct State {
     /// list and the page keeps the last book opened.
     pub album_open: Option<String>,
     pub album_sticker: Option<String>,
+    /// The item cooldowns running (hotbar::ItemCooldowns::running): what the
+    /// album's stickers of their category count down (album::Sticker::countdown).
+
     pub album_banner: usize,
     pub rank_start: u32,
     /// The grids' pages, by window.
@@ -322,7 +327,8 @@ impl Sources<'_> {
     pub fn icon(&self, template: &str, item: Option<&inventory::ItemInfo>) -> Icon {
         let Some(items) = self.items else { return Icon::default() };
         let (image, background, frame) = items.icon_parts(template, item);
-        Icon { background: background.unwrap_or_default().to_owned(), image: image.unwrap_or_default().to_owned(), frame: frame.unwrap_or_default().to_owned() }
+        Icon { background: background.unwrap_or_default().to_owned(), image: image.unwrap_or_default().to_owned(), frame: frame.unwrap_or_default().to_owned(),
+            info: items.icon_info(template, item).unwrap_or_default().to_owned() }
     }
     pub fn name(&self, template: &str, item: Option<&inventory::ItemInfo>) -> String {
         self.items.map(|i| i.name(template, item).to_owned()).filter(|n| !n.is_empty()).unwrap_or_else(|| crate::ui::dialogue::readable(template))
@@ -544,6 +550,7 @@ pub(super) fn action(window: &str, w: &Widget) -> Option<Action> {
             "Banner" => Request::Banner(arg.parse().ok()?),
             "Favorite" => Request::Favorite(bare.to_owned(), flag),
             "Upgrade" => Request::Upgrade(arg.to_owned()),
+            "Reward" => Request::Reward(arg.parse().ok()?),
             "Add" => Request::AddSticker(arg.to_owned()),
             "Unpick" => Request::Unpick(arg.parse().ok()?),
             "Socket" => Request::Socket(arg.parse().ok()?),
@@ -757,6 +764,7 @@ pub(super) fn tooltip(request: &Request) -> Option<(&'static str, String)> {
         Request::Favorite(_, true) => ("Add to favourites", String::new()),
         Request::Favorite(_, false) => ("Remove from favourites", String::new()),
         Request::Upgrade(_) => ("Upgrade", "Raise this item's rarity with its upgrade items.".into()),
+        Request::Reward(_) => ("Reward", String::new()),
         Request::AddSticker(_) => ("Add to the album", "Adds the carried item to your collection.".into()),
         Request::Salvage => ("Melt down", "Melts the items placed here into Glyphs of Power and materials.".into()),
         Request::Unpick(_) => ("Take back", String::new()),
@@ -836,6 +844,17 @@ fn rank_tabs(controls: &WindowControls) -> (u8, u8, u8) {
 
 /// The server's part: the requests of the windows opened and of their buttons.
 #[allow(clippy::too_many_arguments)]
+/// The album sticker used last and when (Time<Real> seconds): its icon pops
+/// (crate::ui::album_overlays). Kept out of State, whose changes rebuild the
+/// window: a use must show at once.
+/// FAILURE (2026-10-31): the window rebuilt on the use, the countdown and pop
+///   came a moment late ("in ours it's a delay").
+#[derive(Resource, Default)]
+pub(in crate::ui) struct AlbumPopAt(pub Option<(String, f64)>);
+
+/// The currency a sticker's next tier costs (Altered Crescerite).
+pub(in crate::ui) const UPGRADE_CURRENCY: &str = "currency_stickerbook_upgrade";
+
 pub(in crate::ui) fn send(
     net: Option<NonSendMut<Net>>,
     mut pointer: ResMut<Pointer>,
@@ -847,6 +866,7 @@ pub(in crate::ui) fn send(
     mut wheel: MessageReader<bevy::input::mouse::MouseWheel>,
     primary: Query<&Window, With<bevy::window::PrimaryWindow>>,
     quests: Res<super::quests::Quests>,
+    (mut item_cooldowns, items_data, items_catalogs, mut pop_at): (ResMut<super::hotbar::ItemCooldowns>, Res<items::Data>, Res<Assets<items::Catalog>>, ResMut<AlbumPopAt>),
 ) {
     let Some(mut net) = net else { return };
     let fallback = SystemsCatalog::default();
@@ -1041,7 +1061,22 @@ pub(in crate::ui) fn send(
             Request::Sticker(template) => commands.push(ClientCommand::UseStickerBookItem(inventory::UseStickerBookItem { template })),
             // A sticker clicked is shown in the preview; right-clicked, also used.
             Request::Pick(id, use_it) => {
-                if use_it { commands.extend(use_sticker(&views.album, &id)); }
+                // Not while its cooldown runs (a mount 0.5 s, a pet 2-5 s).
+                if use_it {
+                    if let Some(command) = use_sticker(&views.album, &id) {
+                        let allowed = match &command {
+                            ClientCommand::UseStickerBookItem(u) => {
+                                item_cooldowns.start(items_catalogs.get(&items_data.catalog), &u.template, time.elapsed_secs_f64())
+                            }
+                            _ => true,
+                        };
+                        if allowed {
+                            commands.push(command);
+                            // Its icon pops (crate::ui::album_overlays), the window untouched.
+                            pop_at.0 = Some((id.clone(), time.elapsed_secs_f64()));
+                        }
+                    }
+                }
                 if state.album_sticker.as_ref() != Some(&id) { state.album_sticker = Some(id); }
             }
             Request::AlbumBook(book, sticker) => {
@@ -1065,7 +1100,19 @@ pub(in crate::ui) fn send(
             }
             Request::Banner(n) => state.album_banner = n,
             Request::Favorite(id, favorite) => commands.push(ClientCommand::SetStickerbookFavorite(proto::SetStickerbookFavorite { id, favorite })),
-            Request::Upgrade(id) => commands.push(ClientCommand::UpgradeStickerbookItem(proto::UpgradeStickerbookItem { id })),
+            // The tier owned goes up, under the name the server keeps it by
+            // (its item); not owned, or too few Altered Crescerite: nothing.
+            // FAILURE (2026-10-31): sent the sticker's id, which the server
+            //   (services/customization.py) does not own under.
+            // Asked first, as the original (upgrade::sync sends it on Confirm).
+            Request::Upgrade(id) => {
+                let have = net.game_currencies.get(UPGRADE_CURRENCY).copied().unwrap_or(0);
+                if let Some(sticker) = views.album.sticker(&id).filter(|s| s.owned && s.next.as_ref().is_some_and(|(_, cost)| have >= u64::from(*cost))) {
+                    let (next, cost) = sticker.next.clone().unwrap_or_default();
+                    let name = items_catalogs.get(&items_data.catalog).map(|c| c.name(&next, None).trim().to_owned()).unwrap_or_else(|| next.clone());
+                    pointer.upgrade_ask = Some(super::upgrade::Ask { key: sticker.server_key().to_owned(), name, cost });
+                }
+            }
             Request::AddSticker(id) => {
                 let sources = Sources { net: &net, catalog, items: None, names: None, state: &state, class: None, talents: None, bonuses: None };
                 let item = catalog.stickers.get(&id).into_iter().flat_map(album::templates).find_map(|t| sources.carried(t).first().copied());
@@ -1076,7 +1123,7 @@ pub(in crate::ui) fn send(
                 if !items.is_empty() { commands.push(ClientCommand::Salvage(proto::Salvage { items, mode: 0 })); wait = true; }
                 state.salvage.clear();
             }
-            Request::SocketGem(_) | Request::BenchItem(_) => {}
+            Request::SocketGem(_) | Request::BenchItem(_) | Request::Reward(_) => {}
             Request::Unpick(index) => { if index < state.salvage.len() { state.salvage.remove(index); } }
             // A placed gem right-clicked goes back; a set one is taken out.
             Request::TakeGem(socket) if state.gem_preview.iter().any(|(s, _)| *s == socket) => state.gem_preview.retain(|(s, _)| *s != socket),

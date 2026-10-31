@@ -26,7 +26,7 @@ fn app() -> (App, Entity, Entity, Entity) {
     let mut app = App::new();
     app.init_resource::<Interaction>().init_resource::<Pointer>().init_resource::<Time<Real>>()
         .init_resource::<Assets<Catalog>>().init_resource::<ButtonInput<MouseButton>>()
-        .init_resource::<ButtonInput<KeyCode>>().init_resource::<super::super::trade::TradeUi>()
+        .init_resource::<ButtonInput<KeyCode>>().init_resource::<super::super::trade::TradeUi>().init_resource::<super::super::hotbar::ItemCooldowns>()
         .init_resource::<crate::ui::input::UiInput>()
         .add_systems(Update, input);
     let handle = app.world_mut().resource_mut::<Assets<Catalog>>().add(catalog());

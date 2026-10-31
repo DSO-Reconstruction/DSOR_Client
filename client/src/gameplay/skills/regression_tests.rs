@@ -17,11 +17,11 @@ fn cast_sequence(app: &mut App, actor: Entity) -> Entity {
     let sequence = Sequence {
         length: 25, repeat: false,
         tracks: vec![
-            Track::Anim { name: "Cast".into(), speed: 1.0, start: 0, end: 25 },
+            Track::Anim { name: "Cast".into(), speed: 1.0, start: 0, end: 25, fadein: 0.0 },
             Track::Fx { graphics: "tests/cast_effect".into(), joint: String::new(),
                 at: [0., 0., -2., 0., 0., 0., 1., 1., 1.], start: 0, end: 25, curves: default() },
             // A later animation must not reclaim the actor after movement starts.
-            Track::Anim { name: "FollowThrough".into(), speed: 1.0, start: 15, end: 25 },
+            Track::Anim { name: "FollowThrough".into(), speed: 1.0, start: 15, end: 25, fadein: 0.0 },
         ],
     };
     app.world_mut().run_system_once(move |mut commands: Commands|
@@ -227,7 +227,7 @@ fn an_effect_animators_run_at_its_sequence_rate() {
     // Rageful Swing at 6.25x: its slash's MatEmissiveIntensity animator ran at
     // 1x and the track ended before it lit.
     let mut app = App::new();
-    let fx = app.world_mut().spawn(FxModel { gltf: Handle::default(), started: true, looping: false, speed: 6.25 }).id();
+    let fx = app.world_mut().spawn(FxModel { gltf: Handle::default(), started: true, looping: false, speed: 6.25, player: None }).id();
     let glow = app.world_mut().spawn((crate::rendering::materials::ShaderAnim::default(), ChildOf(fx))).id();
     let scroll = app.world_mut().spawn((crate::rendering::materials::UvAnim::default(), ChildOf(glow))).id();
     let plain = app.world_mut().spawn(ChildOf(fx)).id();
@@ -238,8 +238,30 @@ fn an_effect_animators_run_at_its_sequence_rate() {
     }
     assert!(app.world().get::<crate::rendering::materials::AnimTimeScale>(plain).is_none());
     // At 1x nothing is set.
-    let slow = app.world_mut().spawn(FxModel { gltf: Handle::default(), started: true, looping: false, speed: 1.0 }).id();
+    let slow = app.world_mut().spawn(FxModel { gltf: Handle::default(), started: true, looping: false, speed: 1.0, player: None }).id();
     let node = app.world_mut().spawn((crate::rendering::materials::ShaderAnim::default(), ChildOf(slow))).id();
     app.world_mut().run_system_once(fx_particle_speed).unwrap();
     assert!(app.world().get::<crate::rendering::materials::AnimTimeScale>(node).is_none());
+}
+
+#[test]
+fn an_effect_starts_its_clip_again_on_a_rebuilt_scene() {
+    // The Manticore summon's scene was built again a frame after its clip had
+    // started (its model loaded again): the shown copy's fresh player played
+    // nothing and the vortex stood still.
+    let mut app = App::new();
+    app.add_plugins((MinimalPlugins, bevy::asset::AssetPlugin::default()))
+        .init_asset::<Gltf>().init_asset::<AnimationGraph>().init_asset::<AnimationClip>();
+    let mut busy = AnimationPlayer::default();
+    busy.play(AnimationNodeIndex::new(1));
+    let playing = app.world_mut().spawn(busy).id();
+    let fresh = app.world_mut().spawn(AnimationPlayer::default()).id();
+    let gone = app.world_mut().spawn_empty().id();
+    app.world_mut().despawn(gone);
+    let fx = |app: &mut App, player| app.world_mut().spawn(FxModel { gltf: Handle::default(), started: true, looping: false, speed: 1.0, player: Some(player) }).id();
+    let (kept, rebuilt, lost) = (fx(&mut app, playing), fx(&mut app, fresh), fx(&mut app, gone));
+    app.world_mut().run_system_once(start_fx_animations).unwrap();
+    assert!(app.world().get::<FxModel>(kept).unwrap().started, "its player still plays");
+    assert!(!app.world().get::<FxModel>(rebuilt).unwrap().started, "a fresh player in its place");
+    assert!(!app.world().get::<FxModel>(lost).unwrap().started, "its player is gone");
 }

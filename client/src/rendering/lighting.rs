@@ -513,7 +513,14 @@ fn no_event() -> i32 { -1 }
 pub fn spawn_level_light(commands: &mut Commands, light: &LevelLight, parent: Entity, at: Transform, phase: f32, factor: f32) {
     if light.r <= 0. || light.i <= 0. || light.t > 1 || (light.t == 1 && light.cone <= 0.) { return; }
     let mut point = point_light(light.color, light.i, light.r);
-    point.shadow_maps_enabled = light.shadows;
+    // Level lights cast no shadows, whatever their data's flag says; the
+    // original draws none (DSOR_FLAGS=pointshadows draws them, to compare).
+    // EVIDENCE: shaders_sm30 "lightPosRange" ps (the point light pass): light
+    //   colour x sat(N.L) x sat(1 - d/range) x 0.5, no shadow sampler.
+    // FAILURE (2026-10-28): Heredur's boss room (a0204_boss: 14 of its 15
+    //   lights flagged) ran at 26-40 FPS: six cube-face shadow views per light
+    //   each frame. Offline, the same view: p50 32 ms with them, 8 ms without.
+    point.shadow_maps_enabled = light.shadows && crate::flag("pointshadows");
     let power = LevelLightPower { base: point.intensity,
         flicker: light.flicker.map(|[frequency, amount]| (frequency, amount.clamp(0., 1.), phase)) };
     point.intensity *= factor;
@@ -522,7 +529,7 @@ pub fn spawn_level_light(commands: &mut Commands, light: &LevelLight, parent: En
     } else {
         let outer = (light.cone.to_radians() * 0.5).clamp(0.001, std::f32::consts::FRAC_PI_2 - 0.001);
         commands.spawn((SpotLight { color: point.color, intensity: point.intensity, range: point.range,
-            shadow_maps_enabled: light.shadows, inner_angle: outer * 0.8, outer_angle: outer, ..default() }, power, at, ChildOf(parent)));
+            shadow_maps_enabled: point.shadow_maps_enabled, inner_angle: outer * 0.8, outer_angle: outer, ..default() }, power, at, ChildOf(parent)));
     }
 }
 

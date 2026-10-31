@@ -453,10 +453,15 @@ fn simulate(
         }
         if !s.active {
             let _warmup = crate::diagnostics::hud::FrameSpan::new("particles::warmup");
-            // Entering range: start in the steady state, as precalc_time asks.
+            // Entering range: start in the steady state, as precalc_time asks, for a
+            // looping emitter (smoke, torches); a one-shot burst plays from its start.
+            // FAILURE (2026-10-24): mount_summon_end's sparkles (precalc 0.3 s, as long as
+            //   their emission, life 0.3-1 s) were spent before they were drawn: a 0.2 s
+            //   flicker where the original's linger half a second.
+            // UNVERIFIED: Nebula's own rule; the user's release261_192 recording.
             s.active = true;
             s.time = 0.0;
-            let mut warm = e.precalc_time.min(10.0);
+            let mut warm = if e.looping { e.precalc_time.min(10.0) } else { 0.0 };
             while warm > 0.0 {
                 step(e, &mut s, at, PRECALC_STEP, true);
                 warm -= PRECALC_STEP;

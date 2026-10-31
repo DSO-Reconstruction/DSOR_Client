@@ -650,7 +650,7 @@ mod tests {
             .init_resource::<ButtonInput<MouseButton>>().init_resource::<Pointer>()
             .init_resource::<SkillClicks>().init_resource::<crate::network::net::RespawnChoice>()
             .init_resource::<crate::network::chat::ChatLog>().init_resource::<crate::gameplay::dialogue::Dialogue>()
-            .init_resource::<social::SocialUi>().init_resource::<hotbar::Hotbar>().init_resource::<crate::gameplay::quests::QuestUi>().init_resource::<crate::ui::controls::systems::Views>()
+            .init_resource::<social::SocialUi>().init_resource::<hotbar::Hotbar>().init_resource::<crate::ui::controls::hotbar::ItemCooldowns>().init_resource::<crate::gameplay::quests::QuestUi>().init_resource::<crate::ui::controls::systems::Views>()
             .init_resource::<super::party::Party>()
             .add_message::<bevy::input::mouse::MouseWheel>().add_systems(Update, interact);
         let primary = app.world_mut().spawn((Window { focused: true, resolution: (1600,900).into(), ..default() }, PrimaryWindow)).id();

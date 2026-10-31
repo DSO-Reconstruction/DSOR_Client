@@ -7,6 +7,67 @@ use dsor_proto::commands::{inventory::{ItemInfo, QuickSlot as Slot, UseStickerBo
 pub(super) const PRIMARY_ESSENCE: usize = 17;
 pub(super) const BACKUP_ESSENCE: usize = 18;
 
+/// Item and sticker use cooldowns (_Template_Item.CoolDown, shared by its
+/// CoolDownCategory: every mount VanityItem 0.5 s, pets 2-5 s, Shadow Souls 30
+/// s): (start, ready) on Time<Real>, by category, else by template. A use while
+/// one runs is refused, and the quick slots draw it as a skill's.
+/// EVIDENCE: static.db4 _Template_Item; the original sweeps and counts "0.4 s"
+///   .. "0.0 s" over every sticker of the category (the user's recording
+///   2026-10-30, album::grid).
+/// FAILURE (2026-10-24): no cooldown at all on mounts and pets.
+#[derive(Resource, Default)]
+pub(in crate::ui) struct ItemCooldowns(std::collections::HashMap<String, (f64, f64)>);
+
+impl ItemCooldowns {
+    fn key(catalog: &items::Catalog, template: &str) -> Option<(String, f64)> {
+        let d = catalog.items.get(template).filter(|d| d.cooldown > 0.0)?;
+        Some((if d.cooldown_category.is_empty() { template.to_owned() } else { d.cooldown_category.clone() }, d.cooldown as f64))
+    }
+    /// Starts `template`'s cooldown; false while it still runs (the use is refused).
+    pub(in crate::ui) fn start(&mut self, catalog: Option<&items::Catalog>, template: &str, now: f64) -> bool {
+        let Some((key, seconds)) = catalog.and_then(|c| Self::key(c, template)) else { return true };
+        if self.0.get(&key).is_some_and(|&(_, ready)| now < ready) { return false; }
+        self.0.insert(key, (now, now + seconds));
+        true
+    }
+    /// The cooldown key `template` shares (its category, else itself).
+    pub(in crate::ui) fn key_of(catalog: Option<&items::Catalog>, template: &str) -> Option<String> {
+        catalog.and_then(|c| Self::key(c, template)).map(|(key, _)| key)
+    }
+    /// The part left (1 just started) and the seconds left of `key`'s cooldown,
+    /// while it runs.
+    pub(in crate::ui) fn left(&self, key: &str, now: f64) -> Option<(f32, f64)> {
+        self.0.get(key).filter(|&&(_, ready)| now < ready)
+            .map(|&(start, ready)| ((((ready - now) / (ready - start).max(1e-6)) as f32).clamp(0.0, 1.0), ready - now))
+    }
+    /// The cooldowns running: key, tenths of a second left, part left in `steps`.
+    pub(in crate::ui) fn running(&self, now: f64, steps: u8) -> Vec<(String, u32, u8)> {
+        let mut out: Vec<_> = self.0.iter().filter(|(_, &(_, ready))| now < ready).map(|(key, &(start, ready))| {
+            let left = ((ready - now) / (ready - start).max(1e-6)).clamp(0.0, 1.0);
+            (key.clone(), crate::gameplay::skills::cooldown_tenths(ready - now), (left * steps as f64).ceil() as u8)
+        }).collect();
+        out.sort();
+        out
+    }
+    /// The part of `template`'s cooldown left (1 just used, 0 ready) and its seconds.
+    pub(in crate::ui) fn remaining(&self, catalog: Option<&items::Catalog>, template: &str, now: f64) -> (f32, f64) {
+        let Some((key, _)) = catalog.and_then(|c| Self::key(c, template)) else { return (0.0, 0.0) };
+        self.0.get(&key).filter(|&&(_, ready)| now < ready)
+            .map_or((0.0, 0.0), |&(start, ready)| (((ready - now) / (ready - start).max(1e-6)) as f32, ready - now))
+    }
+}
+
+/// The item or sticker a shortcut slot holds (its template), for its cooldown.
+pub(in crate::ui) fn slot_template(index: usize, bar: usize, net: Option<&crate::network::net::Net>) -> Option<String> {
+    let net = net?;
+    let s = slot(net, bar, index)?;
+    match s.kind {
+        1 => item(s, &net.inventory).map(|i| i.template.clone()).or_else(|| s.id.clone()),
+        2 => s.id.clone(),
+        _ => None,
+    }
+}
+
 #[derive(Resource, Default)]
 pub(in crate::ui) struct Hotbar {
     pub active: usize,
@@ -123,7 +184,8 @@ pub(in crate::ui) fn appearance(index: usize, bar: usize, net: Option<&crate::ne
 
 pub(in crate::ui) fn input(mut bar: ResMut<Hotbar>, keys: Res<ButtonInput<KeyCode>>, settings: Res<settings::Settings>,
     mut pointer: ResMut<Pointer>, windows: Query<(&Window2018, &Visibility)>, mut clicks: ResMut<SkillClicks>, net: Option<NonSendMut<crate::network::net::Net>>,
-    (data, catalogs): (Res<items::Data>, Res<Assets<items::Catalog>>)) {
+    (data, catalogs): (Res<items::Data>, Res<Assets<items::Catalog>>), (mut cooldowns, time): (ResMut<ItemCooldowns>, Res<Time<Real>>),
+    (buttons, ui): (Res<ButtonInput<MouseButton>>, Res<crate::ui::input::UiInput>)) {
     let Some(mut net) = net else { return; };
     let blocked = pointer.focus.is_some() || settings.open || windows.iter().any(|(w,v)| *v != Visibility::Hidden && matches!(w.0.as_str(), "gamemenu" | "unstackwindow"));
     if blocked { bar.change = 0; bar.swap_essence = false; clicks.0 = None; return; }
@@ -155,7 +217,16 @@ pub(in crate::ui) fn input(mut bar: ResMut<Hotbar>, keys: Res<ButtonInput<KeyCod
     }
     bar.swap_essence = false;
     if net.death.dead { clicks.0 = None; return; }
-    let requested = clicks.0.or_else(|| settings.current.slot_pressed(&keys));
+    // The mouse buttons' slots, when they hold a pet, mount or item rather than a
+    // skill (crate::gameplay::skills casts those): one use a press, the right
+    // button or Shift + the left one.
+    // FAILURE (2026-10-24): a pet on the left button's slot did nothing on Shift +
+    //   left click.
+    let shift = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
+    let mouse = if !ui.blocks(MouseButton::Right) && buttons.just_pressed(MouseButton::Right) { Some(1) }
+        else if shift && !ui.blocks(MouseButton::Left) && buttons.just_pressed(MouseButton::Left) { Some(0) } else { None };
+    let mouse = mouse.filter(|i| slot(&net, bar.active, *i).is_some_and(|s| matches!(s.kind, 1 | 2)));
+    let requested = clicks.0.or_else(|| settings.current.slot_pressed(&keys)).or(mouse);
     if let Some(index) = requested {
         if index >= PRIMARY_ESSENCE { clicks.0 = None; return; }
         // A shortcut used from the bar is no travel stone's.
@@ -164,8 +235,10 @@ pub(in crate::ui) fn input(mut bar: ResMut<Hotbar>, keys: Res<ButtonInput<KeyCod
             // The Universal Map's slot opens the travel map, as its right click does.
             let map = s.kind == 1 && item(s, &net.inventory).zip(catalogs.get(&data.catalog)).is_some_and(|(i, c)| items::travel_map(c, &i.template));
             if map { pointer.open_window = Some("travelmap"); }
+            // A mount or pet still cooling down is not used again.
+            let ready = map || slot_template(index, bar.active, Some(&net)).is_none_or(|t| cooldowns.start(catalogs.get(&data.catalog), &t, time.elapsed_secs_f64()));
             let command = match s.kind {
-                1 if map => None,
+                1 | 2 if map || !ready => None,
                 1 => item(s, &net.inventory).map(|i| crate::gameplay::inventory::command(i.id, dsor_proto::commands::inventory::Inventory::USE, vec![])),
                 2 => s.id.clone().map(|template| ClientCommand::UseStickerBookItem(UseStickerBookItem { template })),
                 _ => None,

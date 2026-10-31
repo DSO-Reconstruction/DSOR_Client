@@ -83,6 +83,13 @@ fn talent_card(tip: &systems::talents::Tip, template: Option<&Layout>) -> (Card,
 /// at 0.62 of the card's text size: measured on the user's release261_192 shot
 /// beside ours (against the bar's width), 2026-10-24 ("its so big").
 const COMPACT_TEXT: f32 = 0.62;
+/// A sticker's card: fixed under its sticker, centred on it, this far below its
+/// bottom edge (above it where there is no room); it does not follow the cursor.
+/// EVIDENCE: the original's cards in the user's recording 20261030-1714-37
+///   (centred on the hovered cell, their top ~7 video pixels under it) and the
+///   user: "set to one point only and doesn't move, below or above".
+/// FAILURE (2026-10-30): placed at the cursor, then following it.
+const STICKER_GAP: f32 = 2.5;
 
 pub(in crate::ui) fn overlay(mut commands: Commands, windows: Query<(&Window2018, &WindowControls, &Visibility, &Transform), Without<Tooltip>>,
     primary: Query<&Window, With<PrimaryWindow>>, screen: Res<Screen>, settings: Res<settings::Settings>,
@@ -104,6 +111,8 @@ pub(in crate::ui) fn overlay(mut commands: Commands, windows: Query<(&Window2018
     // Cards over status effects open above or below them, clear of their bar
     // (the placement's vertical-first order).
     let mut above = false;
+    // A sticker's card opens under its sticker (STICKER_GAP).
+    let mut under_sticker = false;
     // A talents window card shown as a compact hint (a title alone).
     let mut hint = false;
     let template = layouts.get(&data.tooltip);
@@ -198,8 +207,44 @@ pub(in crate::ui) fn overlay(mut commands: Commands, windows: Query<(&Window2018
                 Action::QuestTrack(delta) => heading = if *delta < 0 { "Previous quest" } else { "Next quest" }.into(),
                 // A sticker: its item's card, as the original's.
                 Action::System(super::systems::Request::Pick(id, _)) if catalog.is_some() && views.album.sticker(id).is_some_and(|s| !s.template.is_empty()) => {
-                    let template = &views.album.sticker(id).unwrap().template;
-                    detail = Some(items::sticker_card(catalog.unwrap(), layouts.get(&data.tooltip), template));
+                    let sticker = views.album.sticker(id).unwrap();
+                    detail = Some(items::sticker_card(catalog.unwrap(), layouts.get(&data.tooltip), &sticker.template, &sticker.name,
+                        status_catalogs.get(&status_bar.catalog), &views.album.bag_values(), &views.album.class, None));
+                    // Fixed under the sticker (STICKER_GAP).
+                    under_sticker = true;
+                }
+                // A book reward on the album's bar: its card, as the original's
+                // (title white, its bonus green, "Reward for ..." yellow, centred).
+                Action::System(super::systems::Request::Reward(n)) if views.album.reward_cards.get(*n).is_some() => {
+                    let reward = &views.album.reward_cards[*n];
+                    let yellow = Color::srgb(0.95, 0.85, 0.2);
+                    let mut card = items::small_card(layouts.get(&data.tooltip));
+                    let title = format!("<i>{}</>", reward.title);
+                    let footer = format!("<i>{}</>", reward.footer);
+                    if reward.bonus.is_none() {
+                        // An item: its own card (a pet's whole card), "Reward for ..." under it.
+                        let Some(catalog) = catalog else { return };
+                        detail = Some(items::reward_item_card(catalog, layouts.get(&data.tooltip), &reward.item, &reward.footer, reward.lifetime,
+                            status_catalogs.get(&status_bar.catalog), &views.album.bag_values(), &views.album.class));
+                        under_sticker = true;
+                    } else {
+                        let lines = reward.bonus.clone().unwrap_or_default();
+                        items::fit_small(&mut card, std::iter::once(title.as_str()).chain(lines.iter().map(String::as_str)).chain(std::iter::once(footer.as_str())));
+                        card.centered(&title, card::WHITE, false);
+                        for line in &lines { card.centered(line, card::GREEN, false); }
+                        card.centered(&footer, yellow, false);
+                        detail = Some(card);
+                        under_sticker = true;
+                    }
+                }
+                // A sticker's arrow: its next tier's card and price.
+                Action::System(super::systems::Request::Upgrade(id)) if catalog.is_some() && views.album.sticker(id).is_some_and(|s| s.next.is_some()) => {
+                    let sticker = views.album.sticker(id).unwrap();
+                    let (next, cost) = sticker.next.clone().unwrap();
+                    let have = net.as_deref().and_then(|n| n.game_currencies.get(super::systems::UPGRADE_CURRENCY)).copied().unwrap_or(0);
+                    detail = Some(items::sticker_card(catalog.unwrap(), layouts.get(&data.tooltip), &next, &sticker.name,
+                        status_catalogs.get(&status_bar.catalog), &views.album.bag_values(), &views.album.class, Some((have, cost))));
+                    under_sticker = true;
                 }
                 // A quest reward: its card.
                 // FAILURE: no tooltip on the quests' rewards.
@@ -322,11 +367,12 @@ pub(in crate::ui) fn overlay(mut commands: Commands, windows: Query<(&Window2018
             let offset_of = |row: usize| { let name = if row == effects::TARGET { HOVER_WINDOW } else { "bottombar" };
                 windows.iter().find(|(w,_,v,_)| w.0 == name && **v != Visibility::Hidden).map(|(_,_,_,tf)| window_offset(tf)) };
             let effect = effects::card(p, offset_of, screen.width, &status_bar,
-                status_catalogs.get(&status_bar.catalog), &status_slots, net.as_deref(), template);
+                status_catalogs.get(&status_bar.catalog), &status_slots, net.as_deref(), template, &views.album.bag_values(), &views.album.class);
             if let Some((card, rect)) = effect {
                 detail = Some(card);
                 anchor = Some(rect);
-                above = true;
+                // Centred under its icon, as the original's (above when there is no room).
+                under_sticker = true;
             // Non-button gauges and currency amounts also explain themselves.
             } else if let Some((w,wc,_,tf)) = windows.iter().filter(|(_,c,v,tf)| **v != Visibility::Hidden && c.covers(p-window_offset(tf),screen.width))
                 .max_by(|a,b|a.3.translation.z.total_cmp(&b.3.translation.z)) {
@@ -394,7 +440,11 @@ pub(in crate::ui) fn overlay(mut commands: Commands, windows: Query<(&Window2018
         card
     }));
     let key = card.as_ref().map(|c| (c.clone(), screen.scale.to_bits(), template.is_some()));
-    let at = card.as_ref().zip(anchor).map(|(c,a)| card::placement(a,Vec2::new(c.width,c.height()),Vec2::new(screen.width,BASE_H),compact || above));
+    let at = card.as_ref().zip(anchor).map(|(c,a)| if under_sticker {
+        card::under(a, Vec2::new(c.width,c.height()), Vec2::new(screen.width,BASE_H), STICKER_GAP)
+    } else {
+        card::placement(a,Vec2::new(c.width,c.height()),Vec2::new(screen.width,BASE_H),compact || above)
+    });
     if *last == key {
         if let Some((at,scale))=at { for mut tf in &mut transforms { tf.translation=screen.world(0.0,at.x,at.y).extend(850.0); tf.scale=Vec3::splat(scale); } }
         return;
@@ -417,7 +467,7 @@ mod tests {
             .init_asset::<Layout>().init_asset::<items::Catalog>().init_asset::<Mesh>().init_asset::<UiMaterial>()
             .init_asset::<Image>().init_asset::<Font>().init_asset::<crate::gameplay::skills::SkillTable>()
             .init_resource::<Screen>().init_resource::<Loaded>().init_resource::<settings::Settings>()
-            .init_resource::<Pointer>().init_resource::<hotbar::Hotbar>().init_resource::<dialogue::Presentation>()
+            .init_resource::<Pointer>().init_resource::<hotbar::Hotbar>().init_resource::<crate::ui::controls::hotbar::ItemCooldowns>().init_resource::<dialogue::Presentation>()
             .init_resource::<items::Interaction>().init_resource::<ButtonInput<KeyCode>>()
             .init_resource::<effects::StatusBar>().init_asset::<effects::Catalog>()
             .init_resource::<Figures>().init_resource::<currency::Shown>().init_resource::<systems::Views>()

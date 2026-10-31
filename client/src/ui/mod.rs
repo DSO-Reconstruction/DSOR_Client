@@ -442,6 +442,8 @@ enum Gauge {
     Wisdom,
     /// A party member's health (groupwindow row n; controls::party).
     Group(u8),
+    /// The player's cast under way (castbar01 TeleportProgressBar).
+    Cast,
 }
 
 impl Gauge {
@@ -455,6 +457,7 @@ impl Gauge {
             Self::HealthBar => 4,
             Self::ResourceBar => 5,
             Self::Wisdom => 6,
+            Self::Cast => 7,
             Self::Group(n) => 16 + n,
         }
     }
@@ -521,6 +524,16 @@ const SHEET_WIDGETS: &[&str] = &[
     "DarkMagic_Percentage",
 ];
 
+/// An album sticker's countdown (controls::systems::album COUNT_MARK): its
+/// cooldown key and icon place; what it last drew.
+#[derive(Component)]
+struct AlbumCount { key: String, k: f32, rect: [f32; 4], shown: Option<(u16, String)> }
+
+/// An album sticker just used (album POP_MARK): its id and icon place; the
+/// frame of its pop it last drew.
+#[derive(Component)]
+struct AlbumPop { sticker: String, k: f32, rect: [f32; 4], shown: Option<u16> }
+
 /// A quick slot's icon place: its wire slot and rect.
 #[derive(Component)]
 struct QuickSlot {
@@ -548,6 +561,8 @@ struct Figures {
     bar: Vec<Option<String>>,
     name: String,
     online: bool,
+    /// The character they are for (Net::local_name): another one starts over.
+    character: Option<String>,
     level: Option<u32>,
     /// The money and the other currencies (0 until the server sends them).
     wallet: controls::currency::Wallet,
@@ -623,13 +638,15 @@ impl Plugin for UiPlugin {
             .init_resource::<controls::Pointer>()
             .init_resource::<SkillClicks>()
             .init_resource::<controls::social::SocialUi>()
-            .init_resource::<controls::trade::TradeUi>()
+            .init_resource::<controls::trade::TradeUi>().init_resource::<crate::ui::controls::hotbar::ItemCooldowns>()
             .init_resource::<controls::party::Party>()
             .init_resource::<controls::quests::Quests>()
             .init_resource::<crate::gameplay::quests::QuestUi>().init_resource::<crate::ui::controls::systems::Views>()
             .init_resource::<controls::items::pins::Pins>()
             .init_resource::<Settings>()
-            .init_resource::<controls::hotbar::Hotbar>()
+            .init_resource::<controls::hotbar::Hotbar>().init_resource::<crate::ui::controls::hotbar::ItemCooldowns>()
+            .init_resource::<controls::hotbar::ItemCooldowns>()
+            .init_resource::<controls::systems::AlbumPopAt>()
             .insert_resource(local_map::MapSettings::load())
             .add_systems(Startup, (setup, controls::items::setup, dialogue::setup, controls::message::setup))
             .add_systems(Update, follow_screen)
@@ -644,7 +661,7 @@ impl Plugin for UiPlugin {
                 .before(bevy::sprite_render::check_entities_needing_specialization::<UiMaterial>))
             .add_systems(
                 Update,
-                ((dialogue::sync, controls::party::sync, controls::quests::sync, controls::systems::sync, controls::currency::sync_bar, controls::message::sync, spawn_windows, controls::sync_chat).chain(), controls::spells::sync, controls::items::sync, (controls::items::pins::update, controls::keyboard).chain(), controls::interact, (controls::settings::sync, controls::settings::sliders, controls::hotbar::input, controls::spells::apply_drop, controls::stickers::apply_drop).chain(), read_figures, controls::edit_text, (controls::items::input, controls::items::sell_cursor, controls::consent::sync).chain(), controls::order_windows, (update_fills, (update_values, fit_texts).chain(), update_slots, (local_map::update, local_map::update_markers, local_map::appearance).chain(), (controls::effects::fixture, controls::effects::sync, controls::effects::draw).chain()), controls::chat_rows, controls::sheet::rows, controls::paint, (controls::items::render, controls::items::destroy_dialog), (controls::spells::overlay, controls::items::overlay, controls::tooltips), show_hover_window, death_dialog, (controls::trade::sync, controls::social::column, controls::social::context_menu, controls::social::answer, controls::logout::dialog, controls::travel::dialog, controls::access::dialog, controls::systems::send, controls::systems::talents::dialogs, controls::social::dialogs, controls::trade::render).chain()).chain().after(crate::actors::monsters::MonsterHoverInfo).before(crate::network::net::NetSystems).run_if(crate::screens::loading::gameplay_ready),
+                ((dialogue::sync, controls::party::sync, controls::quests::sync, controls::systems::sync, controls::currency::sync_bar, controls::message::sync, spawn_windows, controls::sync_chat).chain(), controls::spells::sync, controls::items::sync, (controls::items::pins::update, controls::keyboard).chain(), controls::interact, (controls::settings::sync, controls::settings::sliders, controls::hotbar::input, controls::spells::apply_drop, controls::stickers::apply_drop).chain(), read_figures, controls::edit_text, (controls::items::input, controls::items::sell_cursor, controls::consent::sync, controls::upgrade::sync).chain(), controls::order_windows, (update_fills, (update_values, fit_texts).chain(), (update_slots, album_overlays), (local_map::update, local_map::update_markers, local_map::appearance).chain(), (controls::effects::fixture, controls::effects::sync, controls::effects::draw).chain()), controls::chat_rows, controls::sheet::rows, controls::paint, (controls::items::render, controls::items::destroy_dialog), (controls::spells::overlay, controls::items::overlay, controls::tooltips, cast_bar_window), show_hover_window, death_dialog, (controls::trade::sync, controls::social::column, controls::social::context_menu, controls::social::answer, controls::logout::dialog, controls::travel::dialog, controls::access::dialog, controls::systems::send, controls::systems::talents::dialogs, controls::social::dialogs, controls::trade::render).chain()).chain().after(crate::actors::monsters::MonsterHoverInfo).before(crate::network::net::NetSystems).run_if(crate::screens::loading::gameplay_ready),
             );
         // The 3D previews: once this frame's clicks moved the pages and the
         // views were rebuilt.
@@ -695,6 +712,7 @@ fn setup(mut commands: Commands, assets: Res<AssetServer>, mut quest_ui: ResMut<
     loaded.layouts.push((assets.load(format!("interface/{}.ui.json", controls::logout::WINDOW)), 612.0, None));
     loaded.layouts.push((assets.load(format!("interface/{}.ui.json", controls::travel::WINDOW)), 613.0, None));
     loaded.layouts.push((assets.load(format!("interface/{}.ui.json", controls::access::WINDOW)), 470.0, None));
+    loaded.layouts.push((assets.load(format!("interface/{CAST_WINDOW}.ui.json")), 590.0, None));
     loaded.layouts.push((assets.load("interface/settingswindow2.ui.json"), 550.0, None));
     loaded.layouts.push((assets.load(format!("interface/{CHAT_WINDOW}.ui.json")), CHAT_DEPTH, None));
     loaded.layouts.push((assets.load(format!("interface/{CHAT_MENU}.ui.json")), CHAT_DEPTH + 3.0, None));
@@ -747,6 +765,9 @@ fn gauge_of(id: &str) -> Option<Gauge> {
     let parent = id.rsplit('/').nth(1).unwrap_or("");
     if parent == "Healthbar" && id.ends_with("/progress") {
         return Some(Gauge::TargetHealth);
+    }
+    if parent == "TeleportProgressBar" && id.ends_with("/progress") {
+        return Some(Gauge::Cast);
     }
     match parent {
         "Health" if id.ends_with("/progress") => Some(Gauge::HealthBar),
@@ -1143,6 +1164,17 @@ fn spawn_windows(
             if layout.window == DEATH_WINDOW && !death_part(&w.id) {
                 continue;
             }
+            if layout.window == controls::systems::ALBUM {
+                let mark = w.id.split_once(controls::systems::album::COUNT_MARK).and_then(|(_, rest)| rest.split_once('#')).map(|(_, key)| key.to_owned());
+                let pop = w.id.split_once(controls::systems::album::POP_MARK).map(|(_, id)| id.to_owned());
+                if mark.is_some() || pop.is_some() {
+                    let p = parent(&mut commands, w.k, true);
+                    let at = Transform::from_xyz(0.0, 0.0, WINDOW_ITEMS_DEPTH);
+                    if let Some(key) = mark { commands.spawn((AlbumCount { key, k: w.k, rect: w.rect, shown: None }, at, Visibility::Inherited, ChildOf(p))); }
+                    if let Some(sticker) = pop { commands.spawn((AlbumPop { sticker, k: w.k, rect: w.rect, shown: None }, at, Visibility::Inherited, ChildOf(p))); }
+                    continue;
+                }
+            }
             if let Some(slot) = quick_slot_of(&w.id) {
                 controls.region(w.k, w.rect, Gate::default());
                 let p = parent(&mut commands, w.k, true);
@@ -1508,8 +1540,11 @@ fn read_figures(net: Option<NonSend<crate::network::net::Net>>, mut figures: Res
         }
         return;
     };
-    if !figures.online {
+    // Online, or another character after switching (the maxima are the largest
+    // seen, so the warrior's 330055 health stayed on the mage).
+    if !figures.online || figures.character != net.local_name {
         figures.online = true;
+        figures.character = net.local_name.clone();
         figures.health = (0.0, 0.0);
         figures.resource = (0.0, 0.0);
         figures.xp = 0.0;
@@ -1593,10 +1628,12 @@ fn update_fills(
     mut fills: Query<(&mut Fill, &MeshMaterial2d<UiMaterial>, &Element)>,
     roots: Query<Ref<Transform>, With<Window2018>>,
     mut materials: ResMut<Assets<UiMaterial>>,
+    (cast, time): (Res<crate::gameplay::skills::CastBar>, Res<Time>),
 ) {
     for (mut f, m, element) in &mut fills {
         let Ok(root) = roots.get(element.root) else { continue };
         let v = match f.which {
+            Gauge::Cast => cast.0.map_or(0.0, |(start, end)| ((time.elapsed_secs() - start) / (end - start).max(1e-3)).clamp(0.0, 1.0)),
             Gauge::Health | Gauge::HealthBar => fraction(figures.health),
             Gauge::Resource | Gauge::ResourceBar => fraction(figures.resource),
             Gauge::Xp => figures.xp.clamp(0.0, 1.0),
@@ -1705,7 +1742,7 @@ fn update_slots(
     catalogs: Res<Assets<Catalog>>,
     screen: Res<Screen>,
     (skill_data, skill_tables, resource_max, char_stats): (Res<crate::gameplay::skills::SkillData>, Res<Assets<crate::gameplay::skills::SkillTable>>, Res<crate::gameplay::stats::ResourceMax>, Res<crate::gameplay::stats::CharacterStats>),
-    (cooldowns, time, pointer): (Res<crate::gameplay::skills::SkillCooldowns>, Res<Time<Real>>, Res<controls::Pointer>),
+    (cooldowns, time, pointer, item_cooldowns): (Res<crate::gameplay::skills::SkillCooldowns>, Res<Time<Real>>, Res<controls::Pointer>, Res<controls::hotbar::ItemCooldowns>),
 ) {
     let Some(table) = icon_table.get(&loaded.icons) else { return };
     let catalog = catalogs.get(&data.catalog);
@@ -1722,11 +1759,16 @@ fn update_slots(
         // A skill cooling down (cast_input refuses it until then) gets a dark
         // sweep over its icon, redrawn in COOLDOWN_STEPS steps as it turns.
         let cool = skill.as_deref().map_or(0.0, |id| cooldowns.remaining(&skill_data, &skill_tables, id, now));
+        // A mount, pet or item shortcut cooling down draws the same way.
+        let shortcut = skill.is_none().then(|| controls::hotbar::slot_template(s.slot, hotbar.active, net.as_deref())).flatten();
+        let (item_cool, item_seconds) = shortcut.as_deref().map_or((0.0, 0.0), |t| item_cooldowns.remaining(catalog, t, now));
+        let cool = cool.max(item_cool);
         let step = (cool * COOLDOWN_STEPS as f32).ceil().min(COOLDOWN_STEPS as f32) as u8;
         // And the seconds left on it, as the original's "21 s".
         // FAILURE (2026-10-24): "the skills still don't have a cooldown": only the
         //   sweep showed, hard to see on dark icons.
-        let tenths = skill.as_deref().map_or(0, |id| crate::gameplay::skills::cooldown_tenths(cooldowns.seconds_left(&skill_data, &skill_tables, id, now)));
+        let tenths = skill.as_deref().map_or(0, |id| crate::gameplay::skills::cooldown_tenths(cooldowns.seconds_left(&skill_data, &skill_tables, id, now)))
+            .max(crate::gameplay::skills::cooldown_tenths(item_seconds));
         // A spell being dragged off this slot leaves it empty meanwhile, as in the game.
         let lifted = pointer.lifted_slot() == Some((hotbar.active, s.slot));
         let want = controls::hotbar::appearance(s.slot, hotbar.active, net.as_deref(), &figures, catalog, table)
@@ -1770,6 +1812,83 @@ fn update_slots(
     }
 }
 
+/// The album's countdowns and pops, every frame while they run: the sweep turns
+/// smoothly and the seconds count down as the original's ("4  s" just after a
+/// 5 s use: whole seconds left, tenths in the last one, a wide gap before the
+/// s); a sticker just used pops: a see-through copy of its icon grows to 1.3
+/// times and fades from the click, gone in 0.95 s.
+/// EVIDENCE: the user's recording 20261031-1840-39, 30 fps (the original's
+///   Supreme Snowman at 26.2-27.1 s; "5 s" for one frame, then "4 s"; the sweep
+///   moving every frame).
+/// FAILURE (2026-10-31): the window rebuilt for each step ("ticky, snappy"),
+///   "5 s" for the first whole second, no pop.
+/// UNVERIFIED: the pop's exact start (the server's answer?) and alpha.
+#[allow(clippy::too_many_arguments)]
+fn album_overlays(mut commands: Commands, mut counts: Query<(Entity, &mut AlbumCount)>, mut pops: Query<(Entity, &mut AlbumPop)>,
+    item_cooldowns: Res<controls::hotbar::ItemCooldowns>, views: Res<controls::systems::Views>, pop_at: Res<controls::systems::AlbumPopAt>,
+    time: Res<Time<Real>>, assets: Res<AssetServer>, screen: Res<Screen>,
+    mut meshes: ResMut<Assets<Mesh>>, mut materials: ResMut<Assets<UiMaterial>>) {
+    use controls::systems::album::{COUNT_SIZE, SWEEP_ALPHA};
+    let now = time.elapsed_secs_f64();
+    for (e, mut c) in &mut counts {
+        let want = item_cooldowns.left(&c.key, now).map(|(part, seconds)| {
+            let text = if seconds >= 1.0 { format!("{}  s", seconds.floor() as u32) } else { format!("0.{}  s", (seconds * 10.0).floor() as u32) };
+            ((part * 720.0).ceil() as u16, text)
+        });
+        if want == c.shown && !screen.is_changed() { continue; }
+        commands.entity(e).despawn_related::<Children>();
+        if let Some((part, text)) = &want {
+            let [l, t, r, b] = c.rect;
+            let mut run = Run { k: c.k, ..default() };
+            run.push(&sweep_art(c.rect, *part as f32 / 720.0, SWEEP_ALPHA), 0.0);
+            commands.spawn((Mesh2d(meshes.add(run.mesh())), MeshMaterial2d(materials.add(material(None))),
+                Transform::from_xyz(0.0, 0.0, 0.5), RenderLayers::layer(LAYER), ChildOf(e)));
+            let font = TextFont { font: assets.load("fonts/tahoma.ttf").into(), font_size: bevy::text::FontSize::Px(COUNT_SIZE * FONT_SCALE * screen.scale), ..default() };
+            let at = Vec3::new((l + r) * 0.5, (t + b) * 0.5, 1.2);
+            for (offset, color) in [(Vec3::new(0.8, 0.8, -0.1), Color::BLACK), (Vec3::ZERO, Color::srgb(0.98, 0.93, 0.82))] {
+                commands.spawn((Text2d::new(text.clone()), font.clone(), TextColor(color), Anchor::CENTER,
+                    Transform::from_translation(at + offset).with_scale(Vec3::new(1.0, -1.0, 1.0) / screen.scale),
+                    RenderLayers::layer(LAYER), ChildOf(e)));
+            }
+        }
+        c.shown = want;
+    }
+    for (e, mut p) in &mut pops {
+        // It jumps out at the click: a copy grows to 1.33 times the icon, most
+        // of it early, and fades, gone in 0.95 s.
+        // EVIDENCE: the original's Mortis Doll (the user's recording
+        //   20261031-1923-29, 30 fps, the change around the cell): visible
+        //   0.9-1.07 s each time (4.63-5.57, 11.03-12.10, 24.63-25.50 s),
+        //   strongest about 0.4 s in.
+        // FAILURE (2026-10-31): 0.9 s from its own size crept out unseen; a
+        //   0.35 s wait read as a delay; 0.45 s was "too fast".
+        let start = pop_at.0.as_ref().filter(|(id, _)| *id == p.sticker).map(|&(_, at)| at);
+        let progress = start.map(|at| ((now - at) / 0.95) as f32).filter(|x| (0.0..1.0).contains(x));
+        let want = progress.map(|x| (x * 240.0) as u16);
+        if want == p.shown { continue; }
+        commands.entity(e).despawn_related::<Children>();
+        if let (Some(x), Some(icon)) = (progress, views.album.sticker(&p.sticker).map(|s| s.icon.clone())) {
+            let [l, t, r, b] = p.rect;
+            // Ease out: most of the growth in the first frames.
+            let (cx, cy, grow) = ((l + r) * 0.5, (t + b) * 0.5, 1.0 + 0.33 * (1.0 - (1.0 - x) * (1.0 - x)));
+            let rect = [cx + (l - cx) * grow, cy + (t - cy) * grow, cx + (r - cx) * grow, cy + (b - cy) * grow];
+            for (z, layer) in [&icon.background, &icon.image, &icon.frame].into_iter().enumerate().filter(|(_, l)| !l.is_empty()) {
+                let mut art = controls::template::image_art(rect, layer.clone());
+                for c in art.color.chunks_mut(4) { c[3] = 0.65 * (1.0 - x); }
+                let mut run = Run { k: p.k, ..default() };
+                run.push(&art, 0.0);
+                commands.spawn((Mesh2d(meshes.add(run.mesh())), MeshMaterial2d(materials.add(material(Some(assets.load(layer.clone()))))),
+                    // Over the sweep (0.5), under the seconds (1.2): the original's
+                    // "4 s" stays sharp through its pop.
+                    // FAILURE (2026-10-31): drawn over everything, it washed the
+                    //   icon and the seconds out (recording 20261031-1857-59).
+                    Transform::from_xyz(0.0, 0.0, 0.8 + z as f32 * 0.01), RenderLayers::layer(LAYER), ChildOf(e)));
+            }
+        }
+        p.shown = want;
+    }
+}
+
 /// What of a slot its picture covers: the round mount and companion sockets (8,
 /// 9) a disc inside their ring, every other slot its whole square.
 /// FAILURE (2026-10-24): the Manticore's square picture spilled over the mount
@@ -1794,6 +1913,33 @@ fn slot_art(slot: usize, rect: [f32; 4], shade: [f32; 4]) -> Art {
     Art { tex: None, pos, uv, color: shade.repeat(SIDES as usize + 1), idx, saturation: 1.0 }
 }
 
+/// The original's cast bar, under the player while a mount or the town portal is
+/// cast (crate::gameplay::skills::CastBar; its bar is Gauge::Cast).
+const CAST_WINDOW: &str = "castbar01";
+
+/// The cast bar shows only while a cast runs (written only when that changes),
+/// centred under the player: its layout centres it on the screen (k 0.5), but
+/// the camera looks a little ahead of the player, which the 45-degree view turns
+/// into a sideways shift (it sat 40 px right of the name; the original's is under
+/// it, the user's shots).
+#[allow(clippy::type_complexity)]
+fn cast_bar_window(cast: Res<crate::gameplay::skills::CastBar>, mut windows: Query<(&Window2018, &mut Visibility, &mut Transform)>,
+    primary: Query<&bevy::window::Window, With<bevy::window::PrimaryWindow>>,
+    cameras: Query<(&Camera, &GlobalTransform), (With<Camera3d>, Without<crate::rendering::highlight::HighlightCamera>)>,
+    players: Query<&GlobalTransform, With<crate::network::net::LocalPlayer>>, screen: Res<Screen>) {
+    let want = if cast.0.is_some() { Visibility::Inherited } else { Visibility::Hidden };
+    let shift = (cast.0.is_some()).then(|| {
+        let (window, (camera, at), player) = (primary.single().ok()?, cameras.single().ok()?, players.single().ok()?);
+        let p = camera.world_to_viewport(at, player.translation()).ok()?;
+        Some(p.x * BASE_H / window.height().max(1.0) - screen.width * 0.5)
+    }).flatten();
+    for (w, mut v, mut tf) in &mut windows {
+        if w.0 != CAST_WINDOW { continue; }
+        if *v != want { *v = want; }
+        if let Some(x) = shift.filter(|x| (x - tf.translation.x).abs() > 0.5) { tf.translation.x = x; }
+    }
+}
+
 /// Steps of the cooldown sweep: a redraw every 1/64 of the cooldown.
 const COOLDOWN_STEPS: u32 = 64;
 
@@ -1804,6 +1950,11 @@ const COOLDOWN_STEPS: u32 = 64;
 /// dark icons (teleport) still read as cooling down; 0.6 was hard to see there.
 /// UNVERIFIED: the original's own look (its Slot widget draws it in code).
 fn cooldown_sweep(rect: [f32; 4], remaining: f32) -> Art {
+    sweep_art(rect, remaining, 0.75)
+}
+
+/// The cooldown sweep at a given darkness (alpha of its black).
+fn sweep_art(rect: [f32; 4], remaining: f32, alpha: f32) -> Art {
     use std::f32::consts::{FRAC_PI_4, TAU};
     let [l, t, r, b] = rect;
     let (cx, cy) = ((l + r) * 0.5, (t + b) * 0.5);
@@ -1821,7 +1972,7 @@ fn cooldown_sweep(rect: [f32; 4], remaining: f32) -> Art {
     }
     let n = (pos.len() / 2) as u32;
     let idx = (1..n - 1).flat_map(|i| [0, i, i + 1]).collect();
-    Art { tex: None, uv: vec![0.0; pos.len()], color: [0.0, 0.0, 0.0, 0.75].repeat(n as usize), pos, idx, saturation: 1.0 }
+    Art { tex: None, uv: vec![0.0; pos.len()], color: [0.0, 0.0, 0.0, alpha].repeat(n as usize), pos, idx, saturation: 1.0 }
 }
 
 /// The hovered monster's info window, shown while one is under the cursor.

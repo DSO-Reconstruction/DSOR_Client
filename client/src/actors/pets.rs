@@ -259,7 +259,7 @@ fn summon_sequence(def: &PetDef, sequences: Option<&SequenceTable>) -> Option<Se
     if def.spawn_s > 0.0 && !seq.as_ref().is_some_and(|s| s.tracks.iter().any(|t| matches!(t, Track::Anim { .. }))) {
         let end = (def.spawn_s * FRAMES_PER_SECOND).ceil() as i32;
         let seq = seq.get_or_insert_with(|| Sequence { length: 0, repeat: false, tracks: Vec::new() });
-        seq.tracks.push(Track::Anim { name: "Spawn".into(), speed: 1.0, start: 0, end });
+        seq.tracks.push(Track::Anim { name: "Spawn".into(), speed: 1.0, start: 0, end, fadein: 0.0 });
         seq.length = seq.length.max(end as u32);
     }
     seq

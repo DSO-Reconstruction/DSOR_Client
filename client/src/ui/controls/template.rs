@@ -141,13 +141,15 @@ pub(in crate::ui) struct Icon {
     pub background: String,
     pub image: String,
     pub frame: String,
+    /// Over the frame: a time-limited item's hourglass (items::Catalog::icon_info).
+    pub info: String,
 }
 
 /// The icon's layers in place of the template's Icon widget (`w`), named
 /// `<w.id>/<Background|Image|Frame>`; the widget itself keeps its text only.
 pub(in crate::ui) fn icon_layers(w: &mut Widget, icon: &Icon) -> Vec<Widget> {
     let mut layers = Vec::new();
-    for (suffix, texture) in [("Background", &icon.background), ("Image", &icon.image), ("Frame", &icon.frame)] {
+    for (suffix, texture) in [("Background", &icon.background), ("Image", &icon.image), ("Frame", &icon.frame), ("Info", &icon.info)] {
         if texture.is_empty() { continue; }
         let mut layer = w.clone();
         layer.id = format!("{}/{suffix}", w.id);
@@ -251,7 +253,7 @@ mod tests {
     fn icon_layers_replace_the_artwork_in_order() {
         let source = fixture::layout("w", &[("A/Slot/Icon", "Icon", true)]);
         let mut w = source.widgets[0].clone();
-        let layers = icon_layers(&mut w, &Icon { background: "bg.png".into(), image: "img.png".into(), frame: String::new() });
+        let layers = icon_layers(&mut w, &Icon { background: "bg.png".into(), image: "img.png".into(), frame: String::new(), ..Default::default() });
         assert_eq!(layers.iter().map(|l| l.id.as_str()).collect::<Vec<_>>(), ["A/Slot/Icon/Background", "A/Slot/Icon/Image"]);
         assert_eq!(layers[1].art.as_ref().unwrap().tex.as_deref(), Some("img.png"));
         assert!(w.art.is_none() && w.text.is_some());

@@ -776,6 +776,8 @@ fn apply_states(
     players: Query<(), With<AnimationPlayer>>,
     gltfs: Res<Assets<Gltf>>,
     mut graphs: ResMut<Assets<AnimationGraph>>,
+    mut clips: ResMut<Assets<AnimationClip>>,
+    nodes: Query<(&bevy::animation::AnimationTargetId, &bevy::gltf::GltfExtras)>,
 ) {
     scene.waiting_states = false;
     for (entity, state, instance) in &pending {
@@ -810,11 +812,23 @@ fn apply_states(
                     .find(|e| players.contains(*e)),
             ) {
                 if let Some(clip) = gltf.animations.first() {
-                    let (graph, node) = AnimationGraph::from_clip(clip.clone());
+                    // Each part loops or holds as its nax3 clip says, as effects
+                    // and drops do (crate::skills::clip_graph); the whole clip
+                    // looped for a model converted before that was recorded.
+                    // FAILURE (2026-10-29): an opened chest opened over and over.
+                    let mut animation = AnimationPlayer::default();
+                    let loops = crate::skills::clip_loops(entity, &children, &nodes);
+                    let (graph, node) = match crate::skills::clip_graph(clip, &mut clips, &mut animation, 1.0, &loops) {
+                        // Its play-once part is the graph's first clip.
+                        Some(graph) => (graph, AnimationNodeIndex::new(1)),
+                        None => {
+                            let (graph, node) = AnimationGraph::from_clip(clip.clone());
+                            animation.play(node).repeat();
+                            (graph, node)
+                        }
+                    };
                     let sound_clips = gltf.named_animations.iter().find(|(_, h)| *h == clip)
                         .map(|(name, _)| (node, name.to_string())).into_iter().collect();
-                    let mut animation = AnimationPlayer::default();
-                    animation.play(node).repeat();
                     commands
                         .entity(player)
                         .insert((AnimationGraphHandle(graphs.add(graph)), animation,

@@ -296,7 +296,8 @@ pub(crate) fn asset_root() -> String {
 }
 
 /// Diagnostic switches: the web page's `flag=a,b` or DSOR_FLAGS=a,b natively.
-/// noanim (no character animation), noshadows, nonpcs-shadow, noparticles, norim,
+/// noanim (no character animation), noshadows, nonpcs-shadow, pointshadows (level lights cast
+/// shadows; the original's do not), noparticles, norim,
 /// linearlight (the light summed in linear space instead of the original's gamma sum),
 /// noshadowfloor (shadow removes the sun's share only, not half the whole light as the original),
 /// noao (no ambient occlusion), aolinear / aosquared / ao13 (Bevy's GTAO instead of the original's pe_ssao),

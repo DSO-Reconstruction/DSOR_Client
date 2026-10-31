@@ -174,7 +174,12 @@ pub struct SkillTable(pub HashMap<u32, SkillDef>);
 #[derive(Deserialize, Debug, Clone)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum Track {
-    Anim { name: String, speed: f32, start: i32, end: i32 },
+    Anim {
+        name: String, speed: f32, start: i32, end: i32,
+        /// Frames the animation fades in over (at the sequence's rate).
+        #[serde(default)]
+        fadein: f32,
+    },
     Fx {
         graphics: String,
         #[serde(default)]
@@ -580,6 +585,8 @@ pub(crate) struct FxModel {
     ///   sequence rate (not traced); the alternative would end FX tracks on
     ///   unscaled time.
     speed: f32,
+    /// The animation player its clip was started on (start_fx_animations).
+    player: Option<Entity>,
 }
 
 /// An effect whose track ended: its surfaces and lights go, its emitters stop and
@@ -622,13 +629,14 @@ impl Plugin for SkillsPlugin {
             .init_resource::<CameraShake>()
             .init_resource::<TestCastClock>()
             .init_resource::<StatusHolds>()
+            .init_resource::<CastBar>()
             .init_resource::<preload::FxPreload>()
             .add_systems(Startup, preload::setup)
             .add_systems(Update, preload::update.after(crate::network::net::NetSystems))
             .add_systems(Startup, load)
             .add_systems(
                 Update,
-                (index_skills, cast_input.run_if(crate::screens::loading::gameplay_ready), remote_skills, status_visuals, trap_visuals, hold_for_status, test_cast, run_pending, carry_casters, fly_bullets, play_sequences, start_fx_animations, fx_particle_speed, retire_effects, shake_camera, test_shot, test_view, debug_fx_positions)
+                (index_skills, cast_input.run_if(crate::screens::loading::gameplay_ready), remote_skills, status_visuals, trap_visuals, hold_for_status, test_cast, test_monster_cast, run_pending, carry_casters, fly_bullets, play_sequences, start_fx_animations, fx_particle_speed, retire_effects, shake_camera, test_shot, test_view, debug_fx_positions)
                     .chain()
                     .after(crate::network::net::NetSystems).after(crate::actors::npc::NpcVisualSystems)
                     .before(crate::actors::character::drive_animations),
@@ -1091,10 +1099,18 @@ fn cast_input(
     // cast once the walk brings it in reach. next_cast: when the last cast lets
     // the next one go (its SkillUnblockFrame), apart from the movement hold
     // (LocalPlayer::casting, its MotionUnblockFrame).
-    (mut queued, mut next_cast, rivals): (Local<Option<(usize, Entity)>>, Local<f64>,
-        Query<(&GlobalTransform, &RemotePlayer, &CharacterAnim), (With<Character>, Without<crate::actors::monsters::Monster>)>),
+    // left_on_monster: the left button's press went down on a monster.
+    (mut queued, mut next_cast, rivals, mut left_on_monster): (Local<Option<(usize, Entity)>>, Local<f64>,
+        Query<(&GlobalTransform, &RemotePlayer, &CharacterAnim), (With<Character>, Without<crate::actors::monsters::Monster>)>, Local<bool>),
 ) {
     let _profile = crate::diagnostics::hud::FrameSpan::new("skills::cast_input");
+    // The left button attacks the monster it went down on; a press on the
+    // ground is a walk, and held, it attacks none the cursor passes over (as
+    // net::click_to_move keeps walking).
+    // FAILURE (2026-10-29): walking with the left button held, each monster that
+    // came under the cursor got the left skill at once ("if I already have my
+    // left click pressed to move, why does my skill cast anyway").
+    if buttons.just_pressed(MouseButton::Left) { *left_on_monster = hovered.0.is_some(); }
     let clicked_slot = ui_skills.0.take();
     if ui.free_look { *queued = None; return; }
     if ui.typing { return; }
@@ -1119,7 +1135,7 @@ fn cast_input(
     //   attacking"), and with the right button held a key did nothing ("I cannot
     //   even press right click and press 2 to hit").
     let key = settings.current.slot_pressed(&keys).or_else(|| settings.current.slot_held(&keys));
-    let left = key.is_none() && !ui.blocks(MouseButton::Left) && (shift || (settings.current.attack_hovered && hovered.0.is_some())) && buttons.pressed(MouseButton::Left);
+    let left = key.is_none() && !ui.blocks(MouseButton::Left) && (shift || (settings.current.attack_hovered && hovered.0.is_some() && *left_on_monster)) && buttons.pressed(MouseButton::Left);
     let right = key.is_none() && !ui.blocks(MouseButton::Right) && buttons.pressed(MouseButton::Right);
     let slot = if left {
         Some(0)
@@ -1194,7 +1210,10 @@ fn cast_input(
     // FAILURE (2026-10-24): a right click on a monster walked the warrior to it
     //   ("I right click to use my skill, with my mouse hovering over a monster and
     //   I walk to it"; clips 20261024-1143-13, 20261024-1259-25).
-    let walks = left || from_queue;
+    // Shift + left button strikes in place, as the right button does, with the
+    // left button's skill (the user, on release261_192: "shift left click treats
+    // it like a right click").
+    let walks = (left && !shift) || from_queue;
     if let (true, Some((e, at, _, radius, _, footprint))) = (approaches(skill), aimed) {
         // Walking (towards the monster or anywhere), the server still measures
         // from the last MoveCommand: stop one tick's walk inside the reach.
@@ -2029,7 +2048,7 @@ pub(crate) fn play_sequences(
             if !p.started[i] && frame >= start as f32 && !ending {
                 p.started[i] = true;
                 match &track {
-                    Track::Anim { name, speed, .. } if !p.superseded => {
+                    Track::Anim { name, speed, fadein, .. } if !p.superseded => {
                         // A dead actor's pose belongs to its death: the killing blow's
                         // "Hit" (started the frame before the Kill) stood a dead
                         // gremlin back up ("les gremlin goon une fois morts restent
@@ -2037,6 +2056,9 @@ pub(crate) fn play_sequences(
                         if let Some(Ok(mut a)) = p.actor.map(|a| anims.get_mut(a)).filter(|a| a.as_ref().is_ok_and(|a| !a.dead || p.on_death)) {
                             a.state = AnimState::Named(name.clone());
                             a.speed = *speed * p.rate;
+                            // Its own fade-in: at high attack speed a fixed blend
+                            // overlapped most of the next swing and damped it.
+                            a.fade_in = (*fadein > 0.0).then(|| *fadein / FPS / p.rate.max(0.01));
                             // The same skill again restarts its animation.
                             a.replay();
                         }
@@ -2065,7 +2087,7 @@ pub(crate) fn play_sequences(
                         }
                         let mut fx = commands.spawn((
                             WorldAssetRoot(assets.load(GltfAssetLabel::Scene(0).from_asset(path.clone()))),
-                            FxModel { gltf: assets.load(path), started: false, looping: p.looping, speed: p.rate.max(0.01) },
+                            FxModel { gltf: assets.load(path), started: false, looping: p.looping, speed: p.rate.max(0.01), player: None },
                             place,
                             // Shown by start_fx_animations once its model, textures
                             // included, is in and its clip plays (see there).
@@ -2233,6 +2255,97 @@ pub(crate) fn play_sequences(
 ///   de texture", "certains chargent pas en entier tout de suite"), and for a
 ///   frame at its rest pose before its clip took over ("une frame au debut ou le
 ///   sort est lance et il se reaffiche apres").
+/// Hook every animated node of a scene to the player `root`'s clips go through.
+/// FAILURE (2026-10-25): an effect scene spawned visible kept the AnimatedBy its
+///   nodes came with, naming another (stale, later despawned) entity: only an
+///   instance that started hidden, whose nodes crate::rendering::anim_cull parked
+///   and hooked again, animated. Every Manticore summon after the first stood
+///   still at its rest pose, full size, no spin ("it looks exactly like
+///   before"). crate::actors::monsters::setup_models hooks its bones the same way.
+pub(crate) fn hook_targets(
+    commands: &mut Commands,
+    root: Entity,
+    player: Entity,
+    children: &Query<&Children>,
+    targets: &Query<(), With<bevy::animation::AnimationTargetId>>,
+) {
+    for d in children.iter_descendants(root) {
+        if targets.contains(d) {
+            commands.entity(d).try_insert(bevy::animation::AnimatedBy(player));
+        }
+    }
+}
+
+/// How a node's clip runs past its end, from the original's nax3 (glTF extras
+/// "dsor_clip", tools/embed_animators.py transform_clips): (period, cycles).
+pub(crate) type ClipLoops = HashMap<bevy::animation::AnimationTargetId, (f32, bool)>;
+
+/// The clip loops of an effect scene's animated nodes; empty for a model
+/// converted before they were recorded.
+pub(crate) fn clip_loops(
+    root: Entity,
+    children: &Query<&Children>,
+    nodes: &Query<(&bevy::animation::AnimationTargetId, &bevy::gltf::GltfExtras)>,
+) -> ClipLoops {
+    let mut out = ClipLoops::new();
+    for e in children.iter_descendants(root) {
+        let Ok((id, extras)) = nodes.get(e) else { continue };
+        if !extras.value.contains("dsor_clip") {
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&extras.value) else { continue };
+        let Some(c) = v.get("dsor_clip") else { continue };
+        let period = c.get("period").and_then(|p| p.as_f64()).unwrap_or(0.0) as f32;
+        out.insert(*id, (period, c.get("cycle").and_then(|x| x.as_bool()).unwrap_or(false)));
+    }
+    out
+}
+
+/// An effect's clip played as the original plays each node's own clip: a
+/// cycling one over and over on its period, the others once, holding their
+/// last key, whether or not the sequence loops.
+/// EVIDENCE: the nax3 clips' post-infinity (0 constant, 1 cycle), see
+///   tools/embed_animators.py transform_clips. mount_manticore_summon_01: null1
+///   spins (20 keys x 40 ms, cycles) while the helices grow over 2-4 s (hold).
+/// FAILURE (2026-10-25): played once whole, the Manticore's summon vortex
+///   stopped spinning after 0.76 s and stood still as a fixed ring ("it looks
+///   exactly like before").
+/// None when the model has no clip loops recorded (the older rules apply).
+pub(crate) fn clip_graph(clip: &Handle<AnimationClip>, clips: &mut Assets<AnimationClip>, anim: &mut AnimationPlayer, speed: f32, loops: &ClipLoops) -> Option<AnimationGraph> {
+    if loops.is_empty() {
+        return None;
+    }
+    let c = clips.get(clip)?;
+    let mut once = AnimationClip::default();
+    let mut cycles: Vec<(f32, AnimationClip)> = Vec::new();
+    for (target, curves) in c.curves() {
+        for curve in curves {
+            match loops.get(target) {
+                Some(&(period, true)) if period > 0.0 => {
+                    let i = match cycles.iter().position(|(p, _)| (p - period).abs() < 1.0e-3) {
+                        Some(i) => i,
+                        None => {
+                            cycles.push((period, AnimationClip::default()));
+                            cycles.len() - 1
+                        }
+                    };
+                    cycles[i].1.add_variable_curve_to_target(*target, curve.clone());
+                }
+                _ => once.add_variable_curve_to_target(*target, curve.clone()),
+            }
+        }
+    }
+    let mut graph = AnimationGraph::new();
+    let a = graph.add_clip(clips.add(once), 1.0, graph.root);
+    anim.play(a).set_speed(speed);
+    for (period, mut c) in cycles {
+        c.set_duration(period);
+        let b = graph.add_clip(clips.add(c), 1.0, graph.root);
+        anim.play(b).set_speed(speed).repeat();
+    }
+    Some(graph)
+}
+
 /// A looping clip, played as the game plays it: the curves that end before the
 /// clip does (an appearance -- a dropped item's pop out of the ground, its glow
 /// growing in) once, holding their last key; the others over and over.
@@ -2286,13 +2399,28 @@ fn start_fx_animations(
     gltfs: Res<Assets<Gltf>>,
     children: Query<&Children>,
     players: Query<(), With<AnimationPlayer>>,
+    playing: Query<&AnimationPlayer>,
     mut graphs: ResMut<Assets<AnimationGraph>>,
     mut clips: ResMut<Assets<AnimationClip>>,
+    nodes: Query<(&bevy::animation::AnimationTargetId, &bevy::gltf::GltfExtras)>,
+    targets: Query<(), With<bevy::animation::AnimationTargetId>>,
 ) {
     let _profile = crate::diagnostics::hud::FrameSpan::new("skills::start_fx_animations");
     for (e, mut m) in &mut fx {
         if m.started {
-            continue;
+            // Its scene was built again under it: the player its clip went on is
+            // gone, or a fresh one with nothing playing stands in its place. The
+            // clip starts again on the new one.
+            // FAILURE (2026-10-28): the last Manticore summon had let its model
+            //   go, so the next one loaded it again and bevy rebuilt the scene a
+            //   frame after the clip had started: the shown copy never played, a
+            //   full-size ring that did not spin ("it looks exactly like before").
+            //   Only the first summon after loading the map animated.
+            let lost = m.player.is_some_and(|p| playing.get(p).map_or(true, |a| a.playing_animations().next().is_none()));
+            if !lost {
+                continue;
+            }
+            m.started = false;
         }
         if std::env::var("DSOR_FX_DEBUG").is_ok() {
             info!("fx {:?} pending, loaded: {}", m.gltf.path(), gltfs.get(&m.gltf).is_some());
@@ -2317,7 +2445,10 @@ fn start_fx_animations(
         let Some(player) = children.iter_descendants(e).find(|c| players.contains(*c)) else { continue };
         debug!("fx {:?}: playing {} clip(s)", m.gltf.path(), gltf.animations.len());
         let mut anim = AnimationPlayer::default();
-        let graph = if m.looping {
+        let loops = clip_loops(e, &children, &nodes);
+        let graph = if let Some(graph) = clip_graph(&gltf.animations[0], &mut clips, &mut anim, m.speed, &loops) {
+            graph
+        } else if m.looping {
             looping_graph(&gltf.animations[0], &mut clips, &mut anim, m.speed)
         } else {
             let (graph, node) = AnimationGraph::from_clip(gltf.animations[0].clone());
@@ -2325,8 +2456,10 @@ fn start_fx_animations(
             graph
         };
         commands.entity(player).try_insert((AnimationGraphHandle(graphs.add(graph)), anim));
+        hook_targets(&mut commands, e, player, &children, &targets);
         commands.entity(e).try_insert(Visibility::Inherited);
         m.started = true;
+        m.player = Some(player);
     }
 }
 
@@ -2451,6 +2584,35 @@ fn test_cast(
     perform(&mut commands, skill, sequences, e, Some(character), tf.translation, facing, point, me, None, None, 1.0);
 }
 
+/// Offline: DSOR_TEST_MONSTER_CAST=<skill id>,<every seconds> has the test
+/// monster (crate::actors::monsters DSOR_TEST_MONSTER) cast that skill, as a
+/// server's monster attack plays (remote_skills): with DSOR_TEST_HIT, a monster
+/// that attacks while it is hit.
+fn test_monster_cast(
+    mut commands: Commands,
+    data: Res<SkillData>,
+    tables: Res<Assets<SkillTable>>,
+    seqs: Res<Assets<SequenceTable>>,
+    time: Res<Time>,
+    monsters: Query<(Entity, &Transform, &CharacterAnim, &crate::actors::monsters::Monster)>,
+    mut next: Local<f32>,
+) {
+    let Ok(spec) = std::env::var("DSOR_TEST_MONSTER_CAST") else { return };
+    let mut parts = spec.split(',');
+    let name = parts.next().unwrap_or_default();
+    let every: f32 = parts.next().and_then(|v| v.parse().ok()).unwrap_or(1.5);
+    let (Some(table), Some(sequences)) = (tables.get(&data.skills), seqs.get(&data.sequences)) else { return };
+    let Some(skill) = data.by_id.get(name).and_then(|w| table.0.get(w)) else { return };
+    let Some((e, tf, anim, m)) = monsters.iter().find(|(_, _, _, m)| m.actor == 0x6000_0000) else { return };
+    if !anim.is_ready() || anim.dead { return; }
+    *next -= time.delta_secs();
+    if *next > 0.0 { return; }
+    *next = every;
+    let facing = tf.rotation.to_euler(EulerRot::YXZ).0;
+    let point = tf.translation + Quat::from_rotation_y(facing) * Vec3::Z * skill.range.min(15.0);
+    perform(&mut commands, skill, sequences, e, None, tf.translation, facing, point, Some(m.actor), None, None, 1.0);
+}
+
 /// When test_cast cast (DSOR_TEST_FACING), for test_shot.
 #[derive(Resource, Default)]
 pub struct TestCastClock(Option<f32>);
@@ -2483,8 +2645,10 @@ fn test_shot(
     }
 }
 
-/// DSOR_SEQ_VIEW=<sequence>[,<x>,<y>,<z>]: that sequence plays in a loop at a fixed
-/// point (default: the demo character's spot + 1.5 up), to look at an effect alone.
+/// DSOR_SEQ_VIEW=<sequence>[,<x>,<y>,<z>]: that sequence plays over and over at a
+/// fixed point (default: the demo character's spot + 1.5 up), to look at an effect
+/// alone. Each run starts afresh, so one-shot emitters (mount_summon_end's burst)
+/// fire every time; looped in place, they fired once and the view stayed empty.
 fn test_view(
     mut commands: Commands,
     data: Res<SkillData>,
@@ -2518,7 +2682,7 @@ fn test_view(
         Vec3::from(m.center) + Vec3::Y * 1.5
     };
     let anchor = commands.spawn((Transform::from_translation(at), Visibility::default())).id();
-    play(&mut commands, seq.clone(), None, anchor, true);
+    play(&mut commands, seq.clone(), None, anchor, false);
     if clock.0.is_none() {
             clock.0 = Some(time.elapsed_secs());
     }
@@ -3041,6 +3205,23 @@ fn vfx_preview(
 /// map_respawn 2 s). Played without it, the player walked away mid-revival.
 const HOLDING_STATUSES: [&str; 2] = ["resurrect_self", "map_respawn"];
 
+/// Casts that moving breaks off: the mount casts (cast_mount_*, 260 of them) and
+/// the town portal (hometeleport) play this animation, and the server cancels a
+/// mount cast on the first move (DSOR_Server services/world.py "movement
+/// interrupted cast"). They play without holding the player still; walking ends
+/// the animation and sends the move that cancels the cast.
+/// FAILURE (2026-10-24): the mount cast held the player for its 6 s ("you can't
+///   cancel it, at least you can't cancel it by moving").
+const INTERRUPTIBLE_ANIMATIONS: [&str; 1] = ["hometown_teleport"];
+
+/// The local player's cast under way (a mount, the town portal): its start and
+/// end on Time, for the original's cast bar (interface castbar01,
+/// crate::ui update_fills); None when none runs or walking broke it off.
+/// EVIDENCE: the user's release261_192 recordings: a blue bar under the player
+///   while a mount is summoned.
+#[derive(Resource, Default)]
+pub struct CastBar(pub Option<(f32, f32)>);
+
 /// Statuses just started on an actor with an animation or a hold: (holder,
 /// animation state or "", seconds), for hold_for_status.
 #[derive(Resource, Default)]
@@ -3051,13 +3232,21 @@ fn hold_for_status(
     mut holds: ResMut<StatusHolds>,
     mut playing: Local<Vec<(Entity, String, f32)>>,
     mut actors: Query<(&mut CharacterAnim, Option<&mut LocalPlayer>, Option<&crate::monsters::Monster>)>,
+    mut cast: ResMut<CastBar>,
 ) {
     // Its animation played once: back to Idle when the effect ends (nothing else
-    // ends a state set this way, and the actor stood frozen in its last pose).
+    // ends a state set this way, and the actor stood frozen in its last pose), or
+    // an interruptible cast's as soon as its player walks.
     let now = time.elapsed_secs();
     playing.retain(|(holder, animation, until)| {
-        if now < *until {
+        let walked = INTERRUPTIBLE_ANIMATIONS.contains(&animation.as_str())
+            && actors.get(*holder).is_ok_and(|(_, local, _)| local.is_some_and(|p| p.target.is_some()));
+        if now < *until && !walked {
             return true;
+        }
+        // The player's cast over: its bar goes.
+        if INTERRUPTIBLE_ANIMATIONS.contains(&animation.as_str()) && actors.get(*holder).is_ok_and(|(_, local, _)| local.is_some()) && cast.0.is_some() {
+            cast.0 = None;
         }
         if let Ok((mut anim, _, _)) = actors.get_mut(*holder) {
             if !anim.dead && anim.state == AnimState::Named(animation.clone()) {
@@ -3069,13 +3258,15 @@ fn hold_for_status(
     for (holder, animation, seconds) in holds.0.drain(..) {
         let Ok((mut anim, local, monster)) = actors.get_mut(holder) else { continue };
         if monster.is_some_and(|m| !m.is_alive(&anim)) { continue; }
+        let interruptible = INTERRUPTIBLE_ANIMATIONS.contains(&animation.as_str());
+        if interruptible && local.is_some() { cast.0 = Some((now, now + seconds)); }
         if !animation.is_empty() {
             anim.dead = false;
             anim.state = AnimState::Named(animation.clone());
             anim.replay();
             playing.push((holder, animation, now + seconds));
         }
-        if let Some(mut player) = local {
+        if let Some(mut player) = local.filter(|_| !interruptible) {
             player.target = None;
             player.casting = player.casting.max(seconds);
         }
@@ -3336,7 +3527,7 @@ mod npc_residency_tests {
     #[test]
     fn status_animation_received_without_a_rig_expires_before_reentry() {
         let mut app = App::new();
-        app.insert_resource(Time::<()>::default()).init_resource::<StatusHolds>()
+        app.insert_resource(Time::<()>::default()).init_resource::<StatusHolds>().init_resource::<CastBar>()
             .add_systems(Update, hold_for_status);
         let root = app.world_mut().spawn((CharacterAnim::default(), crate::actors::npc::NpcVisualPending)).id();
         app.world_mut().resource_mut::<StatusHolds>().0.push((root, "Stunned".into(), 1.0));
@@ -3538,9 +3729,27 @@ mod bullet_tests {
     }
 
     #[test]
+    fn a_mount_cast_does_not_hold_the_player_and_walking_ends_it_but_a_stun_holds() {
+        let mut app = App::new();
+        app.init_resource::<Time>().init_resource::<StatusHolds>().init_resource::<CastBar>().add_systems(Update, hold_for_status);
+        let cast = app.world_mut().spawn((CharacterAnim::default(), LocalPlayer::default())).id();
+        let stun = app.world_mut().spawn((CharacterAnim::default(), LocalPlayer::default())).id();
+        app.world_mut().resource_mut::<StatusHolds>().0.extend([(cast, "hometown_teleport".into(), 6.0), (stun, "Stunned".into(), 2.0)]);
+        app.update();
+        assert_eq!(app.world().get::<LocalPlayer>(cast).unwrap().casting, 0.0, "free to walk");
+        assert_eq!(app.world().get::<LocalPlayer>(stun).unwrap().casting, 2.0, "a stun still holds");
+        assert_eq!(app.world().get::<CharacterAnim>(cast).unwrap().state, AnimState::Named("hometown_teleport".into()));
+        assert!(app.world().resource::<CastBar>().0.is_some(), "its bar shows");
+        app.world_mut().get_mut::<LocalPlayer>(cast).unwrap().target = Some(Vec3::X);
+        app.update();
+        assert_eq!(app.world().get::<CharacterAnim>(cast).unwrap().state, AnimState::Idle, "walking breaks it off");
+        assert!(app.world().resource::<CastBar>().0.is_none(), "and its bar goes");
+    }
+
+    #[test]
     fn late_status_cannot_revive_a_dead_monster_or_replace_its_death_pose() {
         let mut app = App::new();
-        app.init_resource::<Time>().init_resource::<StatusHolds>();
+        app.init_resource::<Time>().init_resource::<StatusHolds>().init_resource::<CastBar>();
         let mut anim = CharacterAnim::default();
         anim.dead = true;
         anim.state = AnimState::Death;

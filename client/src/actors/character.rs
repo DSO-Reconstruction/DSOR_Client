@@ -440,20 +440,26 @@ pub struct CharacterAnim {
     nodes: HashMap<String, (AnimationNodeIndex, bool)>,
     clip_nodes: HashMap<String, AnimationNodeIndex>,
     durations: HashMap<AnimationNodeIndex, f32>,
+    /// A second node of each one-shot clip, both ways: the same attack again
+    /// fades in over the one still playing (transition).
+    twins: HashMap<AnimationNodeIndex, AnimationNodeIndex>,
     set: Option<String>,
     set_changed: bool,
     combat_remaining: f32,
     /// Killed (KillCommand): the death animation keeps its last pose; no sequence
     /// or movement brings the actor back to Idle.
     pub dead: bool,
+    /// The next transition's fade, in seconds: a skill sequence's own fade-in
+    /// (BLEND otherwise).
+    pub fade_in: Option<f32>,
 }
 
 impl Default for CharacterAnim {
     fn default() -> Self {
         Self { audio_epoch: 0, state: AnimState::Idle, speed: 1.0, applied: None, player: None, nodes: HashMap::new(), current: None,
             fading: Vec::new(), fade_elapsed: 0.0, fade_duration: BLEND.as_secs_f32(), clip_nodes: HashMap::new(),
-            durations: HashMap::new(), set: None, set_changed: false, combat_remaining: 0.0,
-            parked: Vec::new(), parking: false, dead: false }
+            durations: HashMap::new(), twins: HashMap::new(), set: None, set_changed: false, combat_remaining: 0.0,
+            parked: Vec::new(), parking: false, dead: false, fade_in: None }
     }
 }
 
@@ -499,8 +505,9 @@ impl CharacterAnim {
     /// Idle fallback. None means the rig/clip is unavailable or culled.
     pub(crate) fn playback_finished(&self, players: &Query<&AnimationPlayer>) -> Option<bool> {
         let &(node, _) = self.nodes.get(self.state.key())?;
-        if self.current != Some(node) || self.applied.as_ref()?.0 != self.state { return None; }
-        Some(players.get(self.player?).ok()?.animation(node)?.is_finished())
+        let current = self.current?;
+        if (current != node && self.twins.get(&node) != Some(&current)) || self.applied.as_ref()?.0 != self.state { return None; }
+        Some(players.get(self.player?).ok()?.animation(current)?.is_finished())
     }
 
     /// The animation states this character has clips for (crate::diagnostics::debug).
@@ -512,8 +519,20 @@ impl CharacterAnim {
 
     /// Drive a whole model's own animation player (monsters, crate::actors::monsters):
     /// `nodes` are its graph's clips by state row, with whether each loops.
+    /// The animation player it drives (a whole model's, bound by bind_model).
+    pub fn bound_player(&self) -> Option<Entity> { self.player }
+
+    /// The twin nodes of a whole model's one-shot clips (pairs, either order).
+    pub fn set_twins(&mut self, pairs: impl IntoIterator<Item = (AnimationNodeIndex, AnimationNodeIndex)>) {
+        self.twins.clear();
+        for (a, b) in pairs { self.twins.insert(a, b); self.twins.insert(b, a); }
+    }
+
     pub fn bind_model(&mut self, player: Entity, nodes: HashMap<String, (AnimationNodeIndex, bool)>) {
         self.player = Some(player);
+        // A rebound model's old targets went with its old scene.
+        self.parked.clear();
+        self.parking = false;
         self.nodes = nodes;
         self.current = None;
         self.fading.clear();
@@ -539,6 +558,15 @@ impl CharacterAnim {
     }
 
     fn transition(&mut self, player: &mut AnimationPlayer, node: AnimationNodeIndex, looping: bool) {
+        // The same one-shot clip again (a held attack): its twin fades in over
+        // the one still playing, as the sequence's own fade-in does. Started
+        // again on its one node, the pose jumped to frame 0 for a frame each
+        // swing: the warrior snapped round to the wind-up 4 times a second
+        // at high attack speed ("rage attack, smash all look weird", 2026-10-29).
+        let node = match (looping, self.current, self.twins.get(&node).copied()) {
+            (false, Some(current), Some(twin)) if current == node => twin,
+            _ => node,
+        };
         let same_state = self.applied.as_ref().is_some_and(|(state, _)| *state == self.state);
         if !same_state || self.current != Some(node) { self.audio_epoch = self.audio_epoch.wrapping_add(1); }
         let preserve_phase = self.set_changed && same_state;
@@ -558,7 +586,7 @@ impl CharacterAnim {
                 .map(|(n, a)| (*n, a.weight() / total.max(f32::EPSILON))).collect();
             let outgoing: f32 = self.fading.iter().map(|(_, w)| *w).sum();
             self.fade_elapsed = 0.0;
-            self.fade_duration = if self.set_changed { EQUIPMENT_BLEND } else { BLEND }.as_secs_f32();
+            self.fade_duration = if self.set_changed { EQUIPMENT_BLEND.as_secs_f32() } else { self.fade_in.unwrap_or(BLEND.as_secs_f32()) };
             player.play(node).set_weight((1.0 - outgoing).clamp(0.0, 1.0));
         }
         let active = player.play(node);
@@ -572,6 +600,7 @@ impl CharacterAnim {
         self.current = Some(node);
         self.applied = Some((self.state.clone(), self.speed));
         self.set_changed = false;
+        self.fade_in = None;
     }
 }
 
@@ -1131,6 +1160,12 @@ fn update_animation_sets(
             let Some(data) = clips.get(clip) else { continue };
             let node = *anim.clip_nodes.entry(name.clone()).or_insert_with(|| graph.add_clip(clip.clone(), 1.0, root));
             anim.durations.insert(node, data.duration());
+            if !name.ends_with("-loop") && !anim.twins.contains_key(&node) {
+                let twin = graph.add_clip(clip.clone(), 1.0, root);
+                anim.twins.insert(node, twin);
+                anim.twins.insert(twin, node);
+                anim.durations.insert(twin, data.duration());
+            }
             nodes.insert(state.clone(), (node, name.ends_with("-loop")));
         }
         if nodes.is_empty() { continue; }
@@ -1141,7 +1176,7 @@ fn update_animation_sets(
             format!("{}_{}_body_00", character.desc.class_name(), character.desc.gender_name()));
         commands.entity(player).insert(crate::audio::AnimationAudio::new(entity,
             &format!("characters/{}", character.desc.skeleton()), &profile,
-            anim.clip_nodes.iter().map(|(name, node)| (*node, name.clone())).collect()));
+            anim.clip_nodes.iter().flat_map(|(name, node)| std::iter::once(*node).chain(anim.twins.get(node).copied()).map(move |n| (n, name.clone()))).collect()));
     }
 }
 

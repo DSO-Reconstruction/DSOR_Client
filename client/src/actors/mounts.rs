@@ -57,6 +57,9 @@ pub struct Riding {
     pub bonus: f32,
     model: Entity,
     run_speed: f32,
+    /// How high the saddle seats the rider over the ground (seat_riders), for
+    /// the name over them (crate::actors::nameplate).
+    pub lift: f32,
 }
 
 /// A mount model, following its rider (follow_riders).
@@ -240,7 +243,7 @@ fn apply_rides(
             // FAILURE (2026-10-16): "les montures sont invisibles", "le tigre est
             //   coince a un point de la map".
             commands.entity(model).insert((Name::new(format!("mount {}", def.mount)), MountOf(entity)));
-            commands.entity(entity).try_insert(Riding { instance, bonus: def.movement_bonus, model, run_speed: mount.run_speed });
+            commands.entity(entity).try_insert(Riding { instance, bonus: def.movement_bonus, model, run_speed: mount.run_speed, lift: 0.0 });
             character.riding = Some(mount.anim_set.clone());
             info!("{holder:#x} rides {} (+{} speed)", def.mount, def.movement_bonus);
         } else if let Some(r) = riding.filter(|r| r.instance == instance) {
@@ -285,13 +288,13 @@ fn follow_riders(
 
 /// The rider on the saddle, the mount running or standing with it.
 fn seat_riders(
-    mut riders: Query<(&GlobalTransform, &Character, &mut CharacterAnim, &Riding), Without<ModelBones>>,
+    mut riders: Query<(&GlobalTransform, &Character, &mut CharacterAnim, &mut Riding), Without<ModelBones>>,
     mut mounts: Query<(&ModelBones, &mut CharacterAnim), Without<Riding>>,
     globals: Query<&GlobalTransform>,
     mut transforms: Query<&mut Transform>,
     mut players: Query<&mut AnimationPlayer>,
 ) {
-    for (root, character, mut anim, riding) in &mut riders {
+    for (root, character, mut anim, mut riding) in &mut riders {
         let Ok((bones, mut mount_anim)) = mounts.get_mut(riding.model) else { continue };
         let running = anim.state == AnimState::Run;
         let state = if running { AnimState::Run } else { AnimState::Idle };
@@ -326,6 +329,7 @@ fn seat_riders(
         let seat = bones.0.get("mount").or_else(|| bones.0.get("Saddle")).and_then(|s| globals.get(*s).ok());
         let (Some(saddle), Some(skeleton)) = (seat, character.skeleton_root()) else { continue };
         let local = root.affine().inverse() * saddle.affine();
+        if (riding.lift - local.translation.y).abs() > 1e-3 { riding.lift = local.translation.y; }
         if let Ok(mut tf) = transforms.get_mut(skeleton) {
             let seat = Transform::from_matrix(local.into());
             if *tf != seat {

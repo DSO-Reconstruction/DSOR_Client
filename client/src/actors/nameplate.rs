@@ -15,6 +15,21 @@ const FONT_PT: f32 = 10.5;
 const LAYOUT_HEIGHT: f32 = 1040.0;
 /// Name height over the actor's origin (its feet).
 const HEAD: f32 = 2.25;
+/// On a mount: the name over the seated rider's head, this far over the saddle,
+/// when that is higher than HEAD.
+/// FAILURE (2026-10-24): on the Manticore the name sat on the rider's body (the
+///   user's shot); the original raises it well above them there, and hardly at
+///   all on the white tiger (its shots).
+/// UNVERIFIED: the seated height, matched by eye to those two shots.
+const SEATED_HEAD: f32 = 1.7;
+/// The name's height over the hips: a body lifted off its feet (a leap's clip
+/// raises the Hips up to 5.6 m) takes its name up with it, when that is higher
+/// than HEAD.
+/// FAILURE (2026-10-29): the name stayed over the ground during Rage Jump while
+///   the warrior flew high above it ("if I jump, it follows me, it feels
+///   quite wrong"); the original's rises with him.
+/// UNVERIFIED: the distance (HEAD over hips standing about 1 m high).
+const OVER_HIPS: f32 = 1.25;
 /// Beyond this from the camera, names are not drawn.
 const MAX_DISTANCE: f32 = 45.0;
 /// Width of the box a name is centred in, pixels.
@@ -67,13 +82,14 @@ fn place(
     mut commands: Commands,
     windows: Query<&Window>,
     cameras: Query<(Entity, &Camera, &GlobalTransform), (With<Camera3d>, Without<crate::rendering::highlight::HighlightCamera>)>,
-    actors: Query<(Entity, &Nameplate, &GlobalTransform, &InheritedVisibility, Option<&Label>)>,
+    actors: Query<(Entity, &Nameplate, &GlobalTransform, &InheritedVisibility, Option<&Label>, Option<&crate::actors::mounts::Riding>)>,
     mut labels: Query<(Entity, &mut Node, &mut Visibility, &mut TextColor, &mut Text), With<LabelOf>>,
     owners: Query<&LabelOf>,
     assets: Res<AssetServer>,
     mut font: Local<Option<Handle<Font>>>,
     settings: Res<crate::ui::Settings>,
     local: Query<(), With<crate::network::net::LocalPlayer>>,
+    (characters, bones): (Query<&crate::actors::character::Character>, Query<&GlobalTransform>),
 ) {
     // EVIDENCE: ui/overheadtext.bxml NameLabel: font "tahoma"; drawn thin by the
     // 2018 client (recorded), so Wine's regular Tahoma (assets/fonts/tahoma.ttf,
@@ -87,7 +103,7 @@ fn place(
     // Points to pixels at the layout height, then as a share of the window
     // height, so the name scales with the window as the game's layout does.
     let vh = FONT_PT * 96.0 / 72.0 / LAYOUT_HEIGHT * 100.0;
-    for (entity, plate, at, visible, label) in &actors {
+    for (entity, plate, at, visible, label, riding) in &actors {
         let Some(Label(node)) = label else {
             let node = commands
                 .spawn((
@@ -108,7 +124,9 @@ fn place(
             continue;
         };
         let Ok((_, mut style, mut vis, mut color, mut text)) = labels.get_mut(*node) else { continue };
-        let head = at.translation() + Vec3::Y * HEAD;
+        let hips = characters.get(entity).ok().and_then(|c| c.bone("Hips")).and_then(|h| bones.get(h).ok())
+            .map_or(0.0, |h| h.translation().y - at.translation().y);
+        let head = at.translation() + Vec3::Y * riding.map_or(HEAD.max(hips + OVER_HIPS), |r| HEAD.max(r.lift + SEATED_HEAD));
         let shown = (if local.contains(entity) { settings.current.own_name } else { settings.current.other_names })
             && visible.get()
             && head.distance(cam_at.translation()) < MAX_DISTANCE

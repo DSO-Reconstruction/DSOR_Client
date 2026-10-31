@@ -34,6 +34,11 @@ const LAYER: usize = 5;
 const ENEMY: Vec4 = Vec4::new(0.8, 0.0, 0.0, 1.0);
 /// "default" and "Ally" (UNVERIFIED).
 const DEFAULT: Vec4 = Vec4::new(1.0, 1.0, 1.0, 1.0);
+/// A hovered ground item's outline.
+/// MEASURED: the user's clip 20261028-1812-11 (release261_192, crypt): the
+///   hovered Silver Coronet's band peaks at (205, 255, 46) over its green glow.
+/// UNVERIFIED: its source (an EntityHighlightManager type not traced).
+const ITEM: Vec4 = Vec4::new(0.8, 1.0, 0.18, 1.0);
 /// The camera that draws the highlighted actor alone.
 /// The interface's preview cameras (crate::ui::preview::PreviewCamera) carry it
 /// too: every query for the scene camera leaves it out (`Without<HighlightCamera>`).
@@ -120,6 +125,7 @@ pub(crate) fn pick(
     windows: Query<&Window, With<PrimaryWindow>>,
     cameras: Query<(&Camera, &GlobalTransform), (With<Camera3d>, Without<HighlightCamera>)>,
     hovered: Res<crate::actors::monsters::Hovered>,
+    item: Option<Res<crate::world::drops::ItemHover>>,
     actors: Query<(Entity, &GlobalTransform, &InheritedVisibility, Option<&crate::actors::picking::PickBoxes>, Option<&crate::actors::npc::Npc>), Or<(With<crate::actors::npc::Npc>, (With<crate::network::net::RemotePlayer>, With<crate::actors::character::Character>, Without<crate::actors::monsters::Monster>))>>,
     joints: Query<&GlobalTransform>,
     exits: Query<(Entity, &crate::world::exits::Exit)>,
@@ -132,6 +138,9 @@ pub(crate) fn pick(
         None
     } else if let Some((e, _)) = hovered.0 {
         Some((e, colour(ENEMY)))
+    } else if let Some((_, model)) = item.as_ref().and_then(|i| i.0) {
+        // The item's model alone, not its glow (an effect beside it).
+        Some((model, colour(ITEM)))
     } else {
         let ray = windows
             .single()

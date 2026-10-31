@@ -290,7 +290,7 @@ pub(super) fn quest(id: &str, field: &str, facts: &Facts, accept: Option<usize>,
         rewards.items = d.items.iter().filter(|i| i.class.is_empty() || i.class.eq_ignore_ascii_case(facts.class)).map(|i| {
             let (image, background, frame) = facts.items.map(|c| c.reward_icon_parts(&i.item, &i.rarity)).unwrap_or_default();
             let part = |p: Option<&str>| p.unwrap_or_default().to_owned();
-            (i.amount, Icon { background: part(background), image: part(image), frame: part(frame) })
+            (i.amount, Icon { background: part(background), image: part(image), frame: part(frame), ..Default::default() })
         }).collect();
     }
     // The headline (DrasaLocale 0x1405AD574): "[INTERNAL] " for a quest not

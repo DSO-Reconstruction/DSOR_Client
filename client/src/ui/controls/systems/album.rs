@@ -32,6 +32,30 @@ const PREVIEW: &str = "Canvas/Collectorsalbum/BackGroundLabel/Inlay/Categorypage
 const BAR: &str = "Canvas/Collectorsalbum/BackGroundLabel/Inlay/Categorypage/ProgressLabel/ProgressBarLabel/ProgressBarLabel2/ProgressBar";
 const REWARD: &str = "Canvas/Collectorsalbum/BackGroundLabel/Inlay/Categorypage/ProgressLabel/ItemTemplates/ItemTemplate";
 const ENTRY: &str = "Canvas/Collectorsalbum/BackGroundLabel/Inlay/TemplateListEntry";
+/// A sticker cooling down: a dark sweep from 12 o'clock, shrinking clockwise,
+/// and the seconds left ("0.4 s" .. "0.0 s") big in the middle, on EVERY owned
+/// sticker of the used one's cooldown category (all mounts and pets after a
+/// mount), as the quick slots draw it; no glow after. The text is the layout's
+/// AnimUse/slot_anim (its colour and outline), centred.
+/// EVIDENCE: the user's original recording 2026-10-30 (20261030-1640-20, 11.3 s
+///   on, frame by frame): the sweep darkens to 0.58 (black at 0.42), the
+///   digits are about 15 units high-em in the 53-unit icon.
+/// FAILURE (2026-10-30): only the used sticker, its colours dimmed, the text
+///   small in its corner (slot_anim's align 2 is our right/bottom), then a
+///   green glow the original has not.
+const ANIM_USE_TEXT: &str = "Canvas/Collectorsalbum/BackGroundLabel/Inlay/AnimUse/slot_anim";
+pub(in crate::ui) const SWEEP_ALPHA: f32 = 0.42;
+/// The front page's text, gui.window favoritesDesc (the layout's own text is
+/// an older one: "Here you will find all your favourite items...").
+/// EVIDENCE: the user's release261_1024 recording 20261030-1714-37.
+const FAVOURITES_TEXT: &str = "Select up to thirty of your favorite items to be shown here for quick access to your most frequently used items.";
+/// The digits' size: the original's "4 s" is 0.17 of the sticker's height, ours
+/// at 15 was 0.28 (the user's recording 20261030-1714-37: "double the size").
+pub(in crate::ui) const COUNT_SIZE: f32 = 9.3;
+/// The countdown's marker in a grid: `{page}/Count{i}#{cooldown key}`, drawn
+/// every frame by crate::ui::album_overlays; the pop's: `{page}/Pop#{sticker}`.
+pub(in crate::ui) const COUNT_MARK: &str = "/Count";
+pub(in crate::ui) const POP_MARK: &str = "/Pop#";
 /// A sticker cell spans 214..286 by 202..271.
 const CELL: (f32, f32) = (72.0, 69.0);
 const CELL_ORIGIN: (f32, f32) = (214.0, 202.0);
@@ -54,7 +78,6 @@ pub(in crate::ui) const TURNING: &str = "Canvas/Collectorsalbum/BackGroundLabel/
 const FRONT_BOOK: &str = "sb_frontpage";
 const FAVOURITE: &str = "textures/ui/sticker_favorite.png";
 const PREMIUM_ORIGIN: &str = "ui/icon_origin_premium";
-const FADED: f32 = 0.35;
 const MOST_NEW: usize = 4;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -73,11 +96,20 @@ pub(in crate::ui) struct Sticker {
     pub key: String,
     pub favourite: bool,
     pub addable: bool,
+    /// Has a next rarity tier: its arrow shows, owned or not, as the original's.
     pub upgradable: bool,
+    /// That next tier's item and its price in Altered Crescerite (the tier
+    /// owned, else the sticker's own item, is the one it follows).
+    pub next: Option<(String, u32)>,
+    /// Owned, and its next tier affordable: the arrow green, else grey.
+    pub affordable: bool,
     /// Its origin's icon, its preview background (textures), its offer.
     pub origin: String,
     pub background: String,
     pub offer: String,
+    /// Its cooldown key: every cell carries its countdown and pop markers, drawn
+    /// when they run (crate::ui::album_overlays), so a use needs no rebuild.
+    pub countdown: Option<String>,
 }
 
 impl Album {
@@ -119,12 +151,31 @@ pub(in crate::ui) struct Album {
     /// The stickers collected of the book's, its rewards (count, icon).
     pub progress: (u32, u32),
     pub rewards: Vec<(u32, Icon)>,
+    /// Each reward's hover card.
+    pub reward_cards: Vec<RewardView>,
     /// The front page's banner, of how many, and the new stickers.
     pub banner: String,
     pub banner_index: usize,
     pub banners: usize,
     pub new: Vec<Sticker>,
     pub scroll: usize,
+    /// The Collector's Bag bonuses earned (actor variable -> millionths): each
+    /// book's rewards reached by its owned stickers, as the variables they
+    /// raise (sb_pets_increased_hitpoints_01: pet_hitpoint_01 + 0.03), up to
+    /// their limits. A pet's card shows them (items::preview::sticker).
+    /// EVIDENCE: the user's original account: 5 resistance rewards = "+ 15.000%
+    ///   all resistance values", 3 damage = "+ 6.00% damage", 1 block = 2.00%.
+    /// UNVERIFIED: that the server applies them (ours does not track them yet).
+    pub bag: std::collections::BTreeMap<String, u32>,
+    /// Our class ("warrior"...): a pet card's resource line (Rage, Mana...).
+    pub class: String,
+}
+
+impl Album {
+    /// The bonuses earned, as values (bag).
+    pub(in crate::ui) fn bag_values(&self) -> std::collections::HashMap<String, f32> {
+        self.bag.iter().map(|(k, v)| (k.clone(), *v as f32 / 1e6)).collect()
+    }
 }
 
 /// A sticker's owned entry: the server keys them by resource id (the sticker's
@@ -145,6 +196,40 @@ pub(super) fn templates(def: &crate::gameplay::systems::StickerDef) -> impl Iter
     def.items.iter().map(String::as_str).chain(def.upgrades.iter().map(|u| u.rsplit_once(':').map_or(u.as_str(), |(t, _)| t)))
 }
 
+/// The tier above the one owned (or above the sticker's own item): its item and
+/// price ("pet_karabossa_magic:5").
+fn next(def: &crate::gameplay::systems::StickerDef, tier: Option<&str>) -> Option<(String, u32)> {
+    let at = tier.and_then(|t| templates(def).position(|x| x == t)).unwrap_or(0);
+    let above = at.saturating_sub(def.items.len().saturating_sub(1));
+    def.upgrades.get(above).and_then(|u| u.rsplit_once(':')).map(|(t, cost)| (t.to_owned(), cost.parse().unwrap_or(0)))
+}
+
+/// A book reward's hover card, and the amount on its icon.
+/// EVIDENCE: the original's Tamed Foes bar (the user's recording
+///   20261031-1601-00 and screenshot): a bonus centred, "Triad of Life
+///   (Permanent)" / its bonus green / "Reward for 3 x Pets" yellow; an item left
+///   aligned under its centred name, "Gilded Clover" / "Consumed when used" /
+///   its description yellow ("Right click to add the currency to your Currency
+///   Bag.") / "Reward for 12 x Pets", its icon marked "100".
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(in crate::ui) struct RewardView {
+    /// The reward: a status effect (a bonus) or an item template.
+    pub item: String,
+    pub title: String,
+    /// A bonus's lines (green), or None for an item.
+    pub bonus: Option<Vec<String>>,
+    /// An item's description lines.
+    pub description: Vec<String>,
+    pub footer: String,
+    pub amount: u32,
+    /// An item's lifetime, seconds ("Duration: 7d 0h 0m 0s", red).
+    pub lifetime: u32,
+    /// Its description is the currencies' hint, written in the hint's colour
+    /// (db.itemcurrency rightClickForCurrencyBag: "<cE0C884FF>Right click to add
+    /// the currency to your Currency Bag.</>"; the export drops the markup).
+    pub hint: bool,
+}
+
 pub(super) fn album(sources: &Sources) -> Album {
     let catalog = sources.catalog;
     let state = sources.state;
@@ -161,9 +246,18 @@ pub(super) fn album(sources: &Sources) -> Album {
             template: tier.or(def.items.first().map(String::as_str)).unwrap_or_default().to_owned(),
             owned, favourite: entry.is_some_and(|e| e.state == StickerbookEntry::FAVOURITE),
             addable: !owned && templates(def).any(|t| !sources.carried(t).is_empty()),
-            // Not at its last tier.
-            upgradable: owned && templates(def).last().is_some_and(|last| tier != Some(last)) && !def.upgrades.is_empty(),
+            // The original draws the arrow on every sticker with a tier above
+            // the one shown, owned or not (the user's recording 20261031-1414-12:
+            //   arrows over a whole Tamed Foes page owned 0 of 33).
+            upgradable: next(def, tier).is_some(),
+            next: next(def, tier),
+            affordable: owned && next(def, tier).is_some_and(|(_, cost)|
+                net.game_currencies.get(super::UPGRADE_CURRENCY).copied().unwrap_or(0) >= u64::from(cost)),
             origin: def.origin.clone(), background: def.background.clone(), offer: def.offer.clone(),
+            // Owned or not: the original's grey, not owned pets count down too
+            // (recording 20261031-1722-23, Avians).
+            countdown: tier.or(def.items.first().map(String::as_str))
+                .and_then(|t| super::super::hotbar::ItemCooldowns::key_of(sources.items, t)),
         }
     };
     // The list: each category's top book; the open one's books under it.
@@ -173,7 +267,11 @@ pub(super) fn album(sources: &Sources) -> Album {
     tops.sort_by_key(|b| (b.category, b.priority));
     let mut books = Vec::new();
     for top in &tops {
-        let title = if top.id == FRONT_BOOK { "Favorites".to_owned() } else { top.title.clone() };
+        // The front page's row is its book's own title ("Frontpage"); its page
+        // reads "Favorites" (FAVOURITES_TEXT).
+        // FAILURE (2026-10-30): the row read "Favorites" (the user's recording
+        //   beside the original's "Frontpage").
+        let title = top.title.clone();
         let open = state.album_open.as_deref() == Some(top.id.as_str());
         books.push(Book { id: top.id.clone(), title, sub: false, selected: open || top.id == chosen });
         if !open || top.id == FRONT_BOOK { continue; }
@@ -184,7 +282,10 @@ pub(super) fn album(sources: &Sources) -> Album {
     // The stickers in the books' order.
     let order = |book: &str| catalog.stickerbooks.iter().position(|b| b.id == book).unwrap_or(usize::MAX);
     let mut all: Vec<(&String, &crate::gameplay::systems::StickerDef)> = catalog.stickers.iter().collect();
-    all.sort_by(|(a, x), (b, y)| order(&x.book).cmp(&order(&y.book)).then(x.priority.cmp(&y.priority)).then(a.cmp(b)));
+    // Within a book, by priority, then as the database lists them (`order`).
+    // FAILURE (2026-10-31): sorted by id, the grid's places differed from the
+    //   original's ("the placement is also wrong").
+    all.sort_by(|(a, x), (b, y)| order(&x.book).cmp(&order(&y.book)).then(x.priority.cmp(&y.priority)).then(x.order.cmp(&y.order)).then(a.cmp(b)));
     let front = chosen == FRONT_BOOK;
     let top = book_of(&chosen).is_some_and(|b| b.subcategory < 0);
     let stickers: Vec<Sticker> = all.iter().filter(|(id, def)| {
@@ -199,8 +300,49 @@ pub(super) fn album(sources: &Sources) -> Album {
     let book = book_of(&chosen);
     let progress = (stickers.iter().filter(|s| s.owned).count() as u32, stickers.len() as u32);
     let rewards = if top || front { Vec::new() } else {
-        book.map(|b| b.rewards.iter().map(|r| (r.at, sources.icon(&r.item, None))).collect()).unwrap_or_default()
+        // A reward that is a Collector's Bag bonus (a status effect) shows its
+        // own icon (items::Catalog reward_icons).
+        // On the bonus's own icon configuration, statuseffect_buff: the green
+        // glow (icons_toolkit/bg_status_buff) and the status frame.
+        // FAILURE (2026-10-31): the paw alone ("it has those lines around the icon").
+        let buff = sources.items.and_then(|i| i.icon_configs.get("statuseffect_buff"));
+        book.map(|b| b.rewards.iter().map(|r| (r.at, sources.items.and_then(|i| i.reward_icons.get(&r.item))
+            .map_or_else(|| sources.icon(&r.item, None), |image| Icon { image: image.clone(),
+                background: buff.map(|c| c.background.clone()).unwrap_or_default(), frame: buff.map(|c| c.frame.clone()).unwrap_or_default(), ..Default::default() }))).collect()).unwrap_or_default()
     };
+    // Their cards: a bonus's title and text, else the item's name; under them
+    // "Reward for <n> x <category>" (gui.window.stickerbook rewardAmountTemplate).
+    // EVIDENCE: the original's Tamed Foes bar (the user's recording
+    //   20261031-1601-00): "Triad of Life (Permanent)" / "+ 3% health points
+    //   while accompanied by a pet" / "Reward for 15 x Pets".
+    let kind = book.and_then(|b| catalog.stickerbooks.iter().find(|t| t.category == b.category && t.subcategory < 0)).map(|t| t.title.clone()).unwrap_or_default();
+    let reward_cards = if top || front { Vec::new() } else {
+        book.map(|b| b.rewards.iter().map(|r| {
+            let card = sources.items.and_then(|i| i.reward_cards.get(&r.item));
+            let title = card.map(|c| c.title.clone()).or_else(|| sources.items.map(|i| i.name(&r.item, None).trim().to_owned())).unwrap_or_else(|| r.item.clone());
+            // The data writes its line breaks as "\n" (two characters).
+            let description = sources.items.and_then(|i| i.items.get(&r.item)).map(|d| d.description.replace("\\n", "\n"))
+                .map(|d| d.split('\n').map(str::to_owned).collect()).unwrap_or_default();
+            let def = sources.items.and_then(|i| i.items.get(&r.item));
+            let lifetime = def.map_or(0, |d| d.lifetime);
+            let hint = def.is_some_and(|d| matches!(d.item_category.as_str(), "ItemCurrency" | "NoAutoUseCurrency"));
+            RewardView { item: r.item.clone(), title, bonus: card.map(|c| c.lines.clone()), description, footer: format!("Reward for {} x {kind}", r.at), amount: r.amount, lifetime, hint }
+        }).collect()).unwrap_or_default()
+    };
+    let mut earned: std::collections::HashMap<&str, f32> = std::collections::HashMap::new();
+    if let Some(items) = sources.items {
+        for book in catalog.stickerbooks.iter().filter(|b| !b.rewards.is_empty()) {
+            let owned = catalog.stickers.iter().filter(|(id, def)| def.book == book.id
+                && owned_entry(&net.stickerbook, id, def).is_some_and(|e| e.state >= StickerbookEntry::OWNED)).count() as u32;
+            for (variable, amount) in book.rewards.iter().filter(|r| r.at <= owned).filter_map(|r| items.raises.get(&r.item)) {
+                *earned.entry(variable.as_str()).or_insert(0.0) += amount;
+            }
+        }
+        for (variable, value) in earned.iter_mut() {
+            if let Some(limit) = items.variables.get(*variable) { *value = value.min(*limit); }
+        }
+    }
+    let bag = earned.into_iter().map(|(k, v)| (k.to_owned(), (v * 1e6).round() as u32)).collect();
     let banners = catalog.album_banners.len();
     let banner_index = if banners == 0 { 0 } else { state.album_banner % banners };
     let new = all.iter().filter(|(_, def)| def.new).take(MOST_NEW).map(|(id, def)| sticker(id, def)).collect();
@@ -208,9 +350,11 @@ pub(super) fn album(sources: &Sources) -> Album {
         books, front,
         title: if front { "Favorites".into() } else { book.map(|b| b.title.clone()).unwrap_or_default() },
         description: if top { format!("{} of {} collected.", progress.0, progress.1) } else { book.map(|b| b.description.clone()).unwrap_or_default() },
-        stickers, page, pages, preview, progress, rewards,
+        stickers, page, pages, preview, progress, rewards, reward_cards,
         banner: catalog.album_banners.get(banner_index).cloned().unwrap_or_default(), banner_index, banners, new,
         scroll: state.scroll.get(LIST).copied().unwrap_or(0),
+        bag,
+        class: sources.class_name().to_owned(),
     }
 }
 
@@ -251,6 +395,15 @@ fn grid(source: &Layout, layout: &mut Layout, page: &str, stickers: &[Sticker], 
                 || (has_part(&w.id, "FlagButtonFav") && !sticker.owned) || (has_part(&w.id, "FlagButtonAdd") && !sticker.addable)
                 || (has_part(&w.id, "UpgradeButton") && !sticker.upgradable) { continue; }
             if has_part(&w.id, "highlight") { w.hidden = false; }
+            // An arrow that cannot be used yet (not owned, or too few Altered
+            // Crescerite) wears its grey face, still hovered for its card: its
+            // disabled face drawn as its only one.
+            // EVIDENCE: the user's recordings 20261031-1414-12 (grey arrows on a
+            //   page owned 0 of 33) and 20261031-1506-03 (green ones on owned pets).
+            if has_part(&w.id, "UpgradeButton") && w.button.is_some() && !sticker.affordable {
+                if w.state.as_deref() != Some("disabled") { continue; }
+                w.state = Some("normal".into());
+            }
             if has_part(&w.id, "FlagButtonFav") && sticker.favourite { if let Some(art) = &mut w.art { art.tex = Some(FAVOURITE.into()); } }
             let name = leaf(&w.id).to_owned();
             match name.as_str() {
@@ -262,13 +415,27 @@ fn grid(source: &Layout, layout: &mut Layout, page: &str, stickers: &[Sticker], 
             if w.id == replacement { make_button(&mut w, &format!("Sys:Pick:{}", sticker.id)); }
             if name == "Icon" {
                 let mut layers = icon_layers(&mut w, &sticker.icon);
-                if !sticker.owned { for l in &mut layers { dim(l, FADED); } }
+                // Not owned: greyscale at full strength, as the original's (was
+                // faded to 35 %, which read as a dark, empty slot).
+                // Counting down after a use: drawn as it is, only its countdown over it.
+                // FAILURE (2026-10-30): greyed, then dimmed; both read as grey
+                //   next to the original's (the user's recordings).
+                if !sticker.owned { for a in layers.iter_mut().filter_map(|l| l.art.as_mut()) { a.saturation = 0.0; } }
                 set_text(&mut w, "");
                 layout.widgets.extend(layers);
             }
             if w.id.contains("/Slot/FlagLabel") { flags.push(w); } else { layout.widgets.push(w); }
         }
         layout.widgets.extend(flags);
+        // The countdown and the pop are drawn every frame over the cell
+        // (crate::ui::album_overlays): markers with its place.
+        // FAILURE (2026-10-31): the window rebuilt for each step of the sweep,
+        //   a few times a second ("it still feels ticky, snappy").
+        if let Some(icon) = clone_at(source, ENTRY, &replacement, dx, dy).find(|w| leaf(&w.id) == "TemplateIcon") {
+            let mark = |id: String| { let mut m = icon.clone(); m.id = id; m.kind = "Label".into(); m.text = None; m.art = None; m.event.clear(); m.button = None; m.state = None; m.hidden = false; m };
+            if let Some(key) = &sticker.countdown { layout.widgets.push(mark(format!("{page}{COUNT_MARK}{i}#{key}"))); }
+            if sticker.owned { layout.widgets.push(mark(format!("{page}{POP_MARK}{}", sticker.id))); }
+        }
     }
     for i in stickers.len()..cells {
         let (dx, dy) = offset(i);
@@ -311,6 +478,7 @@ pub(super) fn prepare_album(source: &Layout, album: &Album) -> Layout {
         match leaf(&id) {
             "TextLabel_fav" => set_text(w, &album.title),
             "TextLabel_info" if !album.front => set_text(w, &album.description),
+            "TextLabel_info" => set_text(w, FAVOURITES_TEXT),
             "PageNumText" => set_text(w, &format!("{} / {}", album.page + 1, album.pages)),
             // The bar's caption (its points label is authored transparent).
             "ProgressBarTextLabel" => set_text(w, &format!("{} / {}", album.progress.0, album.progress.1)),
@@ -388,7 +556,19 @@ pub(super) fn prepare_album(source: &Layout, album: &Album) -> Layout {
                 let x = bar.rect[0] + (bar.rect[2] - bar.rect[0]) * (*at as f32 / total).min(1.0);
                 for mut w in clone_at(source, REWARD, &format!("{INLAY}/Categorypage/ProgressLabel/Reward{n}"), x - (root.rect[0] + root.rect[2]) / 2.0, 0.0) {
                     if w.id.ends_with("/IconHighlight") && *at > album.progress.0 { continue; }
-                    if leaf(&w.id) == "Icon" { layout.widgets.extend(icon_layers(&mut w, icon)); set_text(&mut w, ""); }
+                    // An item's amount on its icon ("100" Gilded Clovers).
+                    let amount = album.reward_cards.get(n).map_or(1, |r| r.amount);
+                    // In the icon's middle, larger than a slot's count (the user, 2026-10-31:
+                    // the original's fills the icon, ours sat small in its corner;
+                    // "maybe in the middle and a bit bigger").
+                    if leaf(&w.id) == "Icon" {
+                        layout.widgets.extend(icon_layers(&mut w, icon));
+                        set_text(&mut w, &if amount > 1 { amount.to_string() } else { String::new() });
+                        if let Some(label) = &mut w.text { label.align = [1, 1]; label.size *= 1.4; }
+                    }
+                    // Hovered, it shows its card (tooltips): its slot (the root is an
+                    // 11 x 10 label at the stem's top).
+                    if w.id.ends_with(&format!("/Reward{n}/Linie/ItemSlot")) { make_button(&mut w, &format!("Sys:Reward:{n}")); }
                     w.hidden = false;
                     layout.widgets.push(w);
                 }
@@ -412,6 +592,7 @@ mod tests {
             (ENTRY.into(), "Label", false), (format!("{ENTRY}/TemplateSlot/FlagLabel/FlagButtonFav"), "Button", false), (format!("{ENTRY}/TemplateSlot/FlagLabel/FlagButtonAdd"), "Button", false),
             (format!("{ENTRY}/TemplateSlot/FlagLabel/UpgradeButton"), "Button", false), (format!("{ENTRY}/TemplateIcon"), "Icon", true), (format!("{ENTRY}/TemplateIcon/highlight"), "Label", false),
             (format!("{ENTRY}/EmptyBackground"), "Slot", false),
+            (ANIM_USE_TEXT.into(), "TextLabel", true),
             (format!("{PAGE}/background_info/TextLabel_fav"), "TextLabel", true), (format!("{PAGE}/background_info/TextLabel_info"), "TextLabel", true),
             (format!("{PAGE}/pages/PageNumText"), "TextLabel", true), (format!("{PAGE}/pages/NextPageBtn"), "Button", false),
             (image.clone(), "Label", false), (format!("{image}/background_headline/TextLabel"), "TextLabel", true), (format!("{image}/FlagButtonFav"), "Button", false), (format!("{image}/OriginIconLabel"), "Label", false),
@@ -448,7 +629,18 @@ mod tests {
         assert!(ids.contains(&format!("{PAGE}/Sticker0/Icon/highlight")) && !ids.contains(&format!("{PAGE}/Sticker1/Icon/highlight")));
         assert_eq!(find(&prepared, &format!("{PAGE}/Sticker0/Slot/FlagLabel/FlagButtonFav")).art.as_ref().unwrap().tex.as_deref(), Some(FAVOURITE));
         assert_eq!(find(&prepared, &format!("{PAGE}/Sticker1/Slot/FlagLabel/FlagButtonAdd")).event, "Sys:Add:s2");
-        assert_eq!(find(&prepared, &format!("{PAGE}/Sticker1/Icon/Image")).art.as_ref().unwrap().color[3], FADED);
+        let unowned = find(&prepared, &format!("{PAGE}/Sticker1/Icon/Image")).art.as_ref().unwrap();
+        assert_eq!((unowned.saturation, unowned.color[3]), (0.0, 1.0), "not owned: grey, not faded");
+        // Its category cooling down: drawn as it is, a sweep and the seconds
+        // centred over it.
+        let counting = prepare_album(&album_source(), &Album { stickers: vec![Sticker { countdown: Some("Pet".into()), ..owned.clone() }], ..album.clone() });
+        let used = find(&counting, &format!("{PAGE}/Sticker0/Icon/Image")).art.as_ref().unwrap();
+        let plain = find(&prepared, &format!("{PAGE}/Sticker0/Icon/Image")).art.as_ref().unwrap();
+        assert_eq!((used.saturation, &used.color), (plain.saturation, &plain.color));
+        // A marker over the cell; the sweep and seconds are drawn every frame.
+        let mark = find(&counting, &format!("{PAGE}{COUNT_MARK}0#Pet"));
+        assert!(mark.art.is_none() && mark.text.is_none() && !mark.hidden);
+        assert!(!ids.iter().any(|id| id.contains("/Use0")));
         // No empty backing over a sticker, none past a book's stickers.
         assert!(!ids.iter().any(|id| id.ends_with("/EmptyBackground")));
         // The preview: the sticker's name, origin, icon, favourite flag; no offer for an owned one.
@@ -516,6 +708,21 @@ mod tests {
         let s = Sticker { id: id.into(), key: "mythical_mount_manticore_01".into(), ..Default::default() };
         assert_eq!(s.server_key(), "mythical_mount_manticore_01");
         assert_eq!(Sticker { id: id.into(), ..Default::default() }.server_key(), id);
+    }
+
+    #[test]
+    fn a_sticker_s_arrow_offers_the_tier_above_the_one_owned() {
+        let def: crate::gameplay::systems::StickerDef = serde_json::from_value(serde_json::json!({
+            "name": "Mortis Doll", "book": "sb_pets_tamed_enemies", "items": ["pet_mortis_phase2_uncommon"],
+            "upgrades": ["pet_mortis_phase2_magic:5", "pet_mortis_phase2_rare:25", "pet_mortis_phase2_epic:50"] })).unwrap();
+        // Not owned, as owned at its own item: the first tier above.
+        assert_eq!(next(&def, None), Some(("pet_mortis_phase2_magic".into(), 5)));
+        assert_eq!(next(&def, Some("pet_mortis_phase2_uncommon")), Some(("pet_mortis_phase2_magic".into(), 5)));
+        assert_eq!(next(&def, Some("pet_mortis_phase2_rare")), Some(("pet_mortis_phase2_epic".into(), 50)));
+        // The last tier, or a sticker without tiers: no arrow.
+        assert_eq!(next(&def, Some("pet_mortis_phase2_epic")), None);
+        let plain: crate::gameplay::systems::StickerDef = serde_json::from_value(serde_json::json!({ "name": "Nian", "items": ["pet_nian"] })).unwrap();
+        assert_eq!(next(&plain, None), None);
     }
 
     #[test]

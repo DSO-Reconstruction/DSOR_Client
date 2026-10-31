@@ -5,15 +5,19 @@
 //! `dropitems/dwarf_drop_helmet_01`), playing that model's own looping clip (its
 //! slow turn), with its rarity's glow: the sequence `drop_<rarity>` (one looping
 //! `dropitems/glow_<rarity>` effect), or the template's DropSequenceOverride.
-//! Holding Ctrl names every item, its text in its rarity's colour (white for a
-//! common one), over a dark box (ui/cmdmodeitemlabel.bxml: a BGLabel frame round a
-//! TextDescription).
+//! Holding Ctrl names every item, hovering names the one under the cursor, its
+//! text in its rarity's colour (white for a common one) with no box behind it, as
+//! the original shows it (the user's release261_192 shot; ui/cmdmodeitemlabel.bxml
+//! has a BGLabel frame round a TextDescription, not drawn there).
 //! EVIDENCE: the drop models' `<name>-loop` clips; skills/sequences.json
 //!   drop_common .. drop_mythic; the rarity is ItemInfo field_08 (`kind`), indexing
 //!   Common, Uncommon, Magic, Rare, Epic, Unique, Set, Mythic (DSOR_Server
 //!   protocol/world_loot_protocol.py EQUIPMENT_RARITIES).
-//! UNVERIFIED: the label's frame is drawn as a plain dark box, not the BGLabel art
-//!   (which the game does not tint by rarity).
+//! FAILURE (2026-10-24): the name sat in a dark box, and only the small model
+//!   reacted to the cursor ("you have to press very specific"; the original takes
+//!   the whole item).
+//! UNVERIFIED: the original's pick area (a sphere round the item here); its glow
+//!   reads larger than ours.
 
 use std::collections::HashMap;
 
@@ -108,7 +112,8 @@ pub struct GroundItem {
 }
 
 /// The ground item under the cursor: (its entity, its model's scene root). It
-/// shows its name; no outline (the game draws none: "y'a pas d'aura blanche").
+/// shows its name, and its model is outlined in lime (crate::rendering::highlight).
+/// A white outline was wrong ("y'a pas d'aura blanche"); the original's is lime.
 #[derive(Resource, Default)]
 pub struct ItemHover(pub Option<(Entity, Entity)>);
 
@@ -120,12 +125,15 @@ struct PendingPickup(Option<Entity>);
 /// SOURCE: DSOR_Server services/world.py _handle_pickup_item refuses beyond 4.0.
 const PICKUP_REACH: f32 = 2.5;
 /// The pickable sphere around an item: its centre this high over the ground.
-const PICK_HEIGHT: f32 = 0.3;
-const PICK_RADIUS: f32 = 0.6;
+const PICK_HEIGHT: f32 = 0.4;
+const PICK_RADIUS: f32 = 1.0;
 
-/// Its model, until its clip is started.
+/// Where a hovered item's name starts, from the cursor's tip (logical pixels).
+const CURSOR_LABEL: Vec2 = Vec2::new(15.0, 34.0);
+
+/// Its model, and the animation player its clip was started on.
 #[derive(Component)]
-struct ItemModel(Handle<Gltf>);
+struct ItemModel(Handle<Gltf>, Option<Entity>);
 
 /// The Ctrl label of an item.
 #[derive(Component)]
@@ -204,7 +212,7 @@ fn spawn_drops(
         let e = commands
             .spawn((
                 Name::new(format!("item {}", item.template)),
-                ItemModel(gltf),
+                ItemModel(gltf, None),
                 Transform::from_translation(at),
                 Visibility::default(),
             ))
@@ -231,15 +239,25 @@ fn spawn_drops(
 /// Each model plays its own looping clip once its scene is in (its turn).
 fn animate_drops(
     mut commands: Commands,
-    drops: Query<(Entity, &ItemModel)>,
+    mut drops: Query<(Entity, &mut ItemModel, &GroundItem)>,
     children: Query<&Children>,
     players: Query<(), With<AnimationPlayer>>,
+    playing: Query<&AnimationPlayer>,
     gltfs: Res<Assets<Gltf>>,
     assets: Res<AssetServer>,
     mut graphs: ResMut<Assets<AnimationGraph>>,
     mut clips: ResMut<Assets<AnimationClip>>,
+    targets: Query<(), With<bevy::animation::AnimationTargetId>>,
+    nodes: Query<(&bevy::animation::AnimationTargetId, &bevy::gltf::GltfExtras)>,
 ) {
-    for (entity, model) in &drops {
+    for (entity, mut model, item) in &mut drops {
+        // Started, and its player still plays. A scene built again under it (its
+        // model loaded again after the last item of it went) has a fresh player
+        // with nothing playing: its clip starts again there, as an effect's does
+        // (crate::skills::start_fx_animations).
+        if model.1.is_some_and(|p| playing.get(p).is_ok_and(|a| a.playing_animations().next().is_some())) {
+            continue;
+        }
         if assets.load_state(&model.0).is_failed() {
             commands.entity(entity).remove::<ItemModel>();
             continue;
@@ -249,11 +267,20 @@ fn animate_drops(
             commands.entity(entity).remove::<ItemModel>();
             continue;
         };
-        let Some(player) = children.iter_descendants(entity).find(|e| players.contains(*e)) else { continue };
-        commands.entity(entity).remove::<ItemModel>();
+        // Within its model's scene only: its glow (a sequence's effect, also
+        // under the item) has a player of its own.
+        // FAILURE (2026-10-28): when the glow's scene came in first, the item's
+        //   clip went on the glow's player and the two clips took turns on it:
+        //   a Chainmail Shirt lay still and without its glow (the user's clip
+        //   20261028-1812-11), the Leather Gauntlets beside it turned and glowed.
+        let Some(player) = children.iter_descendants(item.model).find(|e| players.contains(*e)) else { continue };
+        model.1 = Some(player);
         let mut anim = AnimationPlayer::default();
-        let graph = crate::skills::looping_graph(clip, &mut clips, &mut anim, 1.0);
+        let loops = crate::skills::clip_loops(item.model, &children, &nodes);
+        let graph = crate::skills::clip_graph(clip, &mut clips, &mut anim, 1.0, &loops)
+            .unwrap_or_else(|| crate::skills::looping_graph(clip, &mut clips, &mut anim, 1.0));
         commands.entity(player).try_insert((AnimationGraphHandle(graphs.add(graph)), anim));
+        crate::skills::hook_targets(&mut commands, item.model, player, &children, &targets);
     }
 }
 
@@ -266,16 +293,14 @@ fn hover_items(
     monster: Option<Res<crate::monsters::Hovered>>,
     items: Query<(Entity, &GroundItem, &GlobalTransform, &InheritedVisibility)>,
     labels: Query<(&ItemLabel, &Node, &ComputedNode, &Visibility)>,
-    keys: Res<ButtonInput<KeyCode>>,
     mut hover: ResMut<ItemHover>,
 ) {
     let cursor = (!ui.over_ui && monster.is_none_or(|m| m.0.is_none()))
         .then(|| windows.single().ok().and_then(|w| w.cursor_position()))
         .flatten();
-    // With Ctrl held the names show; the name under the cursor is its item too
-    // (the user's view of the game: Ctrl and a click on the name picks it up).
-    let held = !ui.typing && (keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight));
-    let named = cursor.filter(|_| held).and_then(|c| {
+    // A name shown (Ctrl held, or the item hovered) is its item too: Ctrl and a
+    // click on the name picks it up, and the cursor moving onto it keeps it.
+    let named = cursor.and_then(|c| {
         labels.iter().find_map(|(of, node, size, vis)| {
             let (Val::Px(x), Val::Px(y)) = (node.left, node.top) else { return None };
             let s = size.size() * size.inverse_scale_factor();
@@ -298,11 +323,17 @@ fn hover_items(
             }
             let centre = at.translation() + Vec3::Y * PICK_HEIGHT;
             let t = (centre - ray.origin).dot(*ray.direction);
-            if t <= 0.0 || ray.get_point(t).distance(centre) > PICK_RADIUS {
+            let off = ray.get_point(t).distance(centre);
+            if t <= 0.0 || off > PICK_RADIUS {
                 continue;
             }
-            if best.is_none_or(|(bt, _, _)| t < bt) {
-                best = Some((t, e, item.model));
+            // The item nearest the cursor, not the camera: in a pile their
+            // pick spheres overlap.
+            // FAILURE (2026-10-28): after a boss, the cursor on a Sledgehammer
+            //   outlined and named a healing sphere beside it (clip
+            //   20261028-1832-42).
+            if best.is_none_or(|(bo, _, _)| off < bo) {
+                best = Some((off, e, item.model));
             }
         }
         best.map(|(_, e, m)| (e, m))
@@ -353,6 +384,7 @@ fn labels(
     items: Query<(Entity, &GroundItem, &GlobalTransform, &InheritedVisibility)>,
     mut labels: Query<(Entity, &ItemLabel, &mut Node, &mut Visibility, &ComputedNode)>,
     cameras: Query<(&Camera, &GlobalTransform), (With<Camera3d>, Without<crate::highlight::HighlightCamera>)>,
+    windows: Query<&Window, With<bevy::window::PrimaryWindow>>,
 ) {
     let held = !ui.typing && (keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight));
     let mut labelled: HashMap<Entity, Entity> = HashMap::new();
@@ -374,9 +406,9 @@ fn labels(
                         padding: UiRect::axes(Val::Px(6.0), Val::Px(2.0)),
                         ..default()
                     },
-                    BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.65)),
                     Text::new(item.name.clone()),
-                    TextFont { font: assets.load("fonts/tahoma.ttf").into(), font_size: bevy::text::FontSize::Px(14.0), ..default() },
+                    TextShadow { offset: Vec2::splat(1.0), color: Color::BLACK },
+                    TextFont { font: assets.load("fonts/tahoma.ttf").into(), font_size: bevy::text::FontSize::Px(22.0), ..default() },
                     TextColor(RARITY_TEXT[item.rarity.min(RARITY_TEXT.len() - 1)]),
                     Pickable::IGNORE,
                     Visibility::Hidden,
@@ -385,7 +417,26 @@ fn labels(
         }
     }
     let cam = cameras.single().ok();
+    let cursor = windows.single().ok().and_then(|w| w.cursor_position());
     for (_, of, mut node, mut visibility, size) in &mut labels {
+        // The hovered item's name (Ctrl not held) beside the cursor, below and to
+        // its right, as a tooltip: it no longer covers the item and its glow.
+        // EVIDENCE: the user's original-game clip (release261_192, crypt,
+        //   2026-10-23 22:16 UTC): "Scut cavaleresc" and "Sabie de bastard" start
+        //   just past the arrow's tip, a line below it.
+        // MEASURED: the user's clip 20261028-1812-11 (original, crypt, 3830 px
+        //   wide at 150 %): "Bronze Ring" starts 23 px right of the arrow's tip
+        //   and 52 px below it, capitals 22 px tall (ours 14 at 14 px).
+        if !held && hovered == Some(of.0) {
+            if let Some(c) = cursor.filter(|_| items.get(of.0).is_ok_and(|(_, _, _, shown)| shown.get())) {
+                node.left = Val::Px(c.x + CURSOR_LABEL.x);
+                node.top = Val::Px(c.y + CURSOR_LABEL.y);
+                if *visibility != Visibility::Inherited {
+                    *visibility = Visibility::Inherited;
+                }
+                continue;
+            }
+        }
         let screen = items.get(of.0).ok().filter(|(e, _, _, shown)| (held || hovered == Some(*e)) && shown.get()).and_then(|(_, _, at, _)| {
             cam.and_then(|(c, ct)| c.world_to_viewport(ct, at.translation() + Vec3::Y * LABEL_HEIGHT).ok())
         });

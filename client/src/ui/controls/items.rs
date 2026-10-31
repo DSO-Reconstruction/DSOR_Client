@@ -11,6 +11,19 @@ pub struct Definition {
     #[serde(default)] pub icon_config: String,
     /// The raw _Template_Item ItemCategory ("Mount", "Armor"...).
     #[serde(default)] pub item_category: String,
+    /// Its use cooldown in seconds and the category sharing it
+    /// (_Template_Item.CoolDown / CoolDownCategory; hotbar::ItemCooldowns).
+    #[serde(default)] pub cooldown: f32,
+    #[serde(default)] pub cooldown_category: String,
+    /// An essence's card text: its slot's line, then its modifiers' (tools/
+    /// inventory_catalog.py modifier_lines).
+    #[serde(default)] pub card_lines: Vec<String>,
+    /// Seconds it lasts once received (ItemLifeTime), 0 for ever.
+    #[serde(default)] pub lifetime: u32,
+    /// A pet's status effect and its values by rarity ($0..: its Pet Effect;
+    /// tools/inventory_catalog.py pet_status).
+    #[serde(default)] pub status: String,
+    #[serde(default)] pub status_values: Vec<f32>,
     #[serde(default)] pub unique_values: Vec<String>,
     #[serde(default)] pub unique_effects: Vec<String>,
 }
@@ -19,7 +32,9 @@ pub struct Definition {
 pub struct Appearance { pub icon: String, pub config: String, #[serde(default)] pub name: String }
 /// _Template_IconConfig: the background follows the item's rarity, or is fixed.
 #[derive(Deserialize)]
-pub struct IconConfig { pub rarity: bool, pub background: String, #[serde(default)] pub frame: String }
+pub struct IconConfig { pub rarity: bool, pub background: String, #[serde(default)] pub frame: String,
+    /// Drawn over the frame: a time-limited item's hourglass (InfoTexture).
+    #[serde(default)] pub info: String }
 /// The rarities in ItemInfo.kind's order, as the catalog names them
 /// (rarity_backgrounds follows it).
 const RARITIES: [&str; 8] = ["Common", "Uncommon", "Magic", "Rare", "Epic", "Unique", "Set", "Mythic"];
@@ -32,7 +47,20 @@ pub struct Catalog { pub items: HashMap<String, Definition>, pub ingredients: Ve
     #[serde(default)] pub appearances: HashMap<String, Appearance>, #[serde(default)] pub icon_configs: HashMap<String, IconConfig>,
     #[serde(default)] pub rarity_backgrounds: Vec<String>,
     #[serde(default)] pub enchantments: HashMap<String, Enchantment>,
-    #[serde(default)] pub values: values::Data }
+    #[serde(default)] pub values: values::Data,
+    /// A book reward raising an actor variable: status effect -> (variable,
+    /// amount) (sb_pets_increased_hitpoints_01: pet_hitpoint_01 + 0.03); and the
+    /// variables' upper limits.
+    #[serde(default)] pub raises: HashMap<String, (String, f32)>,
+    /// Such a reward's icon on its book's bar.
+    #[serde(default)] pub reward_icons: HashMap<String, String>,
+    /// Such a reward's hover card: its title and lines (tools/inventory_catalog.py
+    /// reward_cards).
+    #[serde(default)] pub reward_cards: HashMap<String, RewardCard>,
+    #[serde(default)] pub variables: HashMap<String, f32> }
+#[derive(Deserialize, Clone, Debug, Default, PartialEq)]
+pub struct RewardCard { #[serde(default)] pub title: String, #[serde(default)] pub lines: Vec<String> }
+
 impl Catalog {
     /// What a cell shows: the rolled appearance's icon (a generated item's look;
     /// its template's icon is the base model's, the same for every roll), else the
@@ -86,6 +114,13 @@ impl Catalog {
         } else { Some(c.background.as_str()) }).filter(|b| !b.is_empty());
         let frame = config.map(|c| c.frame.as_str()).filter(|f| !f.is_empty());
         (icon, background, frame)
+    }
+    /// The layer over an item's frame (IconConfig::info): a time-limited item's
+    /// hourglass, as the original's Premium reward shows it.
+    pub fn icon_info(&self, template: &str, item: Option<&ItemInfo>) -> Option<&str> {
+        let look = item.and_then(|i| self.appearances.get(if i.fourth_name.is_empty() { &i.appearance } else { &i.fourth_name }));
+        let config = look.map(|a| a.config.as_str()).filter(|c| !c.is_empty()).or_else(|| self.items.get(template).map(|d| d.icon_config.as_str()));
+        config.and_then(|c| self.icon_configs.get(c)).map(|c| c.info.as_str()).filter(|i| !i.is_empty())
     }
 }
 #[derive(Default, TypePath)]
@@ -241,7 +276,7 @@ pub(in crate::ui) fn prepare_confirm(layout:&Layout)->Layout {
     out.widgets.retain(|w|!w.id.starts_with("Canvas/DialogBottom"));
     for w in &mut out.widgets {
         let Some(rest)=w.id.strip_prefix("Canvas/DialogCenter/Content/") else{continue};
-        let layer=["DeleteItem","DefaultDoNotShowAgain"].iter().any(|l|rest==*l || rest.starts_with(&format!("{l}/")));
+        let layer=["DeleteItem","DefaultDoNotShowAgain","Default"].iter().any(|l|rest==*l || rest.starts_with(&format!("{l}/")));
         w.hidden=!layer || rest.ends_with("/Question");
     }
     out
@@ -369,6 +404,10 @@ fn unit_art(w:&Widget)->Option<(Mesh,Option<String>)> {
 ///   4.8 reference pixels) in from the Slot's top right corner, its top left
 ///   for 5 and 7-10 and 12 (mask 0x17a0: the left column); the text "%d".
 ///   Its one caller always passes Green: the Red "outdated" face is unused.
+/// EVIDENCE (the user's release261_192 shot, 2026-10-29): the belt shows its
+///   level too, top left like the left column: the slot type numbers above are
+///   the exe's, not our cells' (FAILURE: no belt level, "this belt doesn't show
+///   its lvl").
 /// UNVERIFIED: the original shows the sum of two GameItem fields (+0x40,
 ///   +0x48); the server sends one level, ItemInfo.durability (the tooltip's).
 /// NOT DONE: its tooltip and left click ("Left-click to upgrade the item.",
@@ -381,7 +420,7 @@ const LEVEL_OUTLINE: f32 = 1.7;
 /// Where an equipped item's level is centred over its Slot `rect`; None for
 /// the slots that show none.
 fn level_centre(slot:i8, rect:[f32;4])->Option<Vec2> {
-    let left=match slot { 0..=4|6=>false, 5|7..=10|12=>true, _=>return None };
+    let left=match slot { 0..=4|6=>false, 5|7..=12=>true, _=>return None };
     let [l,t,r,_]=rect;
     Some(Vec2::new(if left {l+LEVEL_INSET.x} else {r-LEVEL_INSET.x}, t+LEVEL_INSET.y))
 }
@@ -459,7 +498,7 @@ impl Lookups<'_> {
 pub fn input(mut ui:ResMut<Interaction>,mut pointer:ResMut<Pointer>,mut windows:Windows,
     primary:Query<&Window,With<PrimaryWindow>>,mouse:Res<ButtonInput<MouseButton>>,keys:Res<ButtonInput<KeyCode>>,
     net:Option<NonSendMut<crate::network::net::Net>>,data:Res<Data>,catalogs:Res<Assets<Catalog>>,time:Res<Time<Real>>,
-    mut last_click:Local<Option<(u32,f64)>>,mut trade:ResMut<super::trade::TradeUi>,capture:Res<crate::ui::input::UiInput>,mut tested:Local<bool>,
+    mut last_click:Local<Option<(u32,f64)>>,(mut trade,mut cooldowns):(ResMut<super::trade::TradeUi>,ResMut<super::hotbar::ItemCooldowns>),capture:Res<crate::ui::input::UiInput>,mut tested:Local<bool>,
     mut lookups:Lookups,mut audio:Option<ResMut<crate::audio::AudioRequests>>) {
     let Some(mut net)=net else{return}; let Some(catalog)=catalogs.get(&data.catalog) else{return};
     let Ok(window)=primary.single() else{return};
@@ -588,7 +627,10 @@ pub fn input(mut ui:ResMut<Interaction>,mut pointer:ResMut<Pointer>,mut windows:
                     pointer.open_window=Some("travelmap"); net.travel_source=None;
                 } else if let Some(cmd)=use_consumable(&net.inventory,catalog,id) {
                     if trading { trade.add.push(id); }
-                    else { net.send(&cmd);ui.pending=Some((net.inventory.revision,time.elapsed_secs_f64())); }
+                    // Still cooling down (a mount used 0.5 s ago): refused, as the original.
+                    else if net.inventory.items.get(&id).is_none_or(|i| cooldowns.start(Some(catalog),&i.template,time.elapsed_secs_f64())) {
+                        net.send(&cmd);ui.pending=Some((net.inventory.revision,time.elapsed_secs_f64()));
+                    }
                 }
             }
         }
@@ -703,7 +745,7 @@ pub(super) fn text(commands:&mut Commands,assets:&AssetServer,screen:&Screen,par
 #[allow(clippy::too_many_arguments)]
 fn sprites(commands:&mut Commands,assets:&AssetServer,catalog:&Catalog,template:&str,item:Option<&ItemInfo>,at:Vec3,size:Vec2,tint:Color,parent:Entity)->bool {
     let (icon,background,frame)=catalog.icon_parts(template,item);
-    for (z,image) in [(0.0,background),(0.05,icon),(0.1,frame)] {
+    for (z,image) in [(0.0,background),(0.05,icon),(0.1,frame),(0.15,catalog.icon_info(template,item))] {
         let Some(image)=image else{continue};
         commands.spawn((Sprite{image:assets.load(image.to_owned()),custom_size:Some(size),color:tint,..default()},Anchor::TOP_LEFT,
             Transform::from_translation(at+Vec3::Z*z),RenderLayers::layer(LAYER),ChildOf(parent)));
@@ -823,9 +865,16 @@ pub(in crate::ui) mod pins;
 #[cfg(test)]
 mod interaction_tests;
 
-pub(super) fn sticker_card(catalog:&Catalog, layout:Option<&Layout>, template:&str)->tooltips::card::Card {
-    preview::sticker(catalog,layout,template)
+pub(super) fn sticker_card(catalog:&Catalog, layout:Option<&Layout>, template:&str, title:&str, status:Option<&effects::Catalog>, bag:&HashMap<String,f32>, class:&str, upgrade:Option<(u64,u32)>)->tooltips::card::Card {
+    preview::sticker(catalog,layout,template,title,status,bag,class,upgrade,None)
 }
+#[allow(clippy::too_many_arguments)]
+pub(super) fn reward_item_card(catalog:&Catalog, layout:Option<&Layout>, template:&str, footer:&str, lifetime:u32, status:Option<&effects::Catalog>, bag:&HashMap<String,f32>, class:&str)->tooltips::card::Card {
+    preview::reward_item(catalog,layout,template,footer,lifetime,status,bag,class)
+}
+
+pub(in crate::ui) fn small_card(layout:Option<&Layout>)->tooltips::card::Card { preview::small_card(layout) }
+pub(in crate::ui) fn fit_small<'a>(card:&mut tooltips::card::Card, lines:impl Iterator<Item=&'a str>) { preview::fit_small(card,lines) }
 
 pub(super) fn preview_card(catalog:&Catalog, layout:Option<&Layout>, template:&str, item:Option<&ItemInfo>, amount:u32, advanced:bool)->tooltips::card::Card {
     preview::card(&DisplayItem { item,template,amount,unlock:0,read_only:false,waiting:false },catalog,layout,advanced)
@@ -880,7 +929,7 @@ mod tests {
             .init_asset::<Layout>().init_asset::<Mesh>().init_asset::<UiMaterial>()
             .init_asset::<Image>().init_asset::<Font>().init_asset::<Catalog>()
             .init_resource::<Loaded>().init_resource::<Screen>().init_resource::<Figures>()
-            .init_resource::<settings::Settings>().init_resource::<hotbar::Hotbar>()
+            .init_resource::<settings::Settings>().init_resource::<hotbar::Hotbar>().init_resource::<crate::ui::controls::hotbar::ItemCooldowns>()
             .init_resource::<dialogue::Presentation>().init_asset::<dialogue::Catalog>()
             .init_resource::<crate::gameplay::dialogue::Dialogue>()
             .init_resource::<crate::gameplay::stats::Sheet>().init_resource::<crate::actors::monsters::HoverInfo>()
@@ -1172,10 +1221,10 @@ mod tests {
         let near = |slot: i8, at: Vec2| level_centre(slot, rect).is_some_and(|c| c.distance(at) < 1e-4);
         // The right column (helmet to boots, the off hand): top right.
         for slot in [0, 1, 2, 3, 4, 6] { assert!(near(slot, Vec2::new(143.6, 204.8)), "slot {slot}"); }
-        // The left column (weapon, cloak, rings, amulet, weapon mod): top left.
-        for slot in [5, 7, 8, 9, 10, 12] { assert!(near(slot, Vec2::new(106.4, 204.8)), "slot {slot}"); }
-        // No belt, trinkets, mercenary pieces or essences.
-        for slot in [11, 13, 20, 24, 25, 27, 34, 35] { assert_eq!(level_centre(slot, rect), None, "slot {slot}"); }
+        // The left column (weapon, cloak, rings, amulet, belt, weapon mod): top left.
+        for slot in [5, 7, 8, 9, 10, 11, 12] { assert!(near(slot, Vec2::new(106.4, 204.8)), "slot {slot}"); }
+        // No trinkets, mercenary pieces or essences.
+        for slot in [13, 20, 24, 25, 27, 34, 35] { assert_eq!(level_centre(slot, rect), None, "slot {slot}"); }
         // The face: the Green template's normal state, at its size, with its font size.
         let id = "Canvas/UpgradeButtonLabel/UpgradeButtonLabel/UpgradeButtonTemplate_Green/normal";
         let mut layout = crate::ui::controls::template::fixture::layout("inventory",

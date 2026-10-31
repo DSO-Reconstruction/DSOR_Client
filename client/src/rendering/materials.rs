@@ -201,8 +201,8 @@ pub struct FacesViewer;
 pub struct FacesViewerUpright;
 
 /// After the animation pose: each sprite node's world rotation becomes the
-/// camera's (its translation and scale stay the animation's); an upright one
-/// takes only the camera's heading.
+/// camera's (its translation stays the animation's, its depth mirrored); an
+/// upright one takes only the camera's heading.
 fn face_viewer(
     cameras: Query<&GlobalTransform, (With<Camera3d>, Without<crate::rendering::highlight::HighlightCamera>)>,
     mut sprites: Query<(&mut Transform, &ChildOf, Has<FacesViewerUpright>), With<FacesViewer>>,
@@ -216,6 +216,19 @@ fn face_viewer(
         let Ok(p) = parents.get(parent.parent()) else { continue };
         let parent_rot = p.compute_transform().rotation;
         tf.rotation = parent_rot.inverse() * if upright { cam_heading } else { cam_rot };
+        // A sprite turned fully is mirrored along its depth: what hangs under it
+        // tilts towards the camera as in the original, not away.
+        // EVIDENCE: dropitems/glow_magic blue_pPlane2 (tilted 40 deg in its
+        //   sprite) lay flat on the ground as a wide disc; mirrored it stands as
+        //   the original's compact blue glow over the item (the user's shots,
+        //   2026-10-28, crypt: ours vs release261_192). Of 1214 single-sided
+        //   sprite surfaces, 1193 also faced away unmirrored (see
+        //   tools/embed_animators.py, which draws them from both sides).
+        // UNVERIFIED: that the original's sprite matrix is this mirror (likely
+        //   its left-handed view basis taken as is).
+        if !upright {
+            tf.scale.z = -tf.scale.z.abs();
+        }
     }
 }
 

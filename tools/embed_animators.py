@@ -72,6 +72,36 @@ def sprite_nodes(d):
         at = i
 
 
+def billboard_nodes(d):
+    """Names of transform nodes flagged as billboards ("BLBS" = 1) and not as
+    sprites ("RPSS"): they turn to the viewer about the vertical axis only
+    (client FacesViewerUpright). EVIDENCE: three of them looked right only so:
+    the mage's Singularity rings (flat, 2026-10-21), the exit glow (a vertical
+    plane that must face the camera's heading) and the Manticore's summoning fire
+    vortex (effects/mount_manticore_summon_01 moveMeBillboard_1_1: turned fully to
+    the camera its helices lay flat on the ground, 2026-10-25; the user's
+    release261_192 recording shows an upright swirl).
+    UNVERIFIED: the engine's own code (no Nebula source at hand)."""
+    out = set()
+    at = 0
+    while True:
+        at = d.find(b"DNM>", at)
+        if at < 0:
+            return out
+        try:
+            name, i = string(d, at + 8)
+        except (struct.error, UnicodeDecodeError):
+            at += 4
+            continue
+        end = d.find(b"DNM", i)
+        end = len(d) if end < 0 else end
+        j = d.find(b"RPSS", i, end)
+        k = d.find(b"BLBS", i, end)
+        if k >= 0 and d[k + 4] == 1 and not (j >= 0 and d[j + 4] == 1):
+            out.add(name)
+        at = i
+
+
 def flat_subtree(doc, nodes, start):
     """Whether the meshes under a node lie flat: their height (local Y) under a
     fifth of their narrower width (X, Z). None without meshes."""
@@ -280,6 +310,55 @@ def animators(d):
             at += 4
 
 
+def transform_clips(d, models):
+    """[(node path, period s, cycles)]: the nax3 clip each transform animator plays.
+
+    n3 layout: ONNA path, INAS u16 len "ani:<anim>.nax3", TPLS u16 len "loop"|"clamp",
+    RGAS u32 clip index. nax3: "0HAN", u32 clips, u32 keys, then per clip u16
+    curves, start key, keys, key stride, key duration (ms), u8 pre and post
+    infinity (0 constant, 1 cycle), u16 events, 50 byte name, curves x 24 bytes.
+    EVIDENCE: every n3 transform animator says "loop", but the clips differ:
+      all_drop_bag_01 item_spawn (0.44 s) post 0, item_rotate post 1 (the drop
+      pops once, then turns); groupskill_frostnova_aura both post 0 (bursts
+      once); mount_manticore_summon_01 null1 (20 keys x 40 ms) post 1, the
+      helices' growth (2.04-4.04 s) post 0.
+    """
+    out = []
+    cache = {}
+    at = 0
+    while True:
+        at = d.find(b"INAS", at)
+        if at < 0:
+            return out
+        try:
+            ani, i = string(d, at + 4)
+            start = d.rfind(b"ONNA", 0, at)
+            if start < 0 or not ani.startswith("ani:") or d[i:i + 4] != b"TPLS":
+                at += 4
+                continue
+            path, _ = string(d, start + 4)
+            _loop, i = string(d, i + 4)
+            group = struct.unpack_from("<I", d, i + 4)[0] if d[i:i + 4] == b"RGAS" else 0
+            if ani not in cache:
+                try:
+                    n = open(os.path.join(models, "..", "anims", ani[4:].removesuffix(".nax3") + ".nax3"), "rb").read()
+                except OSError:
+                    n = b""
+                clips = []
+                if n[:4] == b"0HAN":
+                    o = 12
+                    for _ in range(struct.unpack_from("<I", n, 4)[0]):
+                        curves, _first, keys, _stride, ms = struct.unpack_from("<HHHHH", n, o)
+                        clips.append((keys * ms / 1000.0, n[o + 11] == 1))
+                        o += 64 + 24 * curves
+                cache[ani] = clips
+            if group < len(cache[ani]):
+                out.append((path, *cache[ani][group]))
+        except struct.error:
+            pass
+        at += 4
+
+
 
 def merged_decal(doc, m):
     """{color, mask} texture indices of a decal whose base colour is the merged
@@ -311,12 +390,14 @@ for root, _dirs, files in os.walk(models):
             continue
         raw = open(n3, "rb").read()
         anims = animators(raw)
+        clips = transform_clips(raw, models)
         floats = shader_floats(raw)
         sprites = sprite_nodes(raw)
+        billboards = billboard_nodes(raw)
         uvs = uv_animators(raw)
         vectors = shader_vectors(raw)
         states = node_states(raw)
-        if not anims and not floats and not sprites and not uvs and not vectors and not states:
+        if not anims and not floats and not sprites and not uvs and not vectors and not states and not clips:
             continue
         try:
             doc, rest = read_glb(glb)
@@ -342,6 +423,7 @@ for root, _dirs, files in os.walk(models):
             nd.get("extras", {}).pop("dsor_vector", None)
             nd.get("extras", {}).pop("dsor_pass", None)
             nd.get("extras", {}).pop("dsor_ints", None)
+            nd.get("extras", {}).pop("dsor_clip", None)
             if nd.get("name") in sprites:
                 nd.setdefault("extras", {})["dsor_sprite"] = True
                 stats["sprite nodes"] = stats.get("sprite nodes", 0) + 1
@@ -354,7 +436,7 @@ for root, _dirs, files in os.walk(models):
         # UNVERIFIED: how the 2018 engine orients such a billboard (no Nebula
         #   source at hand); a quad sprite (upright geometry) is unchanged.
         for i, nd in enumerate(nodes):
-            if nd.get("extras", {}).get("dsor_sprite") and flat_subtree(doc, nodes, i):
+            if nd.get("extras", {}).get("dsor_sprite") and (nd.get("name") in billboards or flat_subtree(doc, nodes, i)):
                 nd["extras"]["dsor_sprite_upright"] = True
                 stats["upright sprites"] = stats.get("upright sprites", 0) + 1
         shaded = 0
@@ -387,6 +469,34 @@ for root, _dirs, files in os.walk(models):
             if m.get("doubleSided", False) == single:
                 m["doubleSided"] = not single
                 stats["single-sided" if single else "double-sided"] = stats.get("single-sided" if single else "double-sided", 0) + 1
+        # What hangs under a sprite turned fully to the viewer (client FacesViewer)
+        # is drawn from both sides: turned that way, its planes show the camera
+        # their back, and their single-sided materials culled them.
+        # EVIDENCE: of the 1214 single-sided sprite surfaces in the release261
+        #   models, 1193 faced away from the camera as the client turns them and
+        #   16 towards it. dropitems/glow_magic blue_pPlane2 (the big blue glow
+        #   over a magic drop in the original) never showed; drawn from both
+        #   sides it is the original's glow.
+        # UNVERIFIED: why the original shows their front (its sprite turn is
+        #   likely mirrored from the client's); a mirror would also swap which of
+        #   two stacked planes is nearer.
+        def sprite_meshes(i):
+            nd = nodes[i]
+            if "mesh" in nd and "dsor_emitter" not in nd.get("extras", {}):
+                yield nd["mesh"]
+            for c in nd.get("children", []):
+                yield from sprite_meshes(c)
+        for i, nd in enumerate(nodes):
+            ex = nd.get("extras", {})
+            if not ex.get("dsor_sprite") or ex.get("dsor_sprite_upright"):
+                continue
+            for mesh in set(sprite_meshes(i)):
+                for prim in doc["meshes"][mesh].get("primitives", []):
+                    m = doc["materials"][prim["material"]] if "material" in prim else None
+                    if m is not None and not m.get("doubleSided", False):
+                        m["doubleSided"] = True
+                        stats["sprite sides"] = stats.get("sprite sides", 0) + 1
+                        shaded += 1
         for name, vecs in vectors:
             for nd in nodes:
                 if nd.get("name") == name and any(any(v) for v in vecs.values()):
@@ -402,6 +512,24 @@ for root, _dirs, files in os.walk(models):
                 nodes[cands[0]].setdefault("extras", {})["dsor_uvanim"] = {k: v for k, v in u.items() if k != "path"}
                 stats["uv animated nodes"] = stats.get("uv animated nodes", 0) + 1
                 shaded += 1
+        # How each animated node's clip runs past its end (client
+        # skills::clip_graph): a cycling one repeats on its own period, the
+        # others play once and hold, as the nax3 says. A pivot helper of the
+        # node carries part of its curves, so it gets the same.
+        for path, period, cycles in clips:
+            parts = path.split("/")
+            leaf, up = parts[-1], (parts[-2] if len(parts) > 1 else None)
+            cands = [i for i, nd in enumerate(nodes) if nd.get("name") == leaf]
+            if len(cands) > 1 and up:
+                cands = [i for i in cands if parent.get(i) is not None and nodes[parent[i]].get("name") == up] or cands
+            if not cands:
+                continue
+            clip = {"period": round(period, 4), "cycle": cycles}
+            for i, nd in enumerate(nodes):
+                if i == cands[0] or (nd.get("extras", {}).get("dsor_pivot_helper") and nd.get("name", "").startswith(f"__dsor_pivot_{cands[0]}_")):
+                    nd.setdefault("extras", {})["dsor_clip"] = clip
+            stats["clip nodes"] = stats.get("clip nodes", 0) + 1
+            shaded += 1
         by_node = {}
         for a in anims:
             parts = a["path"].split("/")
