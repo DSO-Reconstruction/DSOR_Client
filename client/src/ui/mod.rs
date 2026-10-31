@@ -562,6 +562,9 @@ struct Figures {
     /// Total experience and the next level's (net.xp), for the bar's tooltip.
     xp_points: Option<(u32, u32)>,
     wisdom: (u32, f32),
+    /// Ancient Wisdom held and the next level's (the top level's own at the
+    /// top), for the wisdom bar's tooltip.
+    wisdom_points: Option<(u32, u32)>,
     bar: Vec<Option<String>>,
     name: String,
     online: bool,
@@ -1662,6 +1665,8 @@ fn read_figures(net: Option<NonSend<crate::network::net::Net>>, mut figures: Res
             let progress = catalog.progress(crate::gameplay::talents::Tree::Knowledge, points.of(1));
             let wisdom = (progress.level, progress.fraction());
             if figures.wisdom != wisdom { figures.wisdom = wisdom; }
+            let points = Some((progress.value, progress.next.unwrap_or(progress.floor)));
+            if figures.wisdom_points != points { figures.wisdom_points = points; }
         }
     }
     if figures.bar != net.bar {

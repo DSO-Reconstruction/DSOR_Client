@@ -413,7 +413,9 @@ pub(in crate::ui) fn overlay(mut commands: Commands, windows: Query<(&Window2018
                         // FAILURE (2026-10-24): "Health", "Experience: earn experience to
                         //   level up" without the numbers (the user's shots beside the original's).
                         else if widget.id.contains("bottombar_xp_bar") { Some(figures.xp_points.map_or_else(|| "Experience points".to_owned(), |(n, of)| format!("{n} / {of} Experience points"))) }
-                        else if widget.id.contains("bottombar_wisdom_bar") { Some("Ancient Wisdom".into()) }
+                        // gui.window bottomBarWisdomXp: the original's "3920161 / 3622960 Wisdom".
+                        // FAILURE (2026-10-30): "Ancient Wisdom" without the numbers.
+                        else if widget.id.contains("bottombar_wisdom_bar") { Some(figures.wisdom_points.map_or_else(|| "Wisdom".to_owned(), |(n, of)| format!("{n} / {of} Wisdom"))) }
                         else { match gauge_of(&widget.id) {
                             Some(Gauge::Health | Gauge::HealthBar) => Some(format!("{:.0} / {:.0} Health Points", figures.health.0, figures.health.1)),
                             Some(Gauge::Resource | Gauge::ResourceBar) => Some(format!("{:.0} / {:.0} {}", figures.resource.0, figures.resource.1,
