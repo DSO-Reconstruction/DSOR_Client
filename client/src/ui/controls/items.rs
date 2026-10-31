@@ -18,6 +18,8 @@ pub struct Definition {
     /// An essence's card text: its slot's line, then its modifiers' (tools/
     /// inventory_catalog.py modifier_lines).
     #[serde(default)] pub card_lines: Vec<String>,
+    /// An emote's Effect section (tools/inventory_catalog.py emote_lines).
+    #[serde(default)] pub effect_lines: Vec<String>,
     /// Seconds it lasts once received (ItemLifeTime), 0 for ever.
     #[serde(default)] pub lifetime: u32,
     /// A pet's status effect and its values by rarity ($0..: its Pet Effect;

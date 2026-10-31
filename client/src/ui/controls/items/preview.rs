@@ -112,13 +112,18 @@ pub(super) fn sticker(catalog: &Catalog, layout: Option<&Layout>, template: &str
     let description = meta.filter(|m| !m.description.is_empty() && upgrade.is_none())
         .map(|m| if m.description.contains('<') { m.description.clone() } else { format!("<i>{}</>", m.description) });
     let pet = meta.is_some_and(|m| matches!(m.item_category.as_str(), "Pet" | "Mercenary"));
-    let how = if pet { "(Right click to call your Companion over)" } else { "(Right click to mount or equip)" };
+    let emote = meta.is_some_and(|m| !m.effect_lines.is_empty());
+    let how = if pet { "(Right click to call your Companion over)" } else if emote { "(Right click to use the item)" } else { "(Right click to mount or equip)" };
     let used = "<i>Use, is not depleted when used</>";
     // As wide as its longest line, as the original's.
     // FAILURE (2026-10-30): a fixed wide card, its right half empty.
     // Its spaces widened (STICKER_WORD_SPACE); the Effect lines count too.
+    // An emote's: what it turns off, its duration and cooldowns (the original's
+    // Coin Toss card, the user's recording 20261031-1936-10).
     let effect = meta.filter(|m| !m.status.is_empty()).zip(status)
-        .map(|(m, s)| super::super::effects::card_lines(s, &m.status, &m.status_values, bag, class)).unwrap_or_default();
+        .map(|(m, s)| super::super::effects::card_lines(s, &m.status, &m.status_values, bag, class))
+        .or_else(|| meta.filter(|m| !m.effect_lines.is_empty()).map(|m| m.effect_lines.iter().map(|l| (l.clone(), false)).collect()))
+        .unwrap_or_default();
     let longest = |text: &str, size: f32| plain(text).lines()
         .map(|l| crate::network::chat::text_width(l, size) + l.matches(' ').count() as f32 * STICKER_WORD_SPACE * size).fold(0.0, f32::max);
     let size = card.text_size();
@@ -455,7 +460,12 @@ pub(super) fn headed_card(d: &DisplayItem, catalog: &Catalog, layout: Option<&La
                 for effect in &m.unique_effects {card.text(effect,GOLD);}
             }
         }
-        if meta.is_some_and(|m|!m.description.is_empty()) {
+        // An essence's description is a "Localize:" placeholder: its slot line
+        // and modifiers instead (card_lines), as the original's.
+        if let Some(lines)=meta.filter(|m|!m.card_lines.is_empty()).map(|m|&m.card_lines) {
+            card.section("Description");
+            for (i,line) in lines.iter().enumerate() {card.text(line,if i==0 {WHITE} else {BLUE});}
+        } else if meta.is_some_and(|m|!m.description.is_empty() && !m.description.starts_with("Localize:")) {
             card.section(if matches!(rarity,"Unique"|"Set") {"Item Effects"} else {"Description"});
             card.text(&meta.unwrap().description,if matches!(rarity,"Unique"|"Set") {GOLD} else {WHITE});
         }
@@ -471,7 +481,10 @@ pub(super) fn headed_card(d: &DisplayItem, catalog: &Catalog, layout: Option<&La
         // the complete stack's selling value (server item_economy_values.py).
         if item.fifty_second>0 {card.melting(item.fifty_second);}
         card.price(item.level);
-    } else if let Some(m)=meta.filter(|m|!m.description.is_empty()) {card.rule();card.text(&m.description,WHITE);}
+    } else if let Some(m)=meta.filter(|m|!m.card_lines.is_empty()) {
+        card.rule();
+        for (i,line) in m.card_lines.iter().enumerate() {card.text(line,if i==0 {WHITE} else {BLUE});}
+    } else if let Some(m)=meta.filter(|m|!m.description.is_empty() && !m.description.starts_with("Localize:")) {card.rule();card.text(&m.description,WHITE);}
     if d.waiting {card.hint("Free up a slot to collect this item automatically.");}
     if d.amount==0 {card.hint("Not yet collected");}
     if d.item.is_some() && d.amount>1 && !d.read_only {card.hint("Ctrl + click: split stack");}

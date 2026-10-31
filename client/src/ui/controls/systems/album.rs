@@ -481,7 +481,8 @@ pub(super) fn prepare_album(source: &Layout, album: &Album) -> Layout {
             "TextLabel_info" => set_text(w, FAVOURITES_TEXT),
             "PageNumText" => set_text(w, &format!("{} / {}", album.page + 1, album.pages)),
             // The bar's caption (its points label is authored transparent).
-            "ProgressBarTextLabel" => set_text(w, &format!("{} / {}", album.progress.0, album.progress.1)),
+            // "5/8", "19/33" in the original (the user's recordings), no spaces.
+            "ProgressBarTextLabel" => set_text(w, &format!("{}/{}", album.progress.0, album.progress.1)),
             "progresspoints" => set_text(w, ""),
             "progress" if id.starts_with(BAR) => clip_x(w, album.progress.0 as f32 / album.progress.1.max(1) as f32),
             "AdvertisementArtwork" if !album.banner.is_empty() => { if let Some(art) = &mut w.art { art.tex = Some(texture_path(&album.banner)); } }
@@ -657,7 +658,7 @@ mod tests {
         assert_eq!(ids.iter().position(|id| id == TURNING), ids.iter().position(|id| *id == image).map(|i| i + 1));
         assert!(ids.contains(&format!("{image}/DragRotateAreaLabel")));
         // The progress: collected of the book's; its reward along the bar.
-        assert_eq!(text_of(&prepared, &format!("{BAR}/ProgressBarTextLabel")), "1 / 2");
+        assert_eq!(text_of(&prepared, &format!("{BAR}/ProgressBarTextLabel")), "1/2");
         assert!(ids.contains(&format!("{INLAY}/Categorypage/ProgressLabel/Reward0/Linie/ItemSlot/Icon/Image")));
         // A missing sticker with an offer: the preview sells it.
         let selling = prepare_album(&album_source(), &Album { preview: Some(missing.clone()), ..album.clone() });

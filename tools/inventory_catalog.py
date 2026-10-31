@@ -41,6 +41,29 @@ def modifier_lines(modifiers, table):
     return lines
 
 
+ACTOR_FEATURES = {'Movement': 'actorFeatureMovementDisabled', 'Skills': 'actorFeatureSkillExecutionDisabled',
+                  'RegularSkills': 'actorFeatureRegularSkillExecutionDisabled', 'DamageReception': 'actorFeatureDamageReceptionDisabled'}
+
+
+def emote_lines(r, modifiers, table):
+    """An emote's Effect lines as its card writes them: what its status turns
+    off ("Movement disabled", "Normal skills disabled"), its duration and
+    cooldowns ("Duration: 6s", "Cool-down time: 6s", "Cool-down time(PvP): 6s")."""
+    lines = []
+    for part in (modifiers or '').split(';'):
+        if part.startswith('ActorFeature:'):
+            for scope in part.split(',')[1:]:
+                text = table.get('gui.statuseffects.modifier_' + ACTOR_FEATURES.get(scope.strip(), ''), '')
+                if text:
+                    lines.append(text)
+    def seconds(v):
+        return '%gs' % round(float(v), 1)
+    for key, column in (('statusEffectDuration', 'StatusEffectDuration'), ('statusEffectCoolDown', 'CoolDown'), ('statusEffectCoolDownPvP', 'CoolDownPvP')):
+        if r.get(column):
+            lines.append(table.get('gui.window.tooltip_' + key, '').replace('{0:s}', seconds(r[column])))
+    return [line for line in lines if line]
+
+
 def reward_cards(db, table, local):
     """A sticker book's status-effect rewards as their hover card says them:
     {status: {title, lines}} ("Triad of Life (Permanent)", "+ 3% health points
@@ -221,6 +244,7 @@ def export_inventory(db, textures, loca, assets):
             values.pop()
         return dict(status=sid, status_values=values)
     result = dict(items={}, ingredients=[], colors={}, appearances={}, icon_configs={}, rarity_backgrounds=[], enchantments={})
+    status_modifiers = dict(db.execute('SELECT Id, StartModifiers FROM _Template_StatusEffect'))
     cursor = db.execute('SELECT * FROM _Template_Item')
     columns = [c[0] for c in cursor.description]
     for values in cursor:
@@ -248,6 +272,9 @@ def export_inventory(db, textures, loca, assets):
             # description is only a "Localize:" placeholder).
             **({'card_lines': [table.get('gui.window.tooltip_ammoSlotInfo', '')] + modifier_lines(r.get('BaseModifier'), table)}
                if r.get('ItemCategory') == 'Ammunition' else {}),
+            # An emote's Effect section (the original's Coin Toss card).
+            **({'effect_lines': emote_lines(r, status_modifiers.get(r.get('StatusEffectId') or ''), table)}
+               if r.get('LocaleIdCategory') == 'itemtype_emote' else {}),
             # Seconds it lasts once received (ItemLifeTime: Premium (2 weeks)
             # "Duration: 7d 0h 0m 0s").
             **({'lifetime': int(r['ItemLifeTime'])} if r.get('ItemLifeTime') else {}),
