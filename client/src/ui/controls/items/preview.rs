@@ -254,9 +254,16 @@ pub(super) fn rarity<'a>(catalog: &'a Catalog, template: &str, item: Option<&Ite
 }
 
 pub(super) fn card(d: &DisplayItem, catalog: &Catalog, layout: Option<&Layout>, advanced: bool) -> Card {
+    headed_card(d, catalog, layout, advanced, None)
+}
+
+/// An item's card under a heading (the worn item's "Equipped" beside a hovered
+/// one, gui.window.tooltip currentlyEquippedHeadline).
+pub(super) fn headed_card(d: &DisplayItem, catalog: &Catalog, layout: Option<&Layout>, advanced: bool, heading: Option<&str>) -> Card {
     let meta = catalog.items.get(d.template);
     let mut card = Card::new(if advanced { 370.0 } else { 285.0 },layout);
     card.background = Color::srgba(0.01, 0.01, 0.005, 0.985);
+    if let Some(heading) = heading { card.centered(heading, MUTED, false); card.rule(); }
     let (rarity, tint) = rarity(catalog, d.template, d.item);
     // The heading as Dofus draws it: icon, name, "Level n \u{2022} type"
     // (the item's level, else the level it requires; the rarity in the name's colour).

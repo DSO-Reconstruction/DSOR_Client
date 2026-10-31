@@ -883,7 +883,7 @@ pub(super) fn preview_card(catalog:&Catalog, layout:Option<&Layout>, template:&s
 #[allow(clippy::too_many_arguments)]
 pub fn overlay(mut commands:Commands,ui:Res<Interaction>,windows:Query<(&Window2018,&WindowControls,&Visibility,&Transform),Without<Overlay>>,primary:Query<&Window,With<PrimaryWindow>>,
     net:Option<NonSend<crate::network::net::Net>>,(data,catalogs,layouts):(Res<Data>,Res<Assets<Catalog>>,Res<Assets<Layout>>),assets:Res<AssetServer>,screen:Res<Screen>,
-    (old,mut transforms):(Query<Entity,With<Overlay>>,Query<&mut Transform,With<Overlay>>),
+    (old,mut transforms):(Query<Entity,With<Overlay>>,Query<(&mut Transform,Option<&WornCard>),With<Overlay>>),
     (mut meshes,mut materials):(ResMut<Assets<Mesh>>,ResMut<Assets<UiMaterial>>),
     mut last:Local<Option<(String,u64,bool,bool,u32,bool)>>, settings:Res<settings::Settings>,keys:Res<ButtonInput<KeyCode>>,pointer:Res<Pointer>) {
     let catalog=catalogs.get(&data.catalog);
@@ -906,15 +906,47 @@ pub fn overlay(mut commands:Commands,ui:Res<Interaction>,windows:Query<(&Window2
     let enabled=point.is_some() && ui.split.is_none() && (dragged.is_some() || (settings.current.tooltips && pointer.down.is_none() && pointer.drag.is_none() && pointer.spell_drag.is_none()));
     let key=display.as_ref().filter(|_|enabled).map(|d|(format!("{}:{}:{}",d.template,d.item.map_or(0,|i|i.id),d.amount),net.as_ref().map_or(0,|n|n.inventory.revision),dragged.is_some(),advanced,screen.scale.to_bits(),layout.is_some()));
     let card=display.as_ref().zip(catalog).filter(|_|dragged.is_none()).map(|(d,c)|preview::card(d,c,layout,advanced));
+    // The worn item of the hovered one's slot, its card beside it under
+    // "Equipped", as the original compares them (the user's recording
+    // 20261031-1658-42: the worn Essence of Vigor beside the hovered one).
+    // UNVERIFIED: which of two slots (rings) the original compares with; the
+    // first one worn here.
+    let worn=display.as_ref().zip(catalog).zip(net.as_ref()).filter(|_|dragged.is_none()).and_then(|((d,c),n)| {
+        let hovered=d.item?;
+        let slots=&c.items.get(d.template)?.slots;
+        if slots.is_empty() || n.inventory.allocation.slots.iter().any(|(id,_)|*id==hovered.id) {return None;}
+        slots.iter().find_map(|s|n.inventory.at(Place::Equipment(*s))).filter(|w|w.id!=hovered.id)
+    });
+    let worn_card=worn.zip(catalog).map(|(w,c)|preview::headed_card(&DisplayItem{item:Some(w),template:&w.template,amount:w.third,unlock:0,read_only:true,waiting:false},c,layout,advanced,Some("Equipped")));
     let at=if dragged.is_some(){point.map(|p|(p-Vec2::splat(22.0),1.0))}else{card.as_ref().zip(anchor).map(|(c,a)|tooltips::card::placement(a,Vec2::new(c.width,c.height()),Vec2::new(screen.width,BASE_H),false))};
-    if *last==key && !catalogs.is_changed() && !layouts.is_changed() {if let Some((p,scale))=at {for mut tf in &mut transforms {tf.translation=screen.world(0.0,p.x,p.y).extend(800.0);tf.scale=Vec3::splat(scale);}}return;}
+    // Left of the hovered card, else right of it; level with its top.
+    let worn_at=worn_card.as_ref().zip(card.as_ref()).zip(at).map(|((w,c),(p,scale))| {
+        let left=p.x-(w.width+6.0)*scale;
+        let x=if left>=8.0 {left} else {(p.x+(c.width+6.0)*scale).min(screen.width-w.width*scale-8.0)};
+        (Vec2::new(x,p.y),scale)
+    });
+    if *last==key && !catalogs.is_changed() && !layouts.is_changed() {
+        for (mut tf,second) in &mut transforms {
+            let Some((p,scale))=(if second.is_some() {worn_at} else {at}) else{continue};
+            tf.translation=screen.world(0.0,p.x,p.y).extend(800.0);tf.scale=Vec3::splat(scale);
+        }
+        return;
+    }
     *last=key.clone();for e in &old {commands.entity(e).despawn();}if key.is_none(){return;}
     let (Some(d),Some((p,scale)),Some(catalog))=(display,at,catalog) else{return;};
     let root=commands.spawn((Overlay,Transform::from_translation(screen.world(0.0,p.x,p.y).extend(800.0)).with_scale(Vec3::splat(scale)),Visibility::Inherited)).id();
     if dragged.is_some() {
         sprites(&mut commands,&assets,catalog,d.template,d.item,Vec3::new(0.0,0.0,-0.01),Vec2::splat(44.0),Color::WHITE,root);
     } else if let Some(card)=card {card.draw(&mut commands,&assets,&screen,&mut meshes,&mut materials,root,layout);}
+    if let (Some(w),Some((p,scale)))=(worn_card,worn_at) {
+        let second=commands.spawn((Overlay,WornCard,Transform::from_translation(screen.world(0.0,p.x,p.y).extend(800.0)).with_scale(Vec3::splat(scale)),Visibility::Inherited)).id();
+        w.draw(&mut commands,&assets,&screen,&mut meshes,&mut materials,second,layout);
+    }
 }
+
+/// The worn item's card beside the hovered one (overlay).
+#[derive(Component)]
+pub(in crate::ui) struct WornCard;
 
 #[cfg(test)]
 mod tests {
