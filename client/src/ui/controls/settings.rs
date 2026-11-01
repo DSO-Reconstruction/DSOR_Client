@@ -83,9 +83,8 @@ pub(super) fn shortcuts() -> Vec<(String, String, &'static str)> {
         (6, "Action slot 5", "Digit5"), (7, "Alternate attack", "Digit6"),
         // The original's keys on its bar (the user's shot, 2026-11-01): the
         // consumables R and H on the left, U and D on the right; the companion
-        // leaves H for P (the letter beside its socket there).
-        // UNVERIFIED: P as the companion's key.
-        (8, "Mount", "KeyO"), (9, "Companion", "KeyP"),
+        // leaves H for K (the user: "for companion ... is K").
+        (8, "Mount", "KeyO"), (9, "Companion", "KeyK"),
         (13, "Consumable: left top", "KeyR"),
         (14, "Consumable: left bottom", "KeyH"), (15, "Consumable: right top", "KeyU"),
         // T opens the shop, as in the original (the user, 2026-11-01); this
@@ -212,7 +211,7 @@ impl Preferences {
         }
         if self.keymap < 5 {
             // The original's consumable keys, where the player kept ours.
-            let ours = [("slot9", "KeyH", "KeyP"), ("slot13", "KeyU", "KeyR"), ("slot14", "KeyG", "KeyH"), ("slot15", "KeyR", "KeyU"), ("slot16", "", "KeyD")];
+            let ours = [("slot9", "KeyH", "KeyK"), ("slot13", "KeyU", "KeyR"), ("slot14", "KeyG", "KeyH"), ("slot15", "KeyR", "KeyU"), ("slot16", "", "KeyD")];
             if ours.iter().all(|(id, old, _)| was(self, id, old)) {
                 for (id, _, new) in ours { self.bindings.insert(id.into(), new.into()); }
             }
