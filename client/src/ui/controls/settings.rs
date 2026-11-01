@@ -56,7 +56,7 @@ pub(crate) struct Preferences {
 /// (the one beside it); the map overlay moves to N.
 /// FAILURE: "pour ouvrir la map c tab sauf que tab c'est pour switch le sort
 ///   du bas entre mon clic droit et celui de la case a cote".
-const KEYMAP: u8 = 3;
+const KEYMAP: u8 = 4;
 
 /// The game bar's buttons a setting hides: each its own page group (shown on
 /// page 0), named as the button (crate::ui::controls::section).
@@ -84,7 +84,9 @@ pub(super) fn shortcuts() -> Vec<(String, String, &'static str)> {
         (8, "Mount", "KeyO"), (9, "Companion", "KeyH"),
         (13, "Consumable: left top", "KeyU"),
         (14, "Consumable: left bottom", "KeyG"), (15, "Consumable: right top", "KeyR"),
-        (16, "Consumable: right bottom", "KeyT"),
+        // T opens the shop, as in the original (the user, 2026-11-01); this
+        // consumable has no key until the player gives it one.
+        (16, "Consumable: right bottom", ""),
     ] { result.push((format!("slot{slot}"), label.into(), key)); }
     for (id, label, key) in [
         ("inventory", "Inventory", "KeyI"), ("charactersheet", "Character", "KeyC"),
@@ -93,7 +95,7 @@ pub(super) fn shortcuts() -> Vec<(String, String, &'static str)> {
         ("swap_attack", "Swap secondary and alternate attack", "Tab"),
         ("travelmap", "World map", "KeyM"), ("socialscreen", "Social", "KeyF"),
         ("eventwindow", "Events", "KeyE"), ("leaderboards", "Rankings", "KeyL"),
-        ("matchmakingwindow", "Battlegrounds", "KeyJ"),
+        ("matchmakingwindow", "Battlegrounds", "KeyJ"), ("shopwindow", "Shop", "KeyT"),
         ("chat", "Expand / collapse chat", "KeyV"), ("essence", "Switch essences", "KeyX"),
         ("previous_bar", "Previous action bar", "BracketLeft"), ("next_bar", "Next action bar", "BracketRight"),
     ] { result.push((id.into(), label.into(), key)); }
@@ -194,6 +196,14 @@ impl Preferences {
             if !self.bindings.contains_key("swap_attack") {
                 let key = if taken(self, "Tab") { "" } else { "Tab" };
                 self.bindings.insert("swap_attack".into(), key.into());
+            }
+        }
+        if self.keymap < 4 {
+            // T moves from the bottom-right consumable to the shop.
+            if was(self, "slot16", "KeyT") { self.bindings.insert("slot16".into(), String::new()); }
+            if !self.bindings.contains_key("shopwindow") {
+                let key = if self.bindings.values().any(|k| k == "KeyT") { "" } else { "KeyT" };
+                self.bindings.insert("shopwindow".into(), key.into());
             }
         }
         self.keymap = KEYMAP;
