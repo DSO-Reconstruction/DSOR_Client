@@ -909,13 +909,14 @@ pub fn overlay(mut commands:Commands,ui:Res<Interaction>,windows:Query<(&Window2
     // The worn item of the hovered one's slot, its card beside it under
     // "Equipped", as the original compares them (the user's recording
     // 20261031-1658-42: the worn Essence of Vigor beside the hovered one).
-    // Two slots (rings): the lower-level worn one, as the user remembers the
-    // original comparing (2026-11-01, "compared to the lowest lvl one").
+    // UNVERIFIED: which of two slots (rings) the original compares with; the
+    // first one worn here. The user's original shot (2026-11-01) compared a
+    // level 140 Unique ring with a level 145 Legendary one (rarity first?).
     let worn=display.as_ref().zip(catalog).zip(net.as_ref()).filter(|_|dragged.is_none()).and_then(|((d,c),n)| {
         let hovered=d.item?;
         let slots=&c.items.get(d.template)?.slots;
         if slots.is_empty() || n.inventory.allocation.slots.iter().any(|(id,_)|*id==hovered.id) {return None;}
-        slots.iter().filter_map(|s|n.inventory.at(Place::Equipment(*s))).filter(|w|w.id!=hovered.id).min_by_key(|w|w.durability)
+        slots.iter().find_map(|s|n.inventory.at(Place::Equipment(*s))).filter(|w|w.id!=hovered.id)
     });
     let worn_card=worn.zip(catalog).map(|(w,c)|preview::headed_card(&DisplayItem{item:Some(w),template:&w.template,amount:w.third,unlock:0,read_only:true,waiting:false},c,layout,advanced,Some("Equipped")));
     let at=if dragged.is_some(){point.map(|p|(p-Vec2::splat(22.0),1.0))}else{card.as_ref().zip(anchor).map(|(c,a)|tooltips::card::placement(a,Vec2::new(c.width,c.height()),Vec2::new(screen.width,BASE_H),false))};
