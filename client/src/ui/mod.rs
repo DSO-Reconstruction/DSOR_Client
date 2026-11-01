@@ -1667,13 +1667,20 @@ fn update_values(
     hover: Res<crate::actors::monsters::HoverInfo>,
     current_map: Option<Res<crate::world::map::CurrentMap>>,
     shown: Res<controls::currency::Shown>,
-    mut texts: Query<(&Value, &mut Text2d)>,
+    mut texts: Query<(&Value, &mut Text2d, Option<&mut TextColor>)>,
 ) {
     let changed = figures.is_changed() || settings.is_changed() || hotbar.is_changed() || sheet.is_changed() || hover.is_changed() || current_map.as_ref().is_some_and(|m| m.is_changed())
         || shown.is_changed();
-    for (v, mut t) in &mut texts {
+    for (v, mut t, colour) in &mut texts {
         // Layouts load asynchronously, even when the current figures are stable.
         if !changed && !t.is_added() { continue; }
+        // A ranked monster's name in its rank's colour (monsters::rank_colour).
+        if v.0 == ValueKind::TargetName {
+            if let Some(mut colour) = colour {
+                let want = hover.2.map_or(Color::WHITE, |c| Color::srgba(c[0], c[1], c[2], c[3]));
+                if colour.0 != want { colour.0 = want; }
+            }
+        }
         // Gold is counted in copper: 100 copper a silver, 100 silver a gold;
         // each shortened to its place on the currency bar.
         // EVIDENCE: release261 UI::CurrencyBarWidget 0x1403DAA44 (copper / 10000

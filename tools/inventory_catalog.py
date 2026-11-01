@@ -12,7 +12,7 @@ SLOTS = {'HelmetSlot':[0], 'ShoulderSlot':[1], 'TorsoSlot':[2], 'GlovesSlot':[3]
          'RuneTrinketSlot':list(range(13,20)), 'JewelTrinketSlot':[20,21,22],
          'AncientTrinketSlot':[24], 'MercenaryAmuletSlot':[25],
          'MercenaryCloakSlot':[26], 'MercenaryBeltSlot':[27], 'ConsumableSlot':[37],
-         'AmmoSlot':[35,34]}
+         'AmmoSlot':[35,36]}
 
 
 def modifier_lines(modifiers, table):

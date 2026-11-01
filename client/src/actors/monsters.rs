@@ -380,7 +380,29 @@ pub struct Hovered(pub Option<(Entity, u32)>);
 /// What the hovered monster's info window shows (crate::ui, interactinfo): its
 /// title, level and health.
 #[derive(Resource, Default, Clone, PartialEq)]
-pub struct HoverInfo(pub Option<(String, u32, u32, u32)>, pub bool);
+pub struct HoverInfo(pub Option<(String, u32, u32, u32)>, pub bool, pub Option<[f32; 4]>);
+
+/// A rank's name colour: _Template_MonsterRanks.Color, the item rarities'
+/// (Rank_leader RarityRare, magenta; Rank_champion RarityMagic, blue...).
+/// EVIDENCE: the user's original crypt (2026-11-01): a higher-tier monster's
+///   name pink. The rarity colours as measured on the original's item cards.
+pub(crate) fn rank_colour(rank: &str) -> Option<[f32; 4]> {
+    let rarity = match rank {
+        "Rank_add" | "Rank_guardian" => "Uncommon",
+        "Rank_champion" | "Rank_treasure_mob_champion" | "Rank_companion_champion" => "Magic",
+        "Rank_leader" | "Rank_leader_no_entchantments" | "Rank_treasure_mob_leader" | "Rank_boss_lead" | "Rank_groupchest" => "Rare",
+        "Rank_sentinel" | "Rank_treasure_mob" | "Rank_treasure_mob_sentinel" | "Rank_companion_sentinel" => "Epic",
+        "Rank_boss" | "Rank_boss_endlesstower" | "Rank_boss_no_loot" | "Rank_manifested_fear" => "Unique",
+        _ => return None,
+    };
+    Some(match rarity {
+        "Uncommon" => [0.42, 0.88, 0.33, 1.0],
+        "Magic" => [0.07, 0.47, 0.93, 1.0],
+        "Rare" => [0.89, 0.0, 0.93, 1.0],
+        "Epic" => [1.0, 0.65, 0.15, 1.0],
+        _ => [1.0, 0.9, 0.0, 1.0],
+    })
+}
 
 /// A boss's rank: the ranks whose _Template_MonsterRanks.Rank is "boss" or
 /// "worldboss" (static.db4: Rank_sentinel, Rank_treasure_mob[_sentinel],
@@ -1474,7 +1496,7 @@ fn hover_info(
 ) {
     // DSOR_TEST_HOVER=boss|monster: the info window shown as for one (screenshots).
     if let Ok(kind) = std::env::var("DSOR_TEST_HOVER") {
-        let test = HoverInfo(Some(("Bog Beast".into(), 19, 260, 391)), kind == "boss");
+        let test = HoverInfo(Some(("Bog Beast".into(), 19, 260, 391)), kind == "boss", None);
         if *info != test { *info = test; }
         return;
     }
@@ -1482,6 +1504,11 @@ fn hover_info(
         .and_then(|(m, _)| net.as_ref()?.monster_ranks.get(&m.actor).map(|r| boss_rank(r))).unwrap_or(false);
     if info.1 != boss {
         info.1 = boss;
+    }
+    let colour = hovered.0.and_then(|(e, _)| monsters.get(e).ok())
+        .and_then(|(m, _)| net.as_ref()?.monster_ranks.get(&m.actor).and_then(|r| rank_colour(r)));
+    if info.2 != colour {
+        info.2 = colour;
     }
     let now = hovered.0.and_then(|(e, _)| monsters.get(e).ok()).filter(|(m, a)| m.is_alive(a)).map(|(m, _)| {
         let title = templates.get(&data.templates).and_then(|t| t.0.get(&m.template)).map(|t| t.title.clone()).unwrap_or_default();

@@ -192,7 +192,8 @@ pub fn talent_bonuses(d: &StatsData, inventory: &InventoryState) -> HashMap<Stri
         *out.entry(talent.clone()).or_insert(0) += amount.max(0.0).round() as u32;
     };
     for (id, slots) in &inventory.allocation.slots {
-        if slots.contains(&34) { continue; }
+        // The parked essence (36; 34 on servers before DSOR_Server #43) does not act.
+        if slots.contains(&34) || slots.contains(&36) { continue; }
         let Some(item) = inventory.items.get(id) else { continue };
         if !db.items.contains_key(&item.template) { continue; }
         equipped.insert(item.template.as_str());
@@ -215,7 +216,8 @@ pub fn calculate(d: &StatsData, class: &str, level: u32, inventory: &InventorySt
     let Some(base) = levels.get(&level.to_string()) else { return HashMap::new(); };
     let mut groups = Vec::new();
     for (id, slots) in &inventory.allocation.slots {
-        if slots.contains(&34) { continue; }
+        // The parked essence (36; 34 on servers before DSOR_Server #43) does not act.
+        if slots.contains(&34) || slots.contains(&36) { continue; }
         if let Some(item) = inventory.items.get(id) {
             if let Some(def) = db.items.get(&item.template) { groups.push((item, def, slots, db.item(item))); }
         }

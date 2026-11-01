@@ -163,7 +163,7 @@ pub(super) fn cell(w: &Widget) -> Option<Cell> {
         "Back"=>7,"RingLeftHand"=>8,"RingRightHand"=>9,"Neck"=>10,"Waist"=>11,"WeaponMount"=>12,
         "RuneTrinket1"=>13,"RuneTrinket2"=>14,"RuneTrinket3"=>15,"RuneTrinket4"=>16,"RuneTrinket5"=>17,"RuneTrinket6"=>18,"RuneTrinket7"=>19,
         "JewelTrinket1"=>20,"JewelTrinket2"=>21,"JewelTrinket3"=>22,"Ammo"=>35,"AncientTrinket1"=>24,
-        "MercenaryNeck"=>25,"MercenaryBack"=>26,"MercenaryWaist"=>27,"AmmoAlt1"=>35,"AmmoAlt2"=>34,
+        "MercenaryNeck"=>25,"MercenaryBack"=>26,"MercenaryWaist"=>27,"AmmoAlt1"=>35,"AmmoAlt2"=>hotbar::BACKUP_ESSENCE_SLOT,
         _=>return None,
     }; Some(Cell::Equipment(slot))
 }
@@ -181,7 +181,7 @@ fn item_cell(window: &str, action: &Action) -> Option<Cell> {
     match (window, action) {
         ("inventory", Action::Item(cell)) => Some(*cell),
         ("bottombar", Action::Skill(hotbar::PRIMARY_ESSENCE)) => Some(Cell::Equipment(35)),
-        ("bottombar", Action::Skill(hotbar::BACKUP_ESSENCE)) => Some(Cell::Equipment(34)),
+        ("bottombar", Action::Skill(hotbar::BACKUP_ESSENCE)) => Some(Cell::Equipment(hotbar::BACKUP_ESSENCE_SLOT)),
         _ => None,
     }
 }
@@ -909,13 +909,13 @@ pub fn overlay(mut commands:Commands,ui:Res<Interaction>,windows:Query<(&Window2
     // The worn item of the hovered one's slot, its card beside it under
     // "Equipped", as the original compares them (the user's recording
     // 20261031-1658-42: the worn Essence of Vigor beside the hovered one).
-    // UNVERIFIED: which of two slots (rings) the original compares with; the
-    // first one worn here.
+    // Two slots (rings): the lower-level worn one, as the user remembers the
+    // original comparing (2026-11-01, "compared to the lowest lvl one").
     let worn=display.as_ref().zip(catalog).zip(net.as_ref()).filter(|_|dragged.is_none()).and_then(|((d,c),n)| {
         let hovered=d.item?;
         let slots=&c.items.get(d.template)?.slots;
         if slots.is_empty() || n.inventory.allocation.slots.iter().any(|(id,_)|*id==hovered.id) {return None;}
-        slots.iter().find_map(|s|n.inventory.at(Place::Equipment(*s))).filter(|w|w.id!=hovered.id)
+        slots.iter().filter_map(|s|n.inventory.at(Place::Equipment(*s))).filter(|w|w.id!=hovered.id).min_by_key(|w|w.durability)
     });
     let worn_card=worn.zip(catalog).map(|(w,c)|preview::headed_card(&DisplayItem{item:Some(w),template:&w.template,amount:w.third,unlock:0,read_only:true,waiting:false},c,layout,advanced,Some("Equipped")));
     let at=if dragged.is_some(){point.map(|p|(p-Vec2::splat(22.0),1.0))}else{card.as_ref().zip(anchor).map(|(c,a)|tooltips::card::placement(a,Vec2::new(c.width,c.height()),Vec2::new(screen.width,BASE_H),false))};
@@ -1256,7 +1256,7 @@ mod tests {
         // The left column (weapon, cloak, rings, amulet, belt, weapon mod): top left.
         for slot in [5, 7, 8, 9, 10, 11, 12] { assert!(near(slot, Vec2::new(106.4, 204.8)), "slot {slot}"); }
         // No trinkets, mercenary pieces or essences.
-        for slot in [13, 20, 24, 25, 27, 34, 35] { assert_eq!(level_centre(slot, rect), None, "slot {slot}"); }
+        for slot in [13, 20, 24, 25, 27, 34, 35, 36] { assert_eq!(level_centre(slot, rect), None, "slot {slot}"); }
         // The face: the Green template's normal state, at its size, with its font size.
         let id = "Canvas/UpgradeButtonLabel/UpgradeButtonLabel/UpgradeButtonTemplate_Green/normal";
         let mut layout = crate::ui::controls::template::fixture::layout("inventory",

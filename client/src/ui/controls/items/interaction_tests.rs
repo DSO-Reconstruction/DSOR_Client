@@ -5,7 +5,7 @@ use dsor_proto::commands::inventory::{Inventory, InventoryInfo};
 fn catalog() -> Catalog {
     let mut entries = serde_json::Map::new();
     for (name, category, slots) in [
-        ("essence", "Ammunition", vec![35, 34]), ("helmet", "Armor", vec![0]),
+        ("essence", "Ammunition", vec![35, 36]), ("helmet", "Armor", vec![0]),
         ("potion", "Consumable", vec![37]), ("elixir", "Consumable", vec![]),
         ("instant", "InstantConsumable", vec![]), ("mount", "Mount", vec![]),
     ] {
@@ -63,7 +63,7 @@ fn hover(app: &mut App, window: Entity, root: Entity, index: usize, x: f32) {
 
 #[test]
 fn essence_drags_round_trip_through_both_action_bar_sockets_without_double_clicks() {
-    for (index, slot) in [(0,35),(1,34)] {
+    for (index, slot) in [(0,35),(1,36)] {
         let (mut app, window, inventory, bar) = app();
         snapshot(&mut app,"essence",Place::Equipment(slot));
         for (from, to, from_index, to_index, destination) in [
