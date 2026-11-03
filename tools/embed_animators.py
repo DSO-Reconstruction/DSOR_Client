@@ -436,7 +436,14 @@ for root, _dirs, files in os.walk(models):
         # UNVERIFIED: how the 2018 engine orients such a billboard (no Nebula
         #   source at hand); a quad sprite (upright geometry) is unchanged.
         for i, nd in enumerate(nodes):
-            if nd.get("extras", {}).get("dsor_sprite") and (nd.get("name") in billboards or flat_subtree(doc, nodes, i)):
+            # Only a billboard ("BLBS"): a sprite ("RPSS") over flat geometry
+            # turns fully. The Singularity rings are a billboard themselves
+            # (mage_arcanevortex_loop rotating_vortex: BLBS 1). Turned about
+            # the vertical, a bullet's sprite swung its glow beside the arrow
+            # (ranger_markshot_bullet moveMeSprite_1, RPSS 1: "a cote de la
+            # fleche un bout vert qui depasse", 2026-11-03); turned fully it
+            # sits on the tip.
+            if nd.get("extras", {}).get("dsor_sprite") and nd.get("name") in billboards:
                 nd["extras"]["dsor_sprite_upright"] = True
                 stats["upright sprites"] = stats.get("upright sprites", 0) + 1
         shaded = 0
