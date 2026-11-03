@@ -623,10 +623,20 @@ fn spawn_monsters(
             _ => None,
         };
         if let Some(mut seq) = sequence {
-            if let Some((track, end)) = rise.clone() {
+            // A sequence with its own Spawn track places it itself: Mortis
+            // mounted (boss_05_phase_2_spawn) is hidden 126 frames, then jumps
+            // in with Spawn from 125 to 195. The table's rise added at frame 0
+            // played unseen, and its hold ended before he showed, so he stood
+            // there at once ("elle reapparait d'un coup").
+            let own = seq.tracks.iter().filter_map(|t| match t {
+                crate::gameplay::skills::Track::Anim { name, end, .. } if name == "Spawn" => Some(*end),
+                _ => None,
+            }).max();
+            if let Some((track, end)) = rise.clone().filter(|_| own.is_none()) {
                 seq.tracks.push(track);
                 seq.length = seq.length.max(end);
             }
+            let held_frames = own.map(|end| end.max(0) as u32).or(rise.as_ref().map(|(_, end)| *end));
             if !seq.tracks.is_empty() {
                 play(&mut commands, seq, Some(entity), entity, false);
             }
@@ -637,7 +647,7 @@ fn spawn_monsters(
             // mobs invoques n'ont pas d'animation d'entree", 2026-10-23). Its
             // records still arrive meanwhile; it catches up with them after.
             // UNVERIFIED: whether the original holds the body for its start list.
-            if let Some((_, end)) = rise {
+            if let Some(end) = held_frames {
                 let hold = end as f32 / 25.0;
                 commands.entity(entity).entry::<RemotePlayer>().and_modify(move |mut r| r.held = r.held.max(hold));
             }
