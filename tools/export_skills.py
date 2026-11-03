@@ -412,6 +412,22 @@ def transform_modifiers(text):
         if kind.strip().casefold() == "unlockhiddenskills":
             found["skills"] = [v.strip() for v in args.split(",") if v.strip()]
     return found if "skin" in found else None
+def stop_seconds(*texts):
+    """How long its end holds the holder: the longest D: of the effects its
+    Stop/DoneModifiers add (Boss_Mortis_Bone_Dragon_Initial_Freeze: MONSTER_noMovement,
+    D:8.36, the Resurrect it stops with), or 0."""
+    longest = 0.0
+    for text in texts:
+        for part in (text or "").split(";"):
+            if not part.strip().casefold().startswith("actorstatuseffect:"):
+                continue
+            for arg in part.split(","):
+                if arg.strip().startswith("D:"):
+                    try:
+                        longest = max(longest, float(arg.strip()[2:]))
+                    except ValueError:
+                        pass
+    return longest
 for r in db.execute("select rowid, * from _Template_StatusEffect order by rowid"):
     mount, bonus = ride_modifiers(r["StartModifiers"])
     status[r["rowid"] - 1] = {
@@ -424,6 +440,7 @@ for r in db.execute("select rowid, * from _Template_StatusEffect order by rowid"
         "animation": r["StartAnimation"] or "",
         "looped_animation": bool(r["LoopedStartAnimation"]),
         "stop_animation": r["StopAnimation"] or "",
+        "stop_seconds": stop_seconds(r["StopModifiers"], r["DoneModifiers"]),
         "mount": mount,
         "movement_bonus": bonus,
         "holds": holds_movement(r["StartModifiers"]),

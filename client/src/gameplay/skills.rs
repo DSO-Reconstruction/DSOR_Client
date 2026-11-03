@@ -297,6 +297,12 @@ pub struct StatusDef {
     pub tick: HashMap<String, String>,
     pub done: HashMap<String, String>,
     pub stop: HashMap<String, String>,
+    /// StopAnimation: the holder's animation as it ends ("Resurrect"), held
+    /// stop_seconds (tools/export_skills.py stop_seconds) or 2 s.
+    #[serde(default)]
+    pub stop_animation: String,
+    #[serde(default)]
+    pub stop_seconds: f32,
     /// A ride effect's mount (_Template_Mount id; crate::actors::mounts).
     #[serde(default)]
     pub mount: String,
@@ -2897,6 +2903,14 @@ fn status_visuals(
             (l.is_some_and(|l| l.actor == id) || r.is_some_and(|r| r.actor == id) || n.is_some_and(|n| n.actor == id)).then_some(e)
         })
     };
+    // Its StopAnimation as it goes: the bone dragon's Resurrect, out of its
+    // looped Spawn (Boss_Mortis_Bone_Dragon_Initial_Freeze).
+    for ev in status_events.iter().filter(|e| e.removed) {
+        let Some(def) = table.0.get(&(ev.index as u32)).filter(|d| !d.stop_animation.is_empty()) else { continue };
+        let Some(holder) = actor_entity(ev.holder) else { continue };
+        let seconds = if def.stop_seconds > 0.0 { def.stop_seconds } else { 2.0 };
+        holds.0.push((holder, def.stop_animation.clone(), seconds));
+    }
     let mut start = |commands: &mut Commands, def: &StatusDef, key: (u32, u32), holder: Option<Entity>, anchor: Entity, seconds: Option<f32>| {
         if let Some(h) = holder.filter(|_| !def.animation.is_empty() || def.holds || HOLDING_STATUSES.contains(&def.id.as_str())) {
             holds.0.push((h, def.animation.clone(), seconds.filter(|s| *s > 0.0).unwrap_or(def.duration)));

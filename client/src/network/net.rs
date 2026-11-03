@@ -2021,6 +2021,30 @@ pub(crate) fn on_command(net: &mut Net, command: ServerCommand, actor: Option<u3
         ServerCommand::SkillBookInfo(book) => net.skill_book = Some(book.clone()),
         // Skills the server relays from other actors (our own are played as cast).
         ServerCommand::StatusEffect(c) => {
+            // A clearing list (clear_existing) ends the effects it leaves out as
+            // their removal would: their end sequence and StopAnimation play. The
+            // Mortis bone dragon wakes this way, its whole list sent again
+            // without Boss_Mortis_Bone_Dragon_Initial_Freeze (DSOR_Server
+            // services/mortis_arena.py _wake), whose Resurrect and
+            // boss_05_phase_1_spawn never played.
+            // FAILURE: "il y'a pas l'animation de spawn ou il se reemboite".
+            let mut cleared: Vec<(u32, u16, u32)> = Vec::new();
+            if c.header {
+                let kept = |i: &u32| c.elements.iter().any(|e| e.instance == *i && e.tail.is_some());
+                if let Some(holder) = actor {
+                    let old: Vec<(u16, u32)> = if actor == net.local_actor {
+                        net.stat_effects.iter().map(|(i, e)| (e.index, *i)).collect()
+                    } else {
+                        net.actor_effects.get(&holder).map(|f| f.elements.iter().map(|(i, e)| (e.index, *i)).collect()).unwrap_or_default()
+                    };
+                    cleared = old.into_iter().filter(|(_, i)| !kept(i)).map(|(index, i)| (holder, index, i)).collect();
+                }
+            }
+            for (holder, index, instance) in cleared {
+                net.mount_events.push((holder, index, instance, false));
+                net.pet_events.push((holder, index, instance, false));
+                net.status_events.push(StatusEvent { holder, index, instance, seconds: 0.0, removed: true });
+            }
             if actor.is_some() && actor == net.local_actor {
                 if c.header { net.stat_effects.clear(); }
                 let tick = net.arrival_tick;
