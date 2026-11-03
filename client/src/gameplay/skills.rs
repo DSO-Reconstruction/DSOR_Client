@@ -2861,7 +2861,7 @@ fn status_visuals(
     data: Res<SkillData>,
     statuses: Res<Assets<StatusTable>>,
     (seqs, emotes, characters): (Res<Assets<SequenceTable>>, Res<Assets<EmoteTable>>, Query<&Character>),
-    actors: Query<(Entity, Option<&LocalPlayer>, Option<&RemotePlayer>, Option<&crate::actors::npc::Npc>)>,
+    actors: Query<(Entity, Option<&LocalPlayer>, Option<&RemotePlayer>, Option<&crate::actors::npc::Npc>, Option<&crate::monsters::Monster>)>,
     mut visuals: Query<(Entity, &mut StatusVisual)>,
     mut players: Query<&mut SequencePlayer>,
     mut by_name: Local<HashMap<String, u32>>,
@@ -2929,8 +2929,10 @@ fn status_visuals(
         }
     }
     let actor_entity = |id: u32| {
-        actors.iter().find_map(|(e, l, r, n)| {
-            (l.is_some_and(|l| l.actor == id) || r.is_some_and(|r| r.actor == id) || n.is_some_and(|n| n.actor == id)).then_some(e)
+        // Monsters too: Hunting Arrow's Marked glow (ranger_markshot_mark) and
+        // every other effect a blow leaves on one were never drawn.
+        actors.iter().find_map(|(e, l, r, n, m)| {
+            (l.is_some_and(|l| l.actor == id) || r.is_some_and(|r| r.actor == id) || n.is_some_and(|n| n.actor == id) || m.is_some_and(|m| m.actor == id)).then_some(e)
         })
     };
     // Its StopAnimation as it goes: the bone dragon's Resurrect, out of its
