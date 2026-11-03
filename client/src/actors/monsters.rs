@@ -616,6 +616,10 @@ fn spawn_monsters(
         } else {
             t.minion || (OFFLINE_SUMMONS..OFFLINE_SUMMONS + 0x0100_0000).contains(&spawn.actor)
         };
+        if !t.summon.is_empty() {
+            info!("monster {} {:#x} appears: category {}, summoner {:#x}, {} its sequence {}", spawn.blueprint, spawn.actor,
+                spawn.category, spawn.summoner, if summoned && summon.is_some() { "plays" } else { "skips" }, t.summon);
+        }
         let sequence = match (summoned, summon) {
             (true, Some(seq)) => Some(seq.clone()),
             _ if matches!(spawn.category, 1 | 2) && t.state.split(';').next().map(str::trim) == Some("Spawn") =>
