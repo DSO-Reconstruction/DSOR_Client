@@ -823,7 +823,7 @@ mod smoothing_tests {
             .insert_resource(CameraZoom::new(20.0))
             .init_resource::<crate::ui::input::UiInput>()
             .add_message::<MouseWheel>()
-            .add_systems(Update, (zoom_camera, follow_camera).chain());
+            .add_systems(Update, (zoom_camera, follow_camera, fit_sun_shadows).chain());
         app.world_mut().spawn((Transform::default(), local(None)));
         let camera = app.world_mut().spawn((Camera3d::default(), Transform::default())).id();
         let wheel = |app: &mut App, unit, y| {
@@ -886,7 +886,7 @@ mod smoothing_tests {
         let mut app = App::new();
         app.init_resource::<Time>().init_resource::<crate::ui::input::UiInput>()
             .insert_resource(CameraZoom::new(18.0)).add_message::<MouseWheel>()
-            .add_systems(Update, (zoom_camera, follow_camera).chain());
+            .add_systems(Update, (zoom_camera, follow_camera, fit_sun_shadows).chain());
         let player = app.world_mut().spawn((Transform::default(), local(None))).id();
         let camera = app.world_mut().spawn((Camera3d::default(), Transform::default())).id();
         step(&mut app, 0.1);
@@ -1002,7 +1002,7 @@ impl Plugin for NetPlugin {
                 Update,
                 (debug_hierarchy, spawn_local, apply_remotes, dress, move_remotes, player_deaths,
                     crate::gameplay::dialogue::click.run_if(crate::screens::loading::gameplay_ready), click_to_move.run_if(crate::screens::loading::gameplay_ready), walk_local.run_if(crate::screens::loading::gameplay_ready),
-                    apply_corrections, zoom_camera.run_if(crate::screens::loading::gameplay_ready), follow_camera, send_moves.run_if(crate::screens::loading::gameplay_ready), crate::gameplay::dialogue::arrive.run_if(crate::screens::loading::gameplay_ready))
+                    apply_corrections, zoom_camera.run_if(crate::screens::loading::gameplay_ready), (follow_camera, fit_sun_shadows).chain(), send_moves.run_if(crate::screens::loading::gameplay_ready), crate::gameplay::dialogue::arrive.run_if(crate::screens::loading::gameplay_ready))
                     .chain()
                     .in_set(NetSystems)
                     .run_if(net_exists),
@@ -2913,6 +2913,33 @@ fn follow_camera(
         if let Projection::Perspective(p) = &mut *projection {
             p.fov = CAM_FOV_DEG.to_radians();
         }
+    }
+}
+
+/// The sun's one shadow cascade covers the ground the camera sees, not 0..60 m
+/// along its view: the same shadow map spreads over 1.3x (full zoom-out) to 2.8x
+/// (full zoom-in) fewer metres, sharper at no cost.
+/// The ground's view depth depends only on the screen row (no roll): with the
+/// camera `d` from the player at 45 degrees and a 34 degree vertical FOV, the
+/// bottom row meets it at 0.77 d and the top row at 1.44 d; the cascade ends at
+/// 1.8 d (ground lower than the player's). It still starts at the camera: from
+/// 0.5 d, the beams over Kingshill's wagon, nearer than that, no longer cast on
+/// its roof.
+/// FAILURE: "y'a pas moyen d'avoir de meilleures ombres sans tuer les FPS".
+fn fit_sun_shadows(
+    zoom: Res<CameraZoom>,
+    input: Res<crate::ui::input::UiInput>,
+    opts: Option<Res<crate::Options>>,
+    mut fitted: Local<f32>,
+    mut suns: Query<&mut bevy::light::CascadeShadowConfig, With<crate::rendering::lighting::Sun>>,
+) {
+    let d = zoom.current;
+    // Free look and --cam see further than the player's ground: the authored 60 m.
+    let (near, far) = if input.free_look || opts.is_some_and(|o| o.cam.is_some()) { (0.1, 60.0) } else { (0.1, 1.8 * d) };
+    if (far - *fitted).abs() < 0.25 { return; }
+    *fitted = far;
+    for mut config in &mut suns {
+        *config = bevy::light::CascadeShadowConfigBuilder { num_cascades: 1, minimum_distance: near, maximum_distance: far, ..default() }.build();
     }
 }
 
