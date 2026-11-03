@@ -409,6 +409,12 @@ pub struct StatusEvent {
     /// An element without details: the instance's removal (DSOR_Server
     /// local_mount_state.py: `has_details=bool(active)`), not a new start.
     pub removed: bool,
+    /// An element without details but with its update-timing bit (+0x25): the
+    /// running instance renewed, not removed (DSOR_Server combat_resolution.py
+    /// _advance_status_effect_instance at MaxStackSize; protocol
+    /// encode_status_effect "without details False removes").
+    /// FAILURE: "Si je relance hunting arrow ca enleve l'effet" (the mark).
+    pub refresh: bool,
 }
 
 /// The effects running on one actor, by instance, and the stamp of their last
@@ -1547,7 +1553,12 @@ impl Net {
         effects.stamp = self.actor_effects_stamp;
         if header { effects.elements.clear(); }
         for e in elements {
-            if e.tail.is_some() { effects.elements.insert(e.instance, e.clone()); } else { effects.elements.remove(&e.instance); }
+            if e.tail.is_some() { effects.elements.insert(e.instance, e.clone()); }
+            else if e.flag_0 {
+                let tick = self.arrival_tick;
+                if let Some(old) = effects.elements.get_mut(&e.instance) { renew(old, e, tick); }
+            }
+            else { effects.elements.remove(&e.instance); }
         }
         if effects.elements.is_empty() { self.actor_effects.remove(&holder); }
     }
@@ -1585,7 +1596,7 @@ impl Net {
         for (holder, index, instance) in gone {
             self.mount_events.push((holder, index, instance, false));
             self.pet_events.push((holder, index, instance, false));
-            self.status_events.push(StatusEvent { holder, index, instance, seconds: 0.0, removed: true });
+            self.status_events.push(StatusEvent { holder, index, instance, seconds: 0.0, removed: true, refresh: false });
         }
     }
 
@@ -2030,7 +2041,7 @@ pub(crate) fn on_command(net: &mut Net, command: ServerCommand, actor: Option<u3
             // FAILURE: "il y'a pas l'animation de spawn ou il se reemboite".
             let mut cleared: Vec<(u32, u16, u32)> = Vec::new();
             if c.header {
-                let kept = |i: &u32| c.elements.iter().any(|e| e.instance == *i && e.tail.is_some());
+                let kept = |i: &u32| c.elements.iter().any(|e| e.instance == *i && (e.tail.is_some() || e.flag_0));
                 if let Some(holder) = actor {
                     let old: Vec<(u16, u32)> = if actor == net.local_actor {
                         net.stat_effects.iter().map(|(i, e)| (e.index, *i)).collect()
@@ -2043,13 +2054,16 @@ pub(crate) fn on_command(net: &mut Net, command: ServerCommand, actor: Option<u3
             for (holder, index, instance) in cleared {
                 net.mount_events.push((holder, index, instance, false));
                 net.pet_events.push((holder, index, instance, false));
-                net.status_events.push(StatusEvent { holder, index, instance, seconds: 0.0, removed: true });
+                net.status_events.push(StatusEvent { holder, index, instance, seconds: 0.0, removed: true, refresh: false });
             }
             if actor.is_some() && actor == net.local_actor {
                 if c.header { net.stat_effects.clear(); }
                 let tick = net.arrival_tick;
                 for effect in &c.elements {
                     if effect.tail.is_some() { net.stat_effects.insert(effect.instance, timed_from(effect, tick)); }
+                    else if effect.flag_0 {
+                        if let Some(old) = net.stat_effects.get_mut(&effect.instance) { renew(old, effect, tick); }
+                    }
                     else { net.stat_effects.remove(&effect.instance); }
                 }
                 net.stat_revision = net.stat_revision.wrapping_add(1);
@@ -2057,6 +2071,14 @@ pub(crate) fn on_command(net: &mut Net, command: ServerCommand, actor: Option<u3
                 net.apply_actor_effects(holder, c.header, &c.elements);
             }
             for e in &c.elements {
+                let refresh = e.tail.is_none() && e.flag_0;
+                if refresh {
+                    net.status_events.push(StatusEvent {
+                        holder: actor.unwrap_or(e.source), index: e.index, instance: e.instance,
+                        seconds: e.duration as f32 / 25.0, removed: false, refresh: true,
+                    });
+                    continue;
+                }
                 if actor.is_some() && actor == net.local_actor {
                     info!("status effect {} on us for {:.2} s (instance {})", e.index, e.duration as f32 / 25.0, e.instance);
                 }
@@ -2070,6 +2092,7 @@ pub(crate) fn on_command(net: &mut Net, command: ServerCommand, actor: Option<u3
                     instance: e.instance,
                     seconds: e.duration as f32 / 25.0,
                     removed: e.tail.is_none(),
+                    refresh: false,
                 });
             }
         }
@@ -3285,6 +3308,12 @@ pub fn hidden_bar(base: &[dsor_proto::commands::inventory::QuickSlot], skills: &
 /// The server dates it from the last tick it learned from us (a move's or a
 /// cast's), which can be seconds old: Battle Anger (5 s) then showed no
 /// countdown, and would have run out on arrival. End 0 stays permanent.
+/// A renewed instance keeps its details and takes the refresh's timing.
+fn renew(old: &mut dsor_proto::commands::combat::StatusEffectElement, refresh: &dsor_proto::commands::combat::StatusEffectElement, now: u32) {
+    let timed = timed_from(refresh, now);
+    (old.end, old.start, old.duration) = (timed.end, timed.start, timed.duration);
+}
+
 fn timed_from(effect: &dsor_proto::commands::combat::StatusEffectElement, now: u32) -> dsor_proto::commands::combat::StatusEffectElement {
     let mut effect = effect.clone();
     if effect.end != 0 && effect.duration > 0 {

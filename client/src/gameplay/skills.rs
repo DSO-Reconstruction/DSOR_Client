@@ -2928,6 +2928,14 @@ fn status_visuals(
             }
         }
     }
+    // A renewal pushes the running visual's end out; nothing starts again.
+    for ev in status_events.iter().filter(|e| e.refresh) {
+        for (_, mut v) in visuals.iter_mut() {
+            if v.key == (ev.holder, ev.instance) && v.ends.is_some() {
+                v.ends = Some(now + if ev.seconds > 0.0 { ev.seconds } else { 0.5 });
+            }
+        }
+    }
     let actor_entity = |id: u32| {
         // Monsters too: Hunting Arrow's Marked glow (ranger_markshot_mark) and
         // every other effect a blow leaves on one were never drawn.
@@ -3005,7 +3013,7 @@ fn status_visuals(
         start(&mut commands, def, (holder, instance), Some(e), e, Some(seconds));
     }
     for ev in status_events {
-        if ev.removed { continue; }
+        if ev.removed || ev.refresh { continue; }
         let Some(def) = table.0.get(&(ev.index as u32)) else { continue };
         let Some(holder) = actor_entity(ev.holder).filter(|e| monsters.get(*e).map_or(true, |(m, a)| m.is_alive(a))) else { continue };
         start(&mut commands, def, (ev.holder, ev.instance), Some(holder), holder, Some(ev.seconds));

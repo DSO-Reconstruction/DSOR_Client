@@ -120,7 +120,7 @@ fn apply_rides(
                 let find = |id: &str| table.0.iter().find(|(_, d)| d.id == id).map(|(i, _)| *i as u16);
                 let cast = ride.replacen("ride_", "cast_", 1);
                 if let (Some(ride_index), Some(local)) = (find(&ride), net.local_actor) {
-                    let event = |index: u16, instance: u32, seconds: f32| crate::network::net::StatusEvent { holder: local, index, instance, seconds, removed: false };
+                    let event = |index: u16, instance: u32, seconds: f32| crate::network::net::StatusEvent { holder: local, index, instance, seconds, removed: false, refresh: false };
                     if tested.0 == 0 && now > 3.0 {
                         tested.0 = 1;
                         tested.1 = now;
@@ -202,7 +202,7 @@ fn apply_rides(
                 // Its own visual (dwarf_irondwarf_idle on fx_chest) rode the old
                 // skeleton's joints, gone with it: drawn again on the new one.
                 // FAILURE: "y'a plus de FX de transformation".
-                redraw.push((entity, crate::network::net::StatusEvent { holder, index, instance, seconds: 3600.0, removed: false }));
+                redraw.push((entity, crate::network::net::StatusEvent { holder, index, instance, seconds: 3600.0, removed: false, refresh: false }));
                 if let Some(net) = net.as_mut().filter(|n| n.local_actor == Some(holder) && !t.skills.is_empty()) {
                     let base = net.quickbars.bars.first().cloned().unwrap_or_default();
                     net.hidden_bar = Some(crate::network::net::hidden_bar(&base, &t.skills));

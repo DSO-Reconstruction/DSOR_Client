@@ -309,3 +309,22 @@ fn status_effects_that_ran_out_are_removed() {
     assert!(!net.actor_effects.contains_key(&41));
     assert_eq!(net.status_events.iter().filter(|e| e.removed).count(), 2);
 }
+
+/// A second Hunting Arrow on a Marked monster: the server renews the running
+/// mark with an element without details but with its update-timing bit; the
+/// mark stays, with the new end, and no removal reaches its visual.
+/// FAILURE: "Si je relance hunting arrow ca enleve l'effet".
+#[test]
+fn a_timing_only_status_element_renews_the_effect() {
+    use dsor_proto::commands::combat::{StatusEffect, StatusEffectElement, StatusEffectTail};
+    let mut app = app();
+    let mut net = app.world_mut().non_send_mut::<Net>();
+    let mark = StatusEffectElement { index: 1325, instance: 9, end: 300, duration: 200, tail: Some(StatusEffectTail::default()), ..Default::default() };
+    on_command(&mut net, ServerCommand::StatusEffect(StatusEffect { header: false, elements: vec![mark.clone()] }), Some(41));
+    net.status_events.clear();
+    let renew = StatusEffectElement { end: 500, start: 300, flag_0: true, tail: None, ..mark };
+    on_command(&mut net, ServerCommand::StatusEffect(StatusEffect { header: false, elements: vec![renew] }), Some(41));
+    let kept = &net.actor_effects[&41].elements[&9];
+    assert!(kept.tail.is_some(), "the mark keeps its details");
+    assert!(net.status_events.iter().all(|e| !e.removed) && net.status_events.iter().any(|e| e.refresh));
+}
