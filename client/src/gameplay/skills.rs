@@ -303,6 +303,10 @@ pub struct StatusDef {
     pub stop_animation: String,
     #[serde(default)]
     pub stop_seconds: f32,
+    /// SkillPunchThrough: the skills whose bullets pass its holder
+    /// (debuff_cc_mark: mightyshot, Precise Shot through a Marked enemy).
+    #[serde(default)]
+    pub punch_through: Vec<String>,
     /// A ride effect's mount (_Template_Mount id; crate::actors::mounts).
     #[serde(default)]
     pub mount: String,
@@ -513,6 +517,8 @@ struct Bullet {
     /// passed through.
     impacts_left: u32,
     passed: Vec<u32>,
+    /// The skill that shot it, for its victims' SkillPunchThrough.
+    skill: String,
     /// The actor the server's blow landed on: it ends there (see fly_bullets).
     snapped: Option<u32>,
 }
@@ -566,7 +572,7 @@ struct Pending {
 enum PendingKind {
     /// `aim`: the aimed actor's chest, for the bullet to dip or climb to;
     /// `caster_actor`: the caster as the server names it, whose blows end it.
-    Bullet { from: Vec3, dir: Vec3, def: BulletDef, impact: String, to: Option<Vec3>, caster: Entity, caster_actor: Option<u32>, aim: Option<Vec3>, target: Option<u32> },
+    Bullet { from: Vec3, dir: Vec3, def: BulletDef, impact: String, to: Option<Vec3>, caster: Entity, caster_actor: Option<u32>, aim: Option<Vec3>, target: Option<u32>, skill: String },
     /// The caster lands on the aimed point (Teleport skills).
     Teleport { who: Entity, to: Vec3 },
     Sequence { name: String, at: Transform, rate: f32 },
@@ -783,7 +789,7 @@ fn perform(
             for k in 0..skill.bullet_count.max(1) {
                 commands.spawn(Pending {
                     after: ((skill.loop_start as f32 / FPS).max(skill.emit_delay) + k as f32 * skill.emit_delay) / rate,
-                    what: PendingKind::Bullet { from, dir, def: b.clone(), impact: skill.impact.clone(), to, caster: actor, caster_actor, aim, target },
+                    what: PendingKind::Bullet { from, dir, def: b.clone(), impact: skill.impact.clone(), to, caster: actor, caster_actor, aim, target, skill: skill.id.clone() },
                 });
             }
         }
@@ -1490,7 +1496,7 @@ fn run_pending(
         }
         commands.entity(e).despawn();
         match &p.what {
-            PendingKind::Bullet { from, dir, def, impact, to, caster, caster_actor, aim, target } => {
+            PendingKind::Bullet { from, dir, def, impact, to, caster, caster_actor, aim, target, skill } => {
                 let speed = def.velocity.max(0.01);
                 // Free flight: trunc(LifeTime x 25) ticks along the aim, flat, as
                 // the 2018 client flies it and the server reads it (a heading); to
@@ -1540,6 +1546,7 @@ fn run_pending(
                             bullet_impact: def.impact.clone(),
                             impacts_left: def.impact_count.max(1),
                             passed: Vec::new(),
+                            skill: skill.clone(),
                             snapped: None,
                         },
                         Transform::from_translation(*from).with_rotation(entity_rotation(dir.x.atan2(dir.z))),
@@ -1659,12 +1666,27 @@ fn fly_bullets(
     mut debug_monsters: ResMut<crate::actors::monsters::DebugMonsters>,
     // The server's blows not matched to a bullet yet: attacker, victim, when.
     mut strikes: Local<Vec<(u32, u32, f32)>>,
+    (data, statuses): (Option<Res<SkillData>>, Option<Res<Assets<StatusTable>>>),
 ) {
     let _profile = crate::diagnostics::hud::FrameSpan::new("skills::fly_bullets");
     let mesh = nav.as_ref().and_then(|n| navmeshes.get(&n.0));
     let now = time.elapsed_secs();
     let dt = time.delta_secs();
     let offline = net.as_ref().is_some_and(|n| n.offline);
+    // The skills each actor's effects let through (SkillPunchThrough): a Marked
+    // monster lets Precise Shot pass, as the server plans it (DSOR_Server
+    // local_combat_state.py: each target's impact count from its own effects).
+    // FAILURE: "le precise shot devrait traverser les ennemis marques".
+    let mut pierced: HashMap<u32, Vec<String>> = HashMap::new();
+    if let (Some(net), Some(table)) = (net.as_ref(), data.as_ref().zip(statuses.as_ref()).and_then(|(d, s)| s.get(&d.status))) {
+        for (actor, effects) in &net.actor_effects {
+            for e in effects.elements.values() {
+                if let Some(def) = table.0.get(&(e.index as u32)).filter(|d| !d.punch_through.is_empty()) {
+                    pierced.entry(*actor).or_default().extend(def.punch_through.iter().cloned());
+                }
+            }
+        }
+    }
     if let Some(mut net) = net {
         let mut fresh = std::mem::take(&mut net.strikes);
         // A blow and the death it caused name the same pair.
@@ -1703,8 +1725,15 @@ fn fly_bullets(
     // off its server position. Each blow takes the bullet that reaches its victim soonest; one
     // that finds none waits for a bullet still in the hand.
     let mut matched = Vec::new();
+    let lets_through = |b: &Bullet, victim: u32| pierced.get(&victim).is_some_and(|skills| skills.iter().any(|k| k.eq_ignore_ascii_case(&b.skill)));
     for (i, &(attacker, victim, _)) in strikes.iter().enumerate() {
         let Some(&(p, radius)) = actors.get(&victim) else { continue };
+        // A blow on an actor its bullet passes (Precise Shot through a Marked
+        // enemy) ends nothing: the bullet flies on to the next.
+        if bullets.iter().any(|(_, _, b)| b.caster_actor == Some(attacker) && b.dying.is_none() && lets_through(b, victim)) {
+            matched.push(i);
+            continue;
+        }
         let mut best: Option<(f32, Entity)> = None;
         for (e, _, b) in bullets.iter() {
             if b.caster_actor != Some(attacker) || b.dying.is_some() || b.snapped.is_some() || b.to_point || b.impacts_left > 1 || b.passed.contains(&victim) {
@@ -1826,9 +1855,10 @@ fn fly_bullets(
             contacts.sort_by(|x, y| x.0.total_cmp(&y.0));
             for (s, actor, p, _) in contacts {
                 let contact = before + (here - before) * s;
-                if b.impacts_left > 1 {
+                let lets_through = pierced.get(&actor).is_some_and(|skills| skills.iter().any(|k| k.eq_ignore_ascii_case(&b.skill)));
+                if lets_through || b.impacts_left > 1 {
                     debug!("bullet passes {actor} at {contact:?} ({now:.2} s)");
-                    b.impacts_left -= 1;
+                    if !lets_through { b.impacts_left -= 1; }
                     b.passed.push(actor);
                     if offline && !from_monster {
                         debug_monsters.blows.push((actor, 0));
@@ -3613,7 +3643,39 @@ mod bullet_tests {
             bullet_impact: String::new(),
             impacts_left: 1,
             passed: Vec::new(),
+            skill: String::new(),
             snapped: None,
+        }
+    }
+
+    #[test]
+    fn precise_shot_flies_through_a_marked_monster_into_the_one_behind() {
+        // debuff_cc_mark: SkillPunchThrough:mightyshot. Hunting Arrow's mark lets
+        // Precise Shot through; any other bullet still ends on the marked one.
+        for (skill, struck) in [("mightyshot", 42), ("markshot", 41)] {
+            let mut app = App::new();
+            app.init_resource::<Time>().init_resource::<Time<Real>>().init_resource::<Assets<NavMesh>>()
+                .init_resource::<crate::monsters::DebugMonsters>().init_resource::<Assets<SequenceTable>>().init_resource::<Assets<StatusTable>>();
+            let sequences = app.world_mut().resource_mut::<Assets<SequenceTable>>().add(SequenceTable(HashMap::new()));
+            let mut data = SkillData::for_test(sequences);
+            let mark: StatusDef = serde_json::from_value(serde_json::json!({"id": "debuff_cc_mark", "duration": 8.0,
+                "start": {}, "tick": {}, "done": {}, "stop": {}, "punch_through": ["mightyshot"]})).unwrap();
+            data.status = app.world_mut().resource_mut::<Assets<StatusTable>>().add(StatusTable(HashMap::from([(5, mark)])));
+            app.insert_resource(data);
+            crate::net::start_offline(app.world_mut(), 1, 0);
+            app.world_mut().resource_mut::<Time>().advance_by(std::time::Duration::from_secs(1));
+            let tail = Some(Default::default());
+            app.world_mut().non_send_mut::<Net>().apply_actor_effects(41, false,
+                &[dsor_proto::commands::combat::StatusEffectElement { index: 5, instance: 9, tail, ..Default::default() }]);
+            for (actor, z) in [(41, 2.0), (42, 6.0)] {
+                app.world_mut().spawn((crate::monsters::tests::monster(actor, 100), CharacterAnim::default(),
+                    GlobalTransform::from_translation(Vec3::new(0.0, 0.0, z))));
+            }
+            let mut b = bullet(Vec3::new(0.0, 1.0, 0.0), Vec3::Z * 10.0, 0.3);
+            b.skill = skill.into();
+            app.world_mut().spawn((b, Transform::default()));
+            app.world_mut().run_system_once(fly_bullets).unwrap();
+            assert_eq!(app.world().resource::<crate::monsters::DebugMonsters>().blows.last().map(|b| b.0), Some(struck), "{skill}");
         }
     }
 
@@ -3733,7 +3795,7 @@ mod bullet_tests {
             soul.targetable = targetable;
             let caster = app.world_mut().spawn((soul, CharacterAnim::default())).id();
             app.world_mut().spawn(Pending { after: 0.0, what: PendingKind::Bullet { from: Vec3::Y, dir: Vec3::Z, def: def.clone(),
-                impact: String::new(), to: None, caster, caster_actor: Some(0x10600), aim: None, target: None } });
+                impact: String::new(), to: None, caster, caster_actor: Some(0x10600), aim: None, target: None, skill: String::new() } });
             app.world_mut().run_system_once(run_pending).unwrap();
             let mut bullets = app.world_mut().query::<(Entity, &Bullet)>();
             let (e, b) = bullets.single(app.world()).unwrap();

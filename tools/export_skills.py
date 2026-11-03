@@ -441,6 +441,11 @@ for r in db.execute("select rowid, * from _Template_StatusEffect order by rowid"
         "looped_animation": bool(r["LoopedStartAnimation"]),
         "stop_animation": r["StopAnimation"] or "",
         "stop_seconds": stop_seconds(r["StopModifiers"], r["DoneModifiers"]),
+        # SkillPunchThrough on a victim: those skills' bullets pass it
+        # (debuff_cc_mark: Precise Shot pierces a Marked enemy).
+        "punch_through": [s.strip() for part in (r["StartModifiers"] or "").split(";")
+                          if part.strip().casefold().startswith("skillpunchthrough:")
+                          for s in part.split(":", 1)[1].split(",") if s.strip()],
         "mount": mount,
         "movement_bonus": bonus,
         "holds": holds_movement(r["StartModifiers"]),
