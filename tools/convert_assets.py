@@ -343,6 +343,10 @@ def steps(r, database_only=False):
         ("exits", 1, True, post("export_exits.py", root, out)),
         ("ambience", 1, True, post("export_ambience.py", root, out)),
         ("decorations", 1, True, post("export_deco.py", root, out)),
+        # After the skills and the decorations' animation sets (the Night
+        # Walker's spells over static.db4's niwalk rows, DSOR_Server
+        # tools/install_niwalk_content.py).
+        ("the Night Walker's spells", 1, True, post("niwalk_visuals.py", out)),
         ("map audio", 2, True, post("export_audio_runtime.py", root, out)),
         # After anything that rewrites an effect model or skills/sequences.json.
         ("VFX edits", 1, True, post("vfx_apply.py", out)),
