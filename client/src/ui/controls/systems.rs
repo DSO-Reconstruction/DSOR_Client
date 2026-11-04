@@ -61,7 +61,9 @@ const FILTER_ALL: u16 = 0x01;
 const FILTER_PLAYER_PAGE: u16 = 0x10;
 /// The lifetime honour board: the only one this server records.
 const LIFETIME_BOARD: u8 = 4;
-const EVERY_CLASS: u8 = 4;
+/// The "every class" tab: 0xFF, no class's id (4 is the Night Walker's);
+/// DSOR_Server protocol/ranking_protocol.py WIRE_ALL_CLASSES.
+const EVERY_CLASS: u8 = 0xFF;
 /// The queue the matchmaking window's tabs join: team (best of 5, 5 on 5),
 /// solo (best of 3, the duel) (pvp_match_protocol.py MATCH_MODE_*).
 const QUEUE_MODES: [i8; 2] = [1, 0];
