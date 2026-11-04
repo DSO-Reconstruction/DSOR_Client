@@ -43,10 +43,14 @@ fn full_loadouts_match_authoritative_server_vectors() {
 }
 
 #[test]
-fn animation_rate_uses_the_server_breakpoints() {
-    for (raw, expected) in [(0.7,0.7),(1.0,1.0),(1.0255,1.0),(1.0256,1.25),(2.1053,2.5),(3.6364,4.1667),(6.0,4.1667),(99.0,4.1667)] {
+fn animation_rate_uses_each_skills_breakpoints() {
+    // (frames, sheet speed, rate): Magic Missile 15 frames steps at 30/29 and
+    // stops at 30/9 (4 frames); Fireball 20 at 40/11 (5 frames).
+    for (frames, raw, expected) in [(15,0.7,0.7),(15,1.0,1.0),(15,1.034,1.0),(15,1.035,15.0/14.0),
+            (15,3.333,15.0/5.0),(15,3.334,15.0/4.0),(15,99.0,15.0/4.0),
+            (20,3.636,20.0/6.0),(20,3.637,4.0),(20,6.0,4.0),(0,6.0,4.0)] {
         let stats = CharacterStats([("SkillExecutionSpeed".into(),raw)].into_iter().collect());
-        assert!((stats.animation_speed()-expected).abs() < 1e-6);
+        assert!((stats.animation_speed(frames)-expected).abs() < 1e-5, "{frames} {raw}");
     }
 }
 

@@ -1265,7 +1265,7 @@ fn cast_input(
     player.facing = facing;
     // Turned now: the cast's effects take the caster's placement this frame.
     tf.rotation = Quat::from_rotation_y(facing);
-    let rate = if skill.scale_timing { stats.animation_speed().clamp(0.1, 10.0) } else { 1.0 };
+    let rate = if skill.scale_timing { stats.animation_speed(skill.unblock).clamp(0.1, 10.0) } else { 1.0 };
     // Movement waits for MotionUnblockFrame only: a skill with 0 there (Furious
     // Battle Cry, the auras, the buffs) goes off while the player keeps walking.
     // FAILURE: held until SkillUnblockFrame too and its walk dropped, Battle Cry
