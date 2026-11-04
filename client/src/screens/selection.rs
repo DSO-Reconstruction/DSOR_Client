@@ -631,6 +631,36 @@ struct Showcase { start: String, idle: String, idling: bool, started: bool }
 pub struct Preview;
 
 pub struct SelectionPlugin;
+/// DSOR_CREATE=<class>,<gender>,<name>: on the roster, opens the creation
+/// screen and creates that character, as the buttons would (testing a class
+/// end to end without clicking: `--user ... DSOR_CREATE=4,0,Nightwalker`).
+/// DSOR_PLAY=1: then enters the world with the selected character (`--char`),
+/// as Play Now would.
+fn auto_create(mut selection: ResMut<Selection>, mut done: Local<bool>, mut played: Local<bool>) {
+    if !selection.active || selection.offline || selection.entering { return; }
+    if *done && !*played && std::env::var("DSOR_PLAY").is_ok() && selection.dialog == Dialog::None && selection.selected.is_some() {
+        selection.play();
+        *played = true;
+        return;
+    }
+    if *done { return; }
+    let Some((class, gender, name)) = std::env::var("DSOR_CREATE").ok().and_then(|v| {
+        let mut it = v.splitn(3, ',');
+        Some((it.next()?.trim().parse::<u8>().ok()?, it.next()?.trim().parse::<u8>().ok()?, it.next()?.trim().to_owned()))
+    }) else { *done = true; return };
+    match &mut selection.dialog {
+        Dialog::None => selection.open_editor(),
+        Dialog::Create(c) if c.open && !c.waiting => {
+            c.set_look(class, gender);
+            c.name = name;
+            c.caret = c.name.len();
+            selection.create();
+            *done = true;
+        }
+        _ => {}
+    }
+}
+
 impl Plugin for SelectionPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Selection>().init_asset::<SelectionData>().init_asset_loader::<SelectionLoader>()
@@ -638,6 +668,7 @@ impl Plugin for SelectionPlugin {
             .add_systems(Update, (scene, showcase).chain().after(crate::network::net::NetReceive).before(crate::network::net::NetSystems));
         #[cfg(not(target_arch = "wasm32"))]
         app.add_systems(Update, replay.after(scene));
+        app.add_systems(Update, auto_create.after(scene));
     }
 }
 
