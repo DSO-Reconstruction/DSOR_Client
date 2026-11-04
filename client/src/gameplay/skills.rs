@@ -2885,7 +2885,13 @@ fn status_visuals(
             continue;
         }
         if v.ends.is_some_and(|t| now >= t) {
-            if let Ok(mut p) = players.get_mut(v.player) {
+            // Only a loop is cut: a one-shot start plays out. The tree's
+            // skill_summontree_heal_effect (0 s, restore_health_globe, 58
+            // frames) is renewed and removed every heal tick; cut there, only
+            // the red light's first frames showed, overlapping it reads as a loop.
+            // FAILURE: "au debut je vois l'animation mais elle devrait etre en
+            //   boucle, et la juste ca clignote rouge rapidement".
+            if let Some(mut p) = players.get_mut(v.player).ok().filter(|p| p.looping) {
                 p.stop = true;
             }
             if let Some(seq) = v.end.as_ref().and_then(|n| sequences.0.get(n)) {
