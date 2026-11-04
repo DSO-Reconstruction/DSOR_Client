@@ -1,7 +1,10 @@
 """Instantiate current UI templates using the release database's own ordering."""
 import copy
 
-CLASSES = ("warrior", "mage", "ranger", "dwarf")
+# niwalk (4): the Night Walker, whose spell book the original laid out
+# (_Template_SkillTalent / _Template_SkillUIConfig) but never made live; the
+# spells DSOR_Server's tools/install_niwalk_content.py installs show.
+CLASSES = ("warrior", "mage", "ranger", "dwarf", "niwalk")
 
 
 def translated_subtree(widgets, source, target, dx=0, dy=0):
@@ -46,7 +49,7 @@ def spell_grid(widgets, db, textures, loca):
         s.Name, s.IconBrush FROM _Template_SkillTalent t
         JOIN _Template_SkillUIConfig u ON u.Id=t.Id
         LEFT JOIN _Template_Skill s ON s.Id=t.SkillTemplateId
-        WHERE t.CharClass IN ('warrior','mage','ranger','dwarf')
+        WHERE t.CharClass IN ('warrior','mage','ranger','dwarf','niwalk')
         AND (t.Category != 'Skill' OR (s.Hidden=0 AND s.IsLive=1))
         ORDER BY t.CharClass, u.Row, u.Column''').fetchall()
     added = []
@@ -97,7 +100,9 @@ def spell_grid(widgets, db, textures, loca):
             w.pop("art", None)
     index = widgets.index(background)
     backdrops = []
-    for cls, suffix in enumerate(("dragonknight", "mage", "ranger", "dwarf")):
+    # The Night Walker has no backdrop of its own (ui/skilltalent_backgound_niwalk
+    # is named by the client, absent from the data): the warrior's.
+    for cls, suffix in enumerate(("dragonknight", "mage", "ranger", "dwarf", "dragonknight")):
         brush = f"ui/skilltalent_backgound_{suffix}_crunch"
         if textures.get(brush):
             w = copy.deepcopy(background)
