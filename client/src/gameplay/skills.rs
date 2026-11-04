@@ -689,6 +689,10 @@ fn weapon_column(character: &Character) -> String {
         return "empty".into();
     }
     let set = character.desc.animation_set();
+    // The Night Walker's daggers fill both hands: the two-handed column.
+    if set.starts_with("niwalk") {
+        return "2h_weapon".into();
+    }
     for c in ["1h_weapon_shield", "1h_weapon", "2h_weapon", "small_weapon", "large_weapon"] {
         if set.ends_with(c) {
             return c.into();

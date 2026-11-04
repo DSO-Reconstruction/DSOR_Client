@@ -70,7 +70,7 @@ impl MerchantView {
 }
 
 fn class_matches(allowed: &str, class: Option<u8>) -> bool {
-    let Some(class) = class.and_then(|c| ["warrior", "mage", "ranger", "dwarf"].get(c as usize)) else { return true };
+    let Some(class) = class.map(crate::actors::character::item_class) else { return true };
     allowed.is_empty() || allowed.split(';').any(|c| c.trim().eq_ignore_ascii_case(class) || c.trim().eq_ignore_ascii_case("any"))
 }
 

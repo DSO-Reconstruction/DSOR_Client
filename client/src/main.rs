@@ -614,6 +614,9 @@ fn demo_equipment(class: u8) -> Vec<appearance::Equipment> {
                (4, "unique_mage_boots_02_kingshill"), (3, "mage_gloves_01"), (5, "unique_mage_2h_staff2h_01_heroic_bossdrop")],
         2 => &[(0, "unique_ranger_helmet_01_sargon"), (1, "unique_ranger_shoulders_01_sargon"), (2, "unique_ranger_torso_01_sargon"),
                (4, "unique_ranger_boots_02_lvl40"), (3, "ranger_gloves_05"), (5, "unique_ranger_rh_shortbow_sargon_01")],
+        // The Night Walker: its own pair of daggers, warrior armour meanwhile.
+        4 => &[(2, "unique_warrior_torso_01_sargon"), (1, "unique_warrior_shoulders_01_sargon"),
+               (4, "warrior_boots_06"), (5, "unique_warrior_rh_mace_sargon_01")],
         _ => &[(2, "unique_warrior_torso_01_sargon"), (1, "unique_warrior_shoulders_01_sargon"), (0, "unique_warrior_helmet_01_sargon"),
                (4, "warrior_boots_06"), (6, "unique_warrior_lh_shield_sargon_01"), (5, "unique_warrior_rh_mace_sargon_01")],
     };
@@ -647,7 +650,7 @@ fn demo_character(
         class,
         gender,
         equipment: demo_equipment(class),
-        armament: if class == 1 { 5 } else if class == 2 { 1 } else { 4 },
+        armament: if class == 1 || class == 4 { 5 } else if class == 2 { 1 } else { 4 },
         ..Default::default()
     };
     character::spawn_character(&mut commands, desc, Transform::from_translation(at));

@@ -793,6 +793,10 @@ fn class_resource_gauge(mut layout: Layout, class: u8) -> Layout {
         0 => "textures/ui/statusbar_bottombar_rage.png",
         2 => "textures/ui/statusbar_bottombar_adrenaline.png",
         3 => "textures/ui/statusbar_bottombar_steam.png",
+        // The Night Walker's blood: no bar of its own was made
+        // (ui/statusbar_bottombar_niwalk is named by the client, absent from
+        // the data); the health bar's red.
+        4 => "textures/ui/statusbar_bottombar_health.png",
         _ => return layout,
     };
     for w in layout.widgets.iter_mut().filter(|w| w.id.ends_with("/Resource/progress")) {
@@ -801,7 +805,8 @@ fn class_resource_gauge(mut layout: Layout, class: u8) -> Layout {
     layout
 }
 
-/// The class emblems (textures/ui/emblem_class_*): CharClass 0..3.
+/// The class emblems (textures/ui/emblem_class_*): CharClass 0..3; the Night
+/// Walker has none and wears the warrior's.
 fn class_emblem(class: u8) -> &'static str {
     match class {
         1 => "spellweaver",
@@ -813,7 +818,7 @@ fn class_emblem(class: u8) -> &'static str {
 
 fn resource_bar(class: u8) -> &'static str {
     match class {
-        0 => "ProgressBar_rage",
+        0 | 4 => "ProgressBar_rage",
         2 => "ProgressBar_stamina",
         3 => "ProgressBar_mechanicResource",
         _ => "ProgressBar_mana",

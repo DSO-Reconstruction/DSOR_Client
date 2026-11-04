@@ -70,7 +70,7 @@ const HEROES: usize = 6;
 const ROWS: usize = 16;
 /// Actors of debug monsters (the server's are far below).
 const FIRST_ACTOR: u32 = 0x6100_0000;
-const CLASSES: [&str; 4] = ["warrior", "mage", "ranger", "dwarf"];
+use crate::actors::character::CLASSES;
 
 /// Something the menu put on the map.
 #[derive(Clone, Copy, PartialEq)]
@@ -574,13 +574,13 @@ fn refresh(
             .and_then(|a| live.iter().find(|(m, _)| m.actor == a))
             .map(|(_, anim)| anim.states().into_iter().filter(|s| keep(s)).map(|s| (s.clone(), Act::Anim(s))).collect())
             .unwrap_or_default(),
-        HEROES => (0..4u8)
+        HEROES => (0..CLASSES.len() as u8)
             .flat_map(|c| (0..2u8).map(move |g| (c, g)))
             .map(|(c, g)| (format!("{} ({})", CLASSES[c as usize], if g == 1 { "female" } else { "male" }), Act::Hero(c, g)))
             .filter(|(n, _)| keep(n))
             .collect(),
         _ => {
-            let class = players.iter().next().map(|c| c.desc.class as usize).unwrap_or(1).min(3);
+            let class = players.iter().next().map(|c| c.desc.class as usize).unwrap_or(1).min(CLASSES.len() - 1);
             let prefix = format!("{}_", CLASSES[class]);
             stats
                 .get(&debug.stats)

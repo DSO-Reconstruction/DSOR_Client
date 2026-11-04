@@ -114,7 +114,9 @@ pub const NO_BEARD: u8 = 16;
 /// The hair and beard a class and gender start with (male, female).
 /// SOURCE: ClientCharacterGenerationManager::ApplyDefaultHairStyle 0x140237afc,
 ///   called by UpdateClass 0x14023be50 and UpdateGender 0x14023c3fc.
-const DEFAULT_LOOKS: [[(u8, u8); 2]; 4] = [[(18, 8), (45, 16)], [(2, 1), (3, 16)], [(7, 10), (16, 16)], [(35, 35), (33, 16)]];
+// The Night Walker has one hair and one beard (index 0: its bald head), for
+// both genders (_Template_CharacterHair/Beard NiwalkMale, NiwalkFemale).
+const DEFAULT_LOOKS: [[(u8, u8); 2]; 5] = [[(18, 8), (45, 16)], [(2, 1), (3, 16)], [(7, 10), (16, 16)], [(35, 35), (33, 16)], [(0, 0), (0, 16)]];
 
 /// The message on the screens' DenyReason line.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -205,9 +207,12 @@ pub fn name_character(c: char) -> bool {
     }
 }
 
+/// The highest class id: 4, the Night Walker (crate::actors::character::CLASSES).
+pub const LAST_CLASS: u8 = character::CLASSES.len() as u8 - 1;
+
 /// A class's name in keys and sound cues (charClass_warrior, ui_char_gen_choose_dwarf).
 pub fn class_key(class: u8) -> &'static str {
-    ["warrior", "mage", "ranger", "dwarf"].get(class as usize).copied().unwrap_or("warrior")
+    ["warrior", "mage", "ranger", "dwarf", "niwalk"].get(class as usize).copied().unwrap_or("warrior")
 }
 pub fn gender_key(gender: u8) -> &'static str {
     if gender == 1 { "female" } else { "male" }
@@ -222,7 +227,7 @@ impl Creation {
     /// empty name.
     pub fn from_editor(editor: CharacterGeneration) -> Self {
         let gender = (editor.gender.max(0) as u8).min(1);
-        Self { class: (editor.player_class.max(0) as u8).min(3), gender,
+        Self { class: (editor.player_class.max(0) as u8).min(LAST_CLASS), gender,
             body: editor.body.min(BODY_STYLES as u8 - 1), hair: editor.hair,
             beard: if gender == 1 { NO_BEARD } else { editor.beard },
             open: true, editor, ..default() }
@@ -276,7 +281,7 @@ impl Creation {
     /// gender's default hair and beard, the same ethnicity, the showcase from
     /// its start.
     pub fn set_look(&mut self, class: u8, gender: u8) {
-        (self.class, self.gender) = (class.min(3), gender.min(1));
+        (self.class, self.gender) = (class.min(LAST_CLASS), gender.min(1));
         (self.hair, self.beard) = DEFAULT_LOOKS[self.class as usize][self.gender as usize];
         if self.gender == 1 { self.beard = NO_BEARD; }
         self.scroll = 0;
@@ -772,7 +777,7 @@ pub fn description(c: &SelectionCharacter, equipment: &[SelectionEquipment], dat
     }
     worn = crate::actors::appearance::normalize(worn);
     worn.dedup_by(|a, b| a.slot == b.slot);
-    let mut desc = CharacterDesc { class: c.player_class.min(3) as u8, gender: c.gender.min(1) as u8,
+    let mut desc = CharacterDesc { class: c.player_class.min(LAST_CLASS as u32) as u8, gender: c.gender.min(1) as u8,
         armament: crate::actors::appearance::remote_armament(&worn, ""), equipment: worn,
         body: c.body, stature: c.variation, ..default() };
     // The selection screens give a woman no beard (UpdateCharacterAppearance

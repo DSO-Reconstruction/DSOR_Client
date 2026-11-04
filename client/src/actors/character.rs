@@ -44,7 +44,22 @@ const BODY_PARTS: [&str; 12] = [
     "upperarms", "upperbody", "upperlegs",
 ];
 
-pub const CLASSES: [&str; 4] = ["warrior", "mage", "ranger", "dwarf"];
+/// The player classes by wire id. niwalk (4, the Night Walker) was left
+/// unfinished by the original: _Template_Player human_{male,female}_niwalk,
+/// anim sets niwalk_off / niwalk_female_off, body nightwalker_*_body_00.
+pub const CLASSES: [&str; 5] = ["warrior", "mage", "ranger", "dwarf", "niwalk"];
+
+/// The class whose items a class wears: its own, the Night Walker the
+/// warrior's (no _Template_Item is niwalk's; the original never made them).
+pub fn item_class(class: u8) -> &'static str {
+    match CLASSES.get(class as usize).copied() {
+        Some("niwalk") | None => "warrior",
+        Some(name) => name,
+    }
+}
+
+/// The Night Walker's daggers (characters/uniskel/parts).
+pub const NIWALK_DAGGERS: &str = "nightwalker_2h_daggers_00";
 
 /// animation set -> state -> clip.
 #[derive(Asset, TypePath, Deserialize, Debug)]
@@ -260,8 +275,16 @@ impl CharacterDesc {
     /// "<class>_<gender>" or "<class>_<gender>_<ethnicity>": the body set's stem.
     fn body_stem(&self) -> String {
         match ETHNICITIES.get(self.body as usize).copied().unwrap_or("") {
-            "" => format!("{}_{}", self.class_name(), self.gender_name()),
-            ethnicity => format!("{}_{}_{ethnicity}", self.class_name(), self.gender_name()),
+            "" => format!("{}_{}", self.part_class(), self.gender_name()),
+            ethnicity => format!("{}_{}_{ethnicity}", self.part_class(), self.gender_name()),
+        }
+    }
+    /// The prefix of the class's own body parts: the Night Walker's are
+    /// nightwalker_{male,female}_<part> (characters/uniskel/parts).
+    pub(crate) fn part_class(&self) -> &'static str {
+        match self.class_name() {
+            "niwalk" => "nightwalker",
+            class => class,
         }
     }
     pub(crate) fn skeleton(&self) -> &str {
@@ -278,6 +301,12 @@ impl CharacterDesc {
             return look.anim_set.clone();
         }
         let class = self.class_name();
+        let female = if self.gender == 1 { "female_" } else { "" };
+        // EVIDENCE: _Template_Player human_male_niwalk AnimSet niwalk_off,
+        //   human_female_niwalk niwalk_female_off (anims.xml also has _def, _1h).
+        if class == "niwalk" {
+            return format!("niwalk_{female}off");
+        }
         let suffix = if class == "ranger" {
             if self.armament == 5 { "large_weapon" } else { "small_weapon" }
         } else {
@@ -287,7 +316,6 @@ impl CharacterDesc {
                 _ => "1h_weapon",
             }
         };
-        let female = if self.gender == 1 { "female_" } else { "" };
         format!("{class}_{female}{suffix}")
     }
 
@@ -307,11 +335,19 @@ impl CharacterDesc {
             else if exists(skin) { Some(skin.to_owned()) }
             else { None }
         };
-        let worn: Vec<_> = self.equipment.iter().flat_map(|e| e.skin_parts.iter()
-            .filter_map(|skin| resolve(skin).map(|part| (part, e.colour)))).collect();
+        // The Night Walker has no weapons of its own yet: whatever it holds
+        // shows as its pair of daggers, one in each hand (the one mesh is
+        // weighted to both hand hard points).
+        // UNVERIFIED: the original's niwalk weapons were never made (no
+        //   _Template_Item is niwalk's).
+        let daggers = [NIWALK_DAGGERS.to_owned()];
+        let worn: Vec<_> = self.equipment.iter().flat_map(|e| {
+            let skins = if class == "niwalk" && matches!(e.slot, 5 | 6) { &daggers[..] } else { &e.skin_parts[..] };
+            skins.iter().filter_map(|skin| resolve(skin).map(|part| (part, e.colour))).collect::<Vec<_>>()
+        }).collect();
         let stem = self.body_stem();
         for p in BODY_PARTS {
-            for candidate in [format!("{stem}_{p}"), format!("{class}_{gender}_{p}"), format!("{gender}_{p}")] {
+            for candidate in [format!("{stem}_{p}"), format!("{}_{gender}_{p}", self.part_class()), format!("{gender}_{p}")] {
                 if exists(&candidate) {
                     out.push((candidate, None));
                     break;
@@ -330,7 +366,9 @@ impl CharacterDesc {
             if covered {
                 continue;
             }
-            let base = format!("{class}_{kind}_00");
+            // EVIDENCE: outfits.json nightwalker_{male,female}_body_00 dress the
+            //   Night Walker in ranger_torso_00 and ranger_gloves_00.
+            let base = format!("{}_{kind}_00", if class == "niwalk" { "ranger" } else { class });
             let female = format!("{base}_female");
             if self.gender == 1 && exists(&female) {
                 out.push((female, None));
@@ -1173,7 +1211,7 @@ fn update_animation_sets(
         anim.set = Some(set.clone());
         anim.set_changed = anim.current.is_some();
         let profile = character.desc.look.as_ref().map(|l| l.sound_profile.clone()).unwrap_or_else(||
-            format!("{}_{}_body_00", character.desc.class_name(), character.desc.gender_name()));
+            format!("{}_{}_body_00", character.desc.part_class(), character.desc.gender_name()));
         commands.entity(player).insert(crate::audio::AnimationAudio::new(entity,
             &format!("characters/{}", character.desc.skeleton()), &profile,
             anim.clip_nodes.iter().flat_map(|(name, node)| std::iter::once(*node).chain(anim.twins.get(node).copied()).map(move |n| (n, name.clone()))).collect()));

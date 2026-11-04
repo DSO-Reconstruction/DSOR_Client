@@ -114,7 +114,58 @@ const LINE_WIDTH: usize = 36;
 /// The rotate buttons turn the character this fast while held (radians a second).
 const TURN_RATE: f32 = 2.0;
 
-const CLASS_EVENTS: [&str; 4] = ["Warrior", "Mage", "Ranger", "Dwarf"];
+const CLASS_EVENTS: [&str; 5] = ["Warrior", "Mage", "Ranger", "Dwarf", "Niwalk"];
+
+/// The class buttons' row (chargenwindow ClassGroup): the four authored ones
+/// span 42..964 reference pixels, 211 wide; five are spread over the same span.
+/// The Night Walker's (none authored: the original never finished the class)
+/// is the Warrior's button, emblem and background moved and renamed.
+/// UNVERIFIED: no original layout for five classes; the buttons now overlap by
+/// a few pixels of the next one's icon.
+const CLASS_ROW: (f32, f32, f32) = (42.0, 964.0, 211.0);
+
+/// A widget's x moved by `dx` reference pixels (its rectangle and its art).
+fn shifted(mut w: Widget, dx: f32) -> Widget {
+    w.rect[0] += dx; w.rect[2] += dx;
+    if let Some(a) = &mut w.art { for xy in a.pos.chunks_exact_mut(2) { xy[0] += dx; } }
+    w
+}
+
+/// The authored widgets of the creation screen with the class row laid out for
+/// every class, the Night Walker's button, emblem and background added.
+fn with_every_class(layout: &Layout) -> Vec<Widget> {
+    let (left, right, width) = CLASS_ROW;
+    let step = (right - width - left) / (CLASS_EVENTS.len() - 1) as f32;
+    let group = |w: &Widget| CLASS_EVENTS.iter().position(|c| w.id.contains(&format!("/ClassGroup/{c}")));
+    let lefts: Vec<Option<f32>> = CLASS_EVENTS.iter()
+        .map(|c| layout.widgets.iter().find(|w| w.id.ends_with(&format!("/ClassGroup/{c}"))).map(|w| w.rect[0])).collect();
+    let mut out = Vec::with_capacity(layout.widgets.len() + 40);
+    for w in &layout.widgets {
+        let moved = match group(w) {
+            Some(c) => match lefts[c] { Some(x) => shifted(w.clone(), left + step * c as f32 - x), None => w.clone() },
+            None => w.clone(),
+        };
+        out.push(moved);
+    }
+    let niwalk = CLASS_EVENTS.len() - 1;
+    if lefts[niwalk].is_none() {
+        let from = "Warrior";
+        for w in &layout.widgets {
+            let rename = |w: &Widget, a: &str, b: &str| { let mut w = w.clone(); w.id = w.id.replacen(a, b, 1); w };
+            if w.id.contains(&format!("/ClassGroup/{from}")) {
+                let mut w = rename(w, &format!("/ClassGroup/{from}"), "/ClassGroup/Niwalk");
+                if w.event == from { w.event = "Niwalk".into(); }
+                let dx = left + step * niwalk as f32 - lefts[0].unwrap_or(left);
+                out.push(shifted(w, dx));
+            } else if w.id.contains(&format!("/Emblem{from}")) {
+                out.push(rename(w, &format!("/Emblem{from}"), "/EmblemNiwalk"));
+            } else if w.id.contains(&format!("/Background{from}")) {
+                out.push(rename(w, &format!("/Background{from}"), "/BackgroundNiwalk"));
+            }
+        }
+    }
+    out
+}
 
 fn setup(mut commands: Commands, assets: Res<AssetServer>) {
     let load = |names: &[&str]| names.iter().map(|n| assets.load(format!("interface/{n}.ui.json"))).collect();
@@ -170,7 +221,7 @@ fn expanded(layout: &Layout) -> Vec<(Widget, Option<usize>, Gate)> {
 /// price tag of a premium package) and the character edit's SaveButton.
 fn expanded_creation(layout: &Layout) -> Vec<(Widget, Option<usize>, Gate)> {
     let mut result = Vec::new();
-    for w in &layout.widgets {
+    for w in &with_every_class(layout) {
         if ["/InstanceSelectionLabel/InstanceSelectionLabel", "/UnlockRequestButton", "/SaveButton", "/SelectedCharacterLevelClass",
             "/SelectedCharacterMap", "/Titel", "/PriceTag"].iter().any(|s| w.id.contains(s)) { continue; }
         let gate = if let Some(c) = CLASS_EVENTS.iter().position(|c| w.id.contains(&format!("/Emblem{c}")) || w.id.contains(&format!("/Background{c}"))) {

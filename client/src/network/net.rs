@@ -1057,6 +1057,8 @@ pub fn default_bar(class: u8) -> Vec<Option<String>> {
         0 => &["angrystrike", "mightyswing", "mightybash", "battlecry", "enragingleap", "seismicslam", "bloody360"],
         2 => &["markshot", "multishot", "stab", "explosiveshot", "jump", "stunshot", "whirlwind"],
         3 => &["SimpleShot", "HeavyShot", "Grenade", "TurretCombat", "HoverJump", "ShrapnelShot", "SteamConductor"],
+        // The Night Walker: the original's prototype skills (CharClass niwalk).
+        4 => &["zero_slicedice", "zero_bladecut_off", "move_shoulderdash", "move_flashbang", "sacrifice_cut", "trickery_gasbomb", "ultimate_windmill_off"],
         _ => &["magicmissile", "fireball", "frostnova", "iceball", "teleport", "lightningstrike", "frostwind"],
     };
     ids.iter().map(|s| Some((*s).to_owned())).collect()

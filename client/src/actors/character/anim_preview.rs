@@ -167,7 +167,7 @@ fn list(
     if !preview.clips.is_empty() { return; }
     let (Some(library), Ok(character)) = (library, local.single()) else { return };
     let (Some(gltf), Some(table)) = (library.skeletons.get(character.desc.skeleton()).and_then(|h| gltfs.get(h)), tables.get(&library.anims)) else { return };
-    let player_set = |set: &str| ["warrior", "mage", "ranger", "dwarf", "male", "female"].iter().any(|c| set.starts_with(c));
+    let player_set = |set: &str| ["warrior", "mage", "ranger", "dwarf", "niwalk", "male", "female"].iter().any(|c| set.starts_with(c));
     let used: std::collections::HashSet<&String> = table.0.iter().filter(|(set, _)| player_set(set)).flat_map(|(_, rows)| rows.values()).collect();
     let mut unused: Vec<String> = gltf.named_animations.keys().map(|k| k.to_string()).filter(|k| !used.contains(k)).collect();
     let mut rest: Vec<String> = gltf.named_animations.keys().map(|k| k.to_string()).filter(|k| used.contains(k)).collect();

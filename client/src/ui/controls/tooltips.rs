@@ -327,7 +327,7 @@ pub(in crate::ui) fn overlay(mut commands: Commands, windows: Query<(&Window2018
                 card.gap(6.0); card.rule();
                 if !s.target.is_empty() { card.text(&format!("Target: {}",s.target), WHITE); }
                 if let Some(def) = skill_tables.iter().find_map(|(_,t)| s.wire.and_then(|id| t.0.get(&id)).filter(|d| d.id == s.id)) {
-                    let resource = ["Rage", "Mana", "Concentration", "Steam"].get(s.class_id as usize).unwrap_or(&"Resource");
+                    let resource = ["Rage", "Mana", "Concentration", "Steam", "Blood"].get(s.class_id as usize).unwrap_or(&"Resource");
                     card.text(&format!("Base cost: <GreenStart>{:.0}%</> maximum {resource}",def.resource_cost*100.0), WHITE);
                     card.text(&format!("Essence Costs: {}",def.ammo_cost), WHITE);
                     card.text(&format!("Cool-down: {} s",def.cooldown), WHITE);
@@ -403,7 +403,7 @@ pub(in crate::ui) fn overlay(mut commands: Commands, windows: Query<(&Window2018
                         else { match gauge_of(&widget.id) {
                             Some(Gauge::Health | Gauge::HealthBar) => Some(format!("{:.0} / {:.0} Health Points", figures.health.0, figures.health.1)),
                             Some(Gauge::Resource | Gauge::ResourceBar) => Some(format!("{:.0} / {:.0} {}", figures.resource.0, figures.resource.1,
-                                ["Rage points", "Mana points", "concentration", "Steam"][wc.spells.class.min(3) as usize])),
+                                ["Rage points", "Mana points", "concentration", "Steam", "Blood"][wc.spells.class.min(4) as usize])),
                             _ => None } };
                         if let Some(tip) = tip {
                             content=Some((tip,String::new(),None));

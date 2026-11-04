@@ -46,7 +46,8 @@ fn hand_state(right: bool, left: bool, two: bool) -> i8 {
 /// release261's byte historically called `armament` in the remote codec is a
 /// player-kind enum (normally 5). Use the advertised animation set and hands.
 pub fn remote_armament(equipment: &[Equipment], animation_set: &str) -> i8 {
-    if animation_set.ends_with("2h_weapon") || animation_set.ends_with("large_weapon") { return 5; }
+    // The Night Walker's sets (niwalk_off...) hold its daggers in both hands.
+    if animation_set.ends_with("2h_weapon") || animation_set.ends_with("large_weapon") || animation_set.starts_with("niwalk") { return 5; }
     if animation_set.ends_with("1h_weapon_shield") { return 4; }
     if animation_set.ends_with("1h_weapon") || animation_set.ends_with("small_weapon") { return 3; }
     let right = equipment.iter().find(|e| e.slot == 5);

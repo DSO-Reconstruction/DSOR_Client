@@ -251,7 +251,7 @@ fn update_stats(
         if !output.0.is_empty() { output.0.clear(); }
         return;
     };
-    let class = player.desc.class.min(3);
+    let class = player.desc.class.min(4);
     let level = net.level.unwrap_or(1).max(1);
     let key = (class, level, net.inventory.revision, net.stat_revision);
     if *previous == Some(key) && !stats.is_changed() { return; }
@@ -279,9 +279,11 @@ impl Attr {
     }
 }
 
-const CLASSES: [&str; 4] = ["warrior", "mage", "ranger", "dwarf"];
-const CLASS_KEYS: [&str; 4] = ["Warrior", "Mage", "Ranger", "Dwarf"];
-const RESOURCE_KEYS: [&str; 4] = ["rage", "mana", "concentration", "mechanicResource"];
+const CLASSES: [&str; 5] = ["warrior", "mage", "ranger", "dwarf", "niwalk"];
+const CLASS_KEYS: [&str; 5] = ["Warrior", "Mage", "Ranger", "Dwarf", "Niwalk"];
+// niwalkResource: the client's own key (dro_client64); the language files have
+// no text for it: the Night Walker's resource is its blood.
+const RESOURCE_KEYS: [&str; 5] = ["rage", "mana", "concentration", "mechanicResource", "niwalkResource"];
 /// (widget, resistance index in PlayerRow.resist / the attribute name).
 const RESISTANCES: [(&str, &str, usize); 5] = [
     ("Fire", "FireResistance", 1),
@@ -336,14 +338,14 @@ fn compute(
     *next = 0.5;
     let Some(d) = stats.get(&data.0) else { return };
     let character = players.iter().next().or_else(|| demo.iter().next());
-    let class = character.map(|c| c.desc.class as usize).unwrap_or(1).min(3);
+    let class = character.map(|c| c.desc.class as usize).unwrap_or(1).min(4);
     let female = character.is_some_and(|c| c.desc.gender == 1);
     let level = net.as_ref().and_then(|n| n.level).unwrap_or(1).max(1);
     let cname = CLASSES[class];
     let Some(row) = d.levels.get(cname).and_then(|l| l.get(&level.to_string())) else { return };
     let Some(p) = d.player.get(cname) else { return };
     let curve = d.curves.get(&level.to_string()).cloned().unwrap_or_default();
-    let t = |k: &str| d.texts.get(k).cloned().unwrap_or_default();
+    let t = |k: &str| d.texts.get(k).cloned().unwrap_or_else(|| match k { "niwalkResource" => "Blood".into(), "niwalkResourceRegen" => "Blood regeneration".into(), _ => String::new() });
     let g = |k: &str| d.globals.get(k).copied().unwrap_or(0.8);
     let attr = |name: &str, base: Option<f32>, lower: Option<f32>| {
         let [init, lo, hi] = d.attrs.get(name).copied().unwrap_or([0.0, 0.0, 1.0e8]);
@@ -458,7 +460,8 @@ fn compute(
     row(&mut rows, t("attackspeedNew"), fmt(speed.value(), 3), String::new());
     row(&mut rows, t("criticalvalue"), s["CriticalHit"].clone(), s["CriticalHit_Percentage"].clone());
     row(&mut rows, t(RESOURCE_KEYS[class]), round(max_resource.value()).to_string(), String::new());
-    let regen = ["rageRegen", "manaRegen", "concentrationRegen", "mechanicResourceRegen"][class];
+    // niwalkResourceRegen: the client's own key (dro_client64); no text either.
+    let regen = ["rageRegen", "manaRegen", "concentrationRegen", "mechanicResourceRegen", "niwalkResourceRegen"][class];
     // _Template_Player: relative x the resource + absolute (the official
     // page: a level 10 mage's 12.00, AbsoluteSkillResourceRegeneration 12).
     let regen_value = calculated.value("ResourceRegeneration").unwrap_or(p.skill_resource_regeneration * max_resource.value() + p.absolute_skill_resource_regeneration);

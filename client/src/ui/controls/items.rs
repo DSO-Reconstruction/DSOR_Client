@@ -216,7 +216,7 @@ fn use_consumable(state: &InventoryState, catalog: &Catalog, id: u32) -> Option<
     Some(crate::gameplay::inventory::command(id, dsor_proto::commands::inventory::Inventory::USE, vec![]))
 }
 fn ingredient<'a>(catalog: &'a Catalog, w: &WindowControls, slot: usize) -> Option<&'a Ingredient> {
-    let class=["warrior","mage","ranger","dwarf"].get(w.spells.class as usize).copied().unwrap_or("mage");
+    let class=crate::actors::character::item_class(w.spells.class);
     catalog.ingredients.iter().find(|i| i.tab==TABS[w.ingredient.min(8)] && (i.rarity==w.rarity || i.rarity==0)
         && i.slot==slot && (i.class_name=="any" || i.class_name.is_empty() || i.class_name==class))
 }
@@ -358,7 +358,7 @@ fn above_level(item: &ItemInfo, level: u32) -> bool { item.durability > level + 
 /// its level reached, its class ours (or any).
 fn wearable(item:Option<&ItemInfo>, meta:Option<&Definition>, slot:i8, level:u32, class:u8)->bool {
     !item.is_some_and(|i|i.flag_0 || above_level(i, level)) && meta.is_some_and(|m|m.slots.contains(&slot) && m.required_level<=level
-        && (m.class_name.is_empty() || m.class_name=="any" || m.class_name==["warrior","mage","ranger","dwarf"][class.min(3) as usize]))
+        && (m.class_name.is_empty() || m.class_name=="any" || m.class_name==crate::actors::character::item_class(class)))
 }
 
 /// The equipment slots the dragged item may go to (bit n: slot n), worn or empty.
@@ -646,7 +646,7 @@ pub fn input(mut ui:ResMut<Interaction>,mut pointer:ResMut<Pointer>,mut windows:
                 else if double {
                     // A double click equips a piece from the bags, or takes an
                     // equipped one off into the first free bag cell.
-                    let class=["warrior","mage","ranger","dwarf"][c.spells.class.min(3) as usize];
+                    let class=crate::actors::character::item_class(c.spells.class);
                     if let Some(cmd)=equip_toggle(&net.inventory,catalog,id,net.level.unwrap_or(1),class) {
                         net.send(&cmd);ui.pending=Some((net.inventory.revision,now));
                     }

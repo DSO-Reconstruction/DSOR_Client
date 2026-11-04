@@ -14,7 +14,21 @@ from pathlib import Path
 
 # The wire's class ids (CharacterGenerationCommand, NewPlayer) and the class
 # names of the database's columns and rows.
-CLASSES = ['Warrior', 'Mage', 'Ranger', 'Dwarf']
+# Niwalk (4, the Night Walker) was left unfinished by the original: it has
+# _Template_PlayerCharacter rows and hair/beard columns, but no start
+# equipment and no texts; it borrows the warrior's outfit (NIWALK_STAND_IN).
+CLASSES = ['Warrior', 'Mage', 'Ranger', 'Dwarf', 'Niwalk']
+NIWALK_STAND_IN = 'warrior'
+# What the language files lack for the Night Walker (gui.window.chargen_*).
+NIWALK_TEXTS = {
+    'gui.window.chargen_charClass_niwalk': 'Night Walker',
+    'gui.window.chargen_charClass_niwalk.f': 'Night Walker',
+    'gui.window.chargen_chardesc_niwalk': (
+        'A killer of the night who fights with a dagger in each hand. The Night Walker '
+        'draws blood with every quick cut, then spends it on cruel tricks, sudden '
+        'leaps and wounds that cost a little of their own life.'),
+    'gui.window.chargen_charslogan_niwalk': 'Every cut feeds the next.',
+}
 GENDERS = ['Male', 'Female']
 
 
@@ -81,7 +95,7 @@ def creation_data(db, texts):
     classes = []
     for cls in CLASSES:
         key = cls.lower()
-        outfit = start.get(f'{key}_default_equipment')
+        outfit = start.get(f'{key}_default_equipment') or start.get(f'{NIWALK_STAND_IN}_default_equipment')
         armament = armaments.get(outfit['ArmamentState'], 0) if outfit else 0
         if armament in (1, 3) and outfit['OffHandEquipped']:
             armament += 1
@@ -95,6 +109,7 @@ def creation_data(db, texts):
                 idle=row['CharGenIdleSequence'] if row else '',
             ))
         classes.append(dict(items=split(outfit['CharGenItems']) if outfit else [], armament=armament, genders=genders))
+    texts = {**NIWALK_TEXTS, **texts}
     wanted = ('gui.window.chargen_', 'gui.window.charselection_', 'gui.payment.packages_premadePackageHeadline')
     return dict(name=[int(globals_['CharacterNameMinLength']), int(globals_['CharacterNameMaxLength'])],
                 most=int(globals_['MaxCharactersPerAccount']),
