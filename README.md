@@ -23,8 +23,9 @@ cargo build --locked --release -p dsor-client
 cargo run --locked --release -p dsor-client
 ```
 
-On Windows, `Play.cmd` builds the client (`tools/Build-Client.ps1`: a release
-build, which returns at once when nothing changed) and launches it. Signing in requires a running
+On Windows, `Play.cmd` builds the client (`tools/Build-Client.ps1`: the
+`fast` profile, about 20 s after a small change and at once when nothing
+changed) and launches it. Signing in requires a running
 account service (default: `http://127.0.0.1:8080`). The guide also covers
 [offline viewing](docs/getting-started.md#3-native-client),
 [browser builds](docs/getting-started.md#4-browser-client), and

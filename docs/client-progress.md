@@ -1870,3 +1870,44 @@ client** appear. Tests: stall timing, wording and buttons (3 new, 461 passed).
 A temporary build held the screen to capture each state: the status line, the
 note, then both buttons. A normal offline Kingshill load still finishes with no
 stall warning.
+
+## Faster client builds (2026-11-05)
+
+After a change or a new commit, `Play.cmd`'s release build spent 12–14 minutes
+on the client crate alone. Type checking and the rest of the front end take
+38 s of that (`-Z time-passes`). The remainder was LLVM optimising the crate as
+one codegen unit on a single thread, then thin LTO re-optimising every
+dependency with it.
+
+Client crate rebuilt on its own (dependencies already built), and the frame
+time in the Kingscity fixed view (`tools/profile_native_maps.py`, median p50
+of rounds 2–5; round 1 was slower for every build):
+
+| Build | Client crate | Frame p50 |
+|---|---|---|
+| release, 1 codegen unit (before) | 741–867 s | 4.73 ms |
+| release, 16 codegen units | 281 s | 4.78 ms |
+| release, 256 codegen units | 312 s | |
+| release, incremental, one-line edit | 171 s | |
+| `fast` profile, one-line edit | 24 s (14 s warm) | 5.09 ms |
+
+- **Release:** the client crate builds in 16 codegen units
+  (`[profile.release.package.dsor-client]`); its frame time is unchanged within
+  noise. Dependencies stay in one unit, so they were not rebuilt. Incremental
+  compilation does not help release builds, because thin LTO goes over every
+  dependency again each time.
+- **Play.cmd:** `tools/Build-Client.ps1` builds the `fast` profile and
+  `Play.cmd` starts `target/fast/dsor-client.exe`. Frames are about 7% slower
+  than release (~195 against ~210 FPS in that view). Releases
+  (`tools/release/package.*`), `profile_native_maps.py` and the level editor
+  still use `target/release`, so it and Play.cmd no longer force each other's
+  client rebuild. `[profile.fast]` inherits release's package overrides, so it
+  sets the client back to 256 units (with 16, every incremental rebuild redid
+  bigger units).
+
+Validation: `cargo build --release -p dsor-client` after the change took
+4 m 22 s (rustc ran with `-C codegen-units=16 -C lto=thin`); that executable
+ran the Kingscity view at p50 4.65–4.75 ms. `tools/Build-Client.ps1` took 22 s
+after a touched source file and 2.6 s with nothing changed; its executable
+loads Kingscity and renders. Every run logged the missing
+`skills/emotes.json`, which predates this change.

@@ -206,12 +206,14 @@ until the compatibility fix is reviewed.
 ### Launching the client
 
 Running `dsor-client.exe` without arguments opens its built-in login screen.
-On Windows, `Play.cmd` first runs `tools/Build-Client.ps1` (the same release
-build; cargo rebuilds only what changed, so an up-to-date client starts at
-once; after a code change or a new commit the client crate compiles as one
-unit with link-time optimisation, about ten minutes with the progress bar
-resting on `dsor-client(bin)`), then opens the
-executable. A client still running is renamed aside so the new build can
+On Windows, `Play.cmd` first runs `tools/Build-Client.ps1`, then opens
+`target/fast/dsor-client.exe`. That script builds the `fast` profile: release
+optimisations without cross-crate link-time optimisation, compiled
+incrementally. Cargo rebuilds only what changed, so an up-to-date client starts
+at once; a small change takes about 20 seconds, many new commits a few minutes
+(the progress bar rests on `dsor-client(bin)` meanwhile). Its frames are about
+7% slower than the release build's (`cargo build --release`, 4–5 minutes after
+a change), which releases and frame-time measurements use. A client still running is renamed aside so the new build can
 replace it. Sign in or create an account,
 then choose a character and press **Play Now** to enter the game in the same window. The client uses the
 account-service protocol from `dso_custom_client` and passes the returned

@@ -19,15 +19,27 @@ opt-level = 3
 lto = "thin"
 codegen-units = 1
 
+# The client crate in 16 units: in one, LLVM optimised it on a single thread
+# before thin LTO, 12-14 min after every change; in 16 it takes under 5, with
+# the same frame times in Kingscity (2026-11-05, docs/client-progress.md).
+[profile.release.package.dsor-client]
+codegen-units = 16
+
 # Bevy compiles slowly unoptimised and runs badly in debug; dependencies get
 # optimised even in dev builds, our own crates stay quick to rebuild.
-# Quick native builds for testing: release optimisations without LTO, in
-# parallel units, incremental (target/fast/dsor-client).
+# Quick native builds: release optimisations without cross-crate LTO, in
+# parallel units, incremental (target/fast/dsor-client). Play.cmd builds this
+# one: about 20 s after a small change, frames about 7% slower than release.
 [profile.fast]
 inherits = "release"
 lto = false
 codegen-units = 256
 incremental = true
+
+# Package overrides are inherited too: keep the client in small units, which
+# an incremental rebuild reuses.
+[profile.fast.package.dsor-client]
+codegen-units = 256
 
 [profile.dev]
 opt-level = 1
