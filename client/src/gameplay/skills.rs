@@ -648,7 +648,7 @@ impl Plugin for SkillsPlugin {
             .add_systems(Startup, load)
             .add_systems(
                 Update,
-                (index_skills, cast_input.run_if(crate::screens::loading::gameplay_ready), remote_skills, status_visuals, trap_visuals, hold_for_status, test_cast, test_monster_cast, run_pending, carry_casters, fly_bullets, play_sequences, start_fx_animations, fx_particle_speed, retire_effects, shake_camera, test_shot, test_view, debug_fx_positions)
+                (index_skills, cast_input.run_if(crate::screens::loading::gameplay_ready), remote_skills, status_visuals, rank_markers, trap_visuals, hold_for_status, test_cast, test_monster_cast, run_pending, carry_casters, fly_bullets, play_sequences, start_fx_animations, fx_particle_speed, retire_effects, shake_camera, test_shot, test_view, debug_fx_positions)
                     .chain()
                     .after(crate::network::net::NetSystems).after(crate::actors::npc::NpcVisualSystems)
                     .before(crate::actors::character::drive_animations),
@@ -2854,6 +2854,62 @@ struct StatusVisual {
 /// _Template_StatusEffect, which the skills' own sequences do not contain --
 /// stuns, burns, ice cubes, auras, a banner left on the ground.
 #[allow(clippy::too_many_arguments)]
+/// A ranked monster's marker under it, as long as it lives: the lit ring the
+/// original draws under guardians, champions, leaders and sentinels.
+#[derive(Component)]
+pub(crate) struct RankMarker(Entity);
+
+/// _Template_MonsterRanks.RankMarker ("statuseffect/status_ranked_monster" for
+/// these ranks, empty for the rest) as its looping sequences
+/// status_ranked_monster_t<tier>_<s|m|l> on fx_root (s and m draw
+/// effects/status_enchantment_global_rank_s, l rank_m).
+/// EVIDENCE: the user's recording 20261105-1550-37: the original's Guardian
+///   (0:42) and Arisen Hero Rhenkis (0:56) stand on a lit ring; ours on none.
+/// UNVERIFIED: which tier a rank takes (all tiers draw the same models) and
+///   the size cut (a navigation footprint over 1.2 m takes l).
+fn rank_marker_sequence(rank: &str, footprint: Option<f32>) -> Option<String> {
+    let tier = match rank {
+        "Rank_guardian" => 1,
+        "Rank_champion" | "Rank_treasure_mob_champion" => 2,
+        "Rank_leader" | "Rank_treasure_mob_leader" | "Rank_sentinel" | "Rank_treasure_mob" | "Rank_treasure_mob_sentinel" => 3,
+        _ => return None,
+    };
+    let size = match footprint.unwrap_or(0.5) { f if f <= 0.6 => "s", f if f <= 1.2 => "m", _ => "l" };
+    Some(format!("status_ranked_monster_t{tier}_{size}"))
+}
+
+/// Puts each living ranked monster's marker on it, takes it off when it dies.
+/// DSOR_TEST_RANK=<rank>: every monster counts as that rank (offline checks).
+fn rank_markers(
+    mut commands: Commands,
+    net: Option<NonSend<Net>>,
+    data: Res<SkillData>,
+    seqs: Res<Assets<SequenceTable>>,
+    monsters: Query<(Entity, &crate::monsters::Monster, &CharacterAnim, Option<&RankMarker>)>,
+    mut players: Query<&mut SequencePlayer>,
+    test: Local<Option<Option<String>>>,
+) {
+    let mut test = test;
+    let test = test.get_or_insert_with(|| std::env::var("DSOR_TEST_RANK").ok()).clone();
+    let Some(sequences) = seqs.get(&data.sequences) else { return };
+    for (e, m, anim, marker) in &monsters {
+        let alive = m.is_alive(anim);
+        match marker {
+            Some(RankMarker(player)) if !alive => {
+                if let Ok(mut p) = players.get_mut(*player) { p.stop = true; }
+                commands.entity(e).remove::<RankMarker>();
+            }
+            None if alive => {
+                let rank = test.clone().or_else(|| net.as_ref().and_then(|n| n.monster_ranks.get(&m.actor).cloned()));
+                let Some(seq) = rank.and_then(|r| rank_marker_sequence(&r, m.footprint)).and_then(|n| sequences.0.get(&n)) else { continue };
+                let player = play_with(&mut commands, seq.clone(), Some(e), e, true, true);
+                commands.entity(e).insert(RankMarker(player));
+            }
+            _ => {}
+        }
+    }
+}
+
 fn status_visuals(
     mut commands: Commands,
     time: Res<Time>,
