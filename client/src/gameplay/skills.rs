@@ -1097,7 +1097,7 @@ fn cast_input(
     time: Res<Time<Real>>,
     mut players: Query<(Entity, &mut Transform, &mut LocalPlayer, &Character)>,
     mut cooldowns: ResMut<SkillCooldowns>,
-    (hovered, monsters, mut debug_monsters, ui, mut ui_skills, settings, stats, resource_max): (
+    (hovered, monsters, mut debug_monsters, ui, mut ui_skills, settings, stats, resource_max, cooldown_bonuses): (
         Res<crate::actors::monsters::Hovered>,
         Query<(&GlobalTransform, &crate::actors::monsters::Monster, &CharacterAnim)>,
         ResMut<crate::actors::monsters::DebugMonsters>,
@@ -1106,6 +1106,7 @@ fn cast_input(
         Res<crate::ui::Settings>,
         Res<crate::gameplay::stats::CharacterStats>,
         Res<crate::gameplay::stats::ResourceMax>,
+        Res<crate::gameplay::stats::CooldownBonuses>,
     ),
     // queued: a target skill aimed at a monster out of reach, (slot, monster),
     // cast once the walk brings it in reach. next_cast: when the last cast lets
@@ -1310,7 +1311,9 @@ fn cast_input(
         _ => ClientCommand::Skill(combat::Skill { base, server: None }),
     };
     net.send(&command);
-    cooldowns.0.insert(key, (now, now + skill.cooldown as f64));
+    // With the equipment's cooldown changes (sets: "- 20% cooldown time for
+    // Frozen Sphere"), as the server times it.
+    cooldowns.0.insert(key, (now, now + cooldown_bonuses.seconds(&skill.id, skill.cooldown)));
     if let Some(r) = net.resource.as_mut() {
         *r -= cost;
     }

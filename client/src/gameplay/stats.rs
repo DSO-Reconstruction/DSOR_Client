@@ -45,6 +45,20 @@ pub struct CharacterStats(pub HashMap<String, f64>);
 /// CharacterStats. The Skills & Talents window shows them (a green "7/17").
 #[derive(Resource, Default, Debug, PartialEq)]
 pub struct TalentBonuses(pub HashMap<String, u32>);
+
+/// The cooldown changes the equipment makes, by skill id in lower case:
+/// (relative, absolute seconds) (calculation::cooldown_bonuses); recomputed
+/// with CharacterStats.
+#[derive(Resource, Default, Debug, PartialEq)]
+pub struct CooldownBonuses(pub HashMap<String, (f64, f64)>);
+impl CooldownBonuses {
+    /// A skill's cooldown with them, as the server times it:
+    /// base x (1 + relative) + absolute, never below 0.
+    pub fn seconds(&self, skill: &str, base: f32) -> f64 {
+        let (rel, abs) = self.0.get(&skill.to_lowercase()).copied().unwrap_or((0.0, 0.0));
+        (base as f64 * (1.0 + rel).max(0.0) + abs).max(0.0)
+    }
+}
 impl CharacterStats {
     pub fn value(&self, key: &str) -> Option<f32> { self.0.get(key).map(|v| *v as f32) }
     pub fn animation_speed(&self) -> f32 {
@@ -229,6 +243,7 @@ impl Plugin for StatsPlugin {
             .init_resource::<SheetRows>()
             .init_resource::<CharacterStats>()
             .init_resource::<TalentBonuses>()
+            .init_resource::<CooldownBonuses>()
             .add_systems(Startup, |mut commands: Commands, assets: Res<AssetServer>| {
                 commands.insert_resource(Data(assets.load("characters/stats.json")));
             })
@@ -244,6 +259,7 @@ fn update_stats(
     mut output: ResMut<CharacterStats>,
     mut previous: Local<Option<(u8, u32, u64, u64)>>,
     mut bonuses: ResMut<TalentBonuses>,
+    mut cooldowns: ResMut<CooldownBonuses>,
 ) {
     let _profile = crate::diagnostics::hud::FrameSpan::new("stats::update_stats");
     let (Some(d), Some(net), Some(player)) = (stats.get(&data.0), net, players.iter().next()) else {
@@ -261,6 +277,8 @@ fn update_stats(
     output.0 = calculation::calculate(d, CLASSES[class as usize], level, &net.inventory, effects);
     let talents = calculation::talent_bonuses(d, &net.inventory);
     if bonuses.0 != talents { bonuses.0 = talents; }
+    let changed = calculation::cooldown_bonuses(d, &net.inventory);
+    if cooldowns.0 != changed { cooldowns.0 = changed; }
 }
 
 /// One actor attribute.

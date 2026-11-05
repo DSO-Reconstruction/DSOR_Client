@@ -116,6 +116,7 @@ fn casting_app(class: u8) -> (App, Entity) {
         .init_resource::<crate::gameplay::skills::SkillCooldowns>()
         // Costs are a fraction of this maximum (default 100): 0.1 below is 10.
         .init_resource::<crate::gameplay::stats::ResourceMax>()
+        .init_resource::<crate::gameplay::stats::CooldownBonuses>()
         .add_systems(Update, cast_input);
     crate::net::start_offline(app.world_mut(), class, 0);
     let skill: SkillDef = serde_json::from_value(serde_json::json!({

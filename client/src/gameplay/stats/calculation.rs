@@ -208,6 +208,44 @@ pub fn talent_bonuses(d: &StatsData, inventory: &InventoryState) -> HashMap<Stri
     out
 }
 
+/// The cooldown changes the equipped items make (CoolDown: amount, relative or
+/// absolute, skill ids): their own and their sockets' modifiers and the sets'
+/// reached thresholds, summed per skill id in lower case as (relative,
+/// absolute seconds).
+/// EVIDENCE: DSOR_Server local_combat_state _modified_player_skill_geometry:
+///   cooldown = base x (1 + relative) + absolute, both buckets summed; the
+///   item-set tiers are among its sources (_active_skill_modifier_sources).
+///   Without this the client kept the full cooldown and never cast as early
+///   as the server allowed ("- 20% cooldown time for Frozen Sphere" did nothing).
+pub fn cooldown_bonuses(d: &StatsData, inventory: &InventoryState) -> HashMap<String, (f64, f64)> {
+    let mut out: HashMap<String, (f64, f64)> = HashMap::new();
+    let Some(db) = &d.combat else { return out };
+    let mut equipped = HashSet::new();
+    let mut add = |kind: &str, args: &[String]| {
+        if kind != "cooldown" { return; }
+        let Some(amount) = args.first().and_then(|a| a.parse::<f64>().ok()) else { return };
+        let relative = args.get(1).is_some_and(|a| a == "relative");
+        for skill in args.iter().skip(2) {
+            let e = out.entry(skill.clone()).or_insert((0.0, 0.0));
+            if relative { e.0 += amount; } else { e.1 += amount; }
+        }
+    };
+    for (id, slots) in &inventory.allocation.slots {
+        if slots.contains(&34) || slots.contains(&36) { continue; }
+        let Some(item) = inventory.items.get(id) else { continue };
+        if !db.items.contains_key(&item.template) { continue; }
+        equipped.insert(item.template.as_str());
+        for i in db.item(item) { add(&i.kind, &i.args); }
+    }
+    for set in &db.sets {
+        let count = set.parts.iter().filter(|part| equipped.contains(part.as_str())).count();
+        for (_, program) in set.tiers.iter().filter(|(n, _)| count >= *n) {
+            for (kind, args) in program { add(kind, args); }
+        }
+    }
+    out
+}
+
 pub fn calculate(d: &StatsData, class: &str, level: u32, inventory: &InventoryState,
     effects: impl IntoIterator<Item = StatusEffectElement>) -> HashMap<String, f64> {
     let Some(db) = &d.combat else { return HashMap::new(); };

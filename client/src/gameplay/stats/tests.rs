@@ -85,3 +85,27 @@ fn equipment_adds_talent_ranks() {
     assert_eq!(bonuses.get("dwarf_turretcoveringfire_talent"), Some(&7));
     assert_eq!(bonuses.get("dwarf_talent_fire_master"), None, "the set's third part is missing");
 }
+
+#[test]
+fn a_set_shortens_its_skill_cooldown_as_the_server_does() {
+    // set_mage_dragan_event_lvl45 at 2 parts: CoolDown:-0.20,relative,frozenorb.
+    let mut fixture: serde_json::Value = serde_json::from_str(include_str!("../../../tests/fixtures/character_stats.json")).unwrap();
+    let item = |modifiers: serde_json::Value| serde_json::json!({"damage": [0.0, 0.0], "scaled": false, "modifiers": modifiers, "base": [], "enchantments": []});
+    let combat = &mut fixture["data"]["combat"];
+    for part in ["set_a", "set_b", "set_c"] { combat["items"][part] = item(serde_json::json!([])); }
+    combat["sets"].as_array_mut().unwrap().push(serde_json::json!({"parts": ["set_a", "set_b", "set_c"],
+        "tiers": [[2, [["cooldown", ["-0.20", "relative", "frozenorb"]]]]]}));
+    let data: StatsData = serde_json::from_value(fixture["data"].clone()).unwrap();
+    let mut inventory = crate::gameplay::inventory::InventoryState::default();
+    let wear = |inventory: &mut crate::gameplay::inventory::InventoryState, id: u32, template: &str| {
+        inventory.items.insert(id, ItemInfo { id, template: template.into(), durability: 1, ..default() });
+        inventory.allocation.slots.push((id, vec![id as i8]));
+    };
+    wear(&mut inventory, 1, "set_a");
+    let one = CooldownBonuses(calculation::cooldown_bonuses(&data, &inventory));
+    assert_eq!(one.seconds("FrozenOrb", 10.0), 10.0, "one part reaches no tier");
+    wear(&mut inventory, 2, "set_b");
+    let two = CooldownBonuses(calculation::cooldown_bonuses(&data, &inventory));
+    assert!((two.seconds("FrozenOrb", 10.0) - 8.0).abs() < 1e-9);
+    assert_eq!(two.seconds("fireball", 3.0), 3.0, "other skills keep theirs");
+}
