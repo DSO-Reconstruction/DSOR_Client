@@ -2159,7 +2159,17 @@ pub(crate) fn on_command(net: &mut Net, command: ServerCommand, actor: Option<u3
             });
         }
         ServerCommand::NewItem(c) => net.item_drops.push(c.item),
-        ServerCommand::DiscardItem(c) => net.items_gone.push(c.item),
+        ServerCommand::DiscardItem(c) => {
+            // Dropped and taken in the same frame (auto-picked as it fell at
+            // the player's feet): never shown. crate::drops takes the gone
+            // ones before placing new ones, so a drop still waiting here
+            // would otherwise outlive its own removal.
+            // FAILURE (2026-11-05): an Ancient Wisdom (money_gc) auto-picked
+            //   0.03 s after it dropped stayed on the ground; clicks on it
+            //   were refused ("unknown world item").
+            net.item_drops.retain(|i| i.id != c.item);
+            net.items_gone.push(c.item);
+        }
         ServerCommand::DiscardMonster(_) => {
             if let Some(a) = actor {
                 net.discard_actor(a);

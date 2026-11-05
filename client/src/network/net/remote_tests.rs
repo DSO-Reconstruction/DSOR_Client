@@ -328,3 +328,19 @@ fn a_timing_only_status_element_renews_the_effect() {
     assert!(kept.tail.is_some(), "the mark keeps its details");
     assert!(net.status_events.iter().all(|e| !e.removed) && net.status_events.iter().any(|e| e.refresh));
 }
+
+/// An item dropped and auto-picked in the same frame (the server answers the
+/// kill's NewItem with its DiscardItem at once) is never placed; one already
+/// placed is taken away as before.
+#[test]
+fn an_item_taken_in_the_frame_it_drops_is_never_placed() {
+    use dsor_proto::commands::actors::{DiscardItem, NewItem};
+    let mut app = app();
+    let mut net = app.world_mut().non_send_mut::<Net>();
+    let item = |id| ServerCommand::NewItem(NewItem { item: dsor_proto::commands::inventory::ItemInfo { id, ..default() } });
+    on_command(&mut net, item(15805728), None);
+    on_command(&mut net, item(15805729), None);
+    on_command(&mut net, ServerCommand::DiscardItem(DiscardItem { item: 15805728, notify: true }), None);
+    assert_eq!(net.item_drops.iter().map(|i| i.id).collect::<Vec<_>>(), [15805729], "the other drop still lands");
+    assert_eq!(net.items_gone, [15805728]);
+}
