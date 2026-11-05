@@ -122,7 +122,10 @@ def set_text(key, args, table):
             return names.pop(0) if names else ''
         return numbers.pop(0) if numbers else ''
     text = re.sub(r'\{\d+:[^}]*\}', fill, text)
-    return re.sub(r'<[^>]*>', '', text).replace('\n', ' ').strip()
+    # Its line breaks are written "\n" in the language files (Forgotten Glory's
+    # list of skills): kept as real ones, the card writes each part on a line.
+    text = re.sub(r'<[^>]*>', '', text).replace('\\n', '\n')
+    return '\n'.join(part.strip() for part in text.split('\n') if part.strip())
 
 
 def item_sets(db, local, table):

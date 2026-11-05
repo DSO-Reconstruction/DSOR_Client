@@ -270,6 +270,15 @@ fn set_section(card: &mut Card, catalog: &Catalog, set: &crate::ui::controls::it
     card.hint("Bonus for pieces of equipment belonging to the same set:");
     for (n, lines) in &set.tiers {
         for line in lines {
+            // A written-out text with line breaks (a list of skills): one card
+            // line each, the first after "(n):".
+            if line.fixed.contains('\n') {
+                for (i, part) in line.fixed.split('\n').enumerate() {
+                    let text = if i == 0 { format!("({n}): {part}") } else { part.to_owned() };
+                    if count >= *n { card.text(&text, BLUE); } else { card.hint(&text); }
+                }
+                continue;
+            }
             let text = if !line.fixed.is_empty() { format!("({n}): {}", line.fixed) }
             else if line.text.is_empty() { format!("({n}): special effect") } else {
                 let factor = if line.factor.is_empty() { 1.0 } else {
