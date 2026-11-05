@@ -38,17 +38,16 @@ const ROWS: usize = 3;
 pub(in crate::ui) const TARGET: usize = 2;
 /// Server ticks per second.
 const TICKS: u32 = 25;
-/// The stack count: white, outlined (the slot's Icon text: TextEffect 1, size
-/// 2), its digits about 0.43 of the icon high, centred a little right of the
-/// middle and low in the icon.
-/// EVIDENCE: the original's Fanaticism "2"/"4"/"5" (the user's recording
-///   20261104-2354-43 and shots): digit centre at 0.61 of the icon's width, its
-///   foot at 0.9 of its height, 0.43 of it high.
-/// FAILURE (2026-11-05): Arial 9 at the bottom-right corner: small, "10" ran
-///   over the frame.
-const COUNT_SIZE: f32 = 12.0;
+/// The stack count: the slot's own Icon text (size 9, white, outlined:
+/// TextEffect 1, size 2), its digit centred at 0.69 of the icon's width, its
+/// foot low in the icon.
+/// EVIDENCE: the original's Fanaticism "5" (the user's shot 2026-11-05): digit
+///   0.40 of the icon high, centred at 0.69 of its width, its foot at 0.86.
+/// FAILURE (2026-11-05): first in the bottom-right corner ("10" ran over the
+///   frame), then size 12: "the writing is too big" (0.53 of the icon high).
+const COUNT_SIZE: f32 = 9.0;
 const COUNT_OUTLINE: f32 = 2.0;
-const COUNT_X: f32 = 0.61;
+const COUNT_X: f32 = 0.69;
 const COUNT_FOOT: f32 = 0.93;
 /// A timed buff's lit sector over the time it has left: from 12 o'clock,
 /// clockwise, shrinking as it runs (the cooldown sweep's shape), a flat green
