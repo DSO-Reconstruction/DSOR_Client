@@ -692,7 +692,9 @@ pub(in crate::ui) fn card(point: Vec2, offset_of: impl Fn(usize) -> Option<Vec2>
     let mut hints = Vec::new();
     // As the skill cards say it (tooltips::overlay).
     if lines.iter().any(|(l, _)| l.contains('—')) { hints.push("—: value unavailable".to_owned()); }
-    let title = if shown.stacks > 1 { format!("<i>{}  ({}x)</>", def.name, shown.stacks) } else { format!("<i>{}</>", def.name) };
+    // One space: the card draws its spaces wide already (Card::set_word_space).
+    // FAILURE (2026-11-05): two spaces made twice the original's gap.
+    let title = if shown.stacks > 1 { format!("<i>{} ({}x)</>", def.name, shown.stacks) } else { format!("<i>{}</>", def.name) };
     super::items::fit_small(&mut card, std::iter::once(title.as_str()).chain(lines.iter().map(|(t, _)| t.as_str()))
         .chain(duration.iter().map(String::as_str)).chain(hints.iter().map(String::as_str)));
     card.text(&title, WHITE);
