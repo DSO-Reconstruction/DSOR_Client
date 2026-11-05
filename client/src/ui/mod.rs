@@ -1039,7 +1039,7 @@ fn spawn_windows(
         } else if layout.window == controls::settings::WINDOW {
             prepared = controls::settings::prepare(layout); &prepared
         } else if layout.window == "bottombar" {
-            prepared = class_resource_gauge(controls::hotbar::prepare(layout), class); &prepared
+            prepared = controls::effects::prepare_times(class_resource_gauge(controls::hotbar::prepare(layout), class)); &prepared
         } else if layout.window == HOVER_WINDOW {
             prepared = controls::effects::prepare_target(layout); &prepared
         } else if layout.window == controls::items::DESTROY_DIALOG {

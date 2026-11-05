@@ -252,6 +252,24 @@ pub(in crate::ui) fn target_part(id: &str) -> bool {
     id.strip_prefix(TARGET_ROOT).is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
 }
 
+/// The time under an icon: regular Tahoma 8, its number and unit set apart.
+/// EVIDENCE: the original's "5 s" (the user's shot 2026-11-05), against the
+///   same icon size: digit 11 px wide, 19 high, 17 px to the "s", thin.
+/// FAILURE (2026-11-05): the layout's bold 8.5 read "4 s" 14 px wide, 24 high,
+///   10 px apart ("bolder and tighter").
+const TIME_SIZE: f32 = 8.0;
+
+/// The bottom bar's time labels (DurN) as the original draws them.
+pub(in crate::ui) fn prepare_times(mut layout: Layout) -> Layout {
+    for w in layout.widgets.iter_mut().filter(|w| time_label(&w.id).is_some()) {
+        if let Some(text) = w.text.as_mut() { text.bold = false; text.size = TIME_SIZE; }
+    }
+    layout
+}
+
+/// A time label's text: the unit set apart from its number ("5  s").
+fn spaced(text: String) -> String { text.replacen(' ', "  ", 1) }
+
 /// The hovered monster's row under its panel: SLOTS slots and their time labels
 /// (styled as the bottom bar's DurN), centred on the health bar, below the
 /// panel's bottom plate (gothic_panel/LabelBottom).
@@ -270,8 +288,8 @@ pub(in crate::ui) fn prepare_target(layout: &Layout) -> Layout {
     for n in 0..SLOTS {
         let l = left + n as f32 * (TARGET_SIZE + TARGET_GAP);
         out.widgets.push(widget(format!("{TARGET_ROOT}/Slot{}", n + 1), "Slot", [l, top, l + TARGET_SIZE, top + TARGET_SIZE], None));
-        let label = Label { text: "Text".into(), key: "Text".into(), size: 8.5, color: [0.9, 0.78, 0.54, 1.0], align: [1, 1],
-            bold: true, word_break: false, outline: vec![2.0, 0.0, 0.0, 0.0, 1.0] };
+        let label = Label { text: "Text".into(), key: "Text".into(), size: TIME_SIZE, color: [0.9, 0.78, 0.54, 1.0], align: [1, 1],
+            bold: false, word_break: false, outline: vec![2.0, 0.0, 0.0, 0.0, 1.0] };
         let y = top + TARGET_SIZE + 1.0;
         out.widgets.push(widget(format!("{TARGET_ROOT}/Dur{}", n + 1), "TextLabel", [l - 2.0, y, l + TARGET_SIZE + 2.0, y + 8.0], Some(label)));
     }
@@ -384,7 +402,7 @@ fn labels(slots: &[[Option<Shown>; SLOTS]; ROWS], now: u32, units: &[String; 4])
             // Over: the server's removal follows.
             if left <= 0 { continue; }
             let (text, lasts) = remaining(left as u32, units);
-            out[row][slot] = text;
+            out[row][slot] = spaced(text);
             let change = now.wrapping_add(lasts);
             next = Some(next.filter(|n| !reached(*n, change)).unwrap_or(change));
         }
@@ -879,7 +897,7 @@ mod tests {
         slots[1][2] = Some(Shown { index: 11, stacks: 3, end: 1000 + 25 * 5 + 10, duration: 0 });
         slots[TARGET][0] = Some(Shown { index: 11, stacks: 2, end: 1000 + 25 * 3 + 4, duration: 0 });
         let (times, next) = labels(&slots, 1000, &units);
-        assert_eq!((times[0][0].as_str(), times[0][1].as_str(), times[1][2].as_str(), times[TARGET][0].as_str()), ("1 m", "", "6 s", "4 s"));
+        assert_eq!((times[0][0].as_str(), times[0][1].as_str(), times[1][2].as_str(), times[TARGET][0].as_str()), ("1  m", "", "6  s", "4  s"));
         assert_eq!(next, Some(1004), "the monster's frost label changes first, 4 ticks on");
         assert_eq!(labels(&slots, 1000 + 25 * 200, &units).1, None, "all over: nothing until the server removes them");
     }
