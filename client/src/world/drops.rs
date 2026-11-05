@@ -49,7 +49,9 @@ const RARITY_TEXT: [Color; 8] = [
     Color::srgb(1.0, 0.09, 1.0),
     Color::srgb(1.0, 0.423, 0.0),
     Color::srgb(1.0, 0.859, 0.067),
-    Color::srgb(1.0, 0.859, 0.067),
+    // Set: turquoise, measured on the original's Set item card (the user's
+    // recording 20261105-1550-37 at 3:48); the 2018 client had no Set rarity.
+    Color::srgb(0.098, 0.745, 0.843),
     Color::srgb(1.0, 0.859, 0.067),
 ];
 

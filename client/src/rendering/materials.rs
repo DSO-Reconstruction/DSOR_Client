@@ -202,7 +202,7 @@ pub struct FacesViewerUpright;
 
 /// After the animation pose: each sprite node turns to look at the camera (its
 /// translation stays the animation's, its depth mirrored); an upright one
-/// takes only the camera's heading.
+/// takes only the camera's heading (mirrored the same).
 /// A full sprite faces the camera's position, not its rotation: what its
 /// children hang along its depth then stays on the line to the camera.
 /// EVIDENCE: the drop glows (dropitems/glow_*) hang their plane about 0.4 m
@@ -243,9 +243,11 @@ fn face_viewer(
         //   tools/embed_animators.py, which draws them from both sides).
         // UNVERIFIED: that the original's sprite matrix is this mirror (likely
         //   its left-handed view basis taken as is).
-        if !upright {
-            tf.scale.z = -tf.scale.z.abs();
-        }
+        // An upright one too: dropitems/glow_set (its sprite upright, n3 HCRH)
+        //   hangs a 4 m plane tilted 53 deg under it; unmirrored it stood edge-on,
+        //   a thin turquoise streak (the user's recording 20261105-1550-37, 3:06:
+        //   a Set chestplate with no glow); mirrored it faces the camera.
+        tf.scale.z = -tf.scale.z.abs();
     }
 }
 

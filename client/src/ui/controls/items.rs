@@ -26,6 +26,8 @@ pub struct Definition {
     #[serde(default)] pub status_values: Vec<f32>,
     #[serde(default)] pub unique_values: Vec<String>,
     #[serde(default)] pub unique_effects: Vec<String>,
+    /// The item set it belongs to (_Template_ItemSet), if any.
+    #[serde(default)] pub set: String,
 }
 /// A rolled appearance's icon and icon configuration (_Template_ItemAppearance).
 #[derive(Deserialize)]
@@ -57,7 +59,19 @@ pub struct Catalog { pub items: HashMap<String, Definition>, pub ingredients: Ve
     /// Such a reward's hover card: its title and lines (tools/inventory_catalog.py
     /// reward_cards).
     #[serde(default)] pub reward_cards: HashMap<String, RewardCard>,
-    #[serde(default)] pub variables: HashMap<String, f32> }
+    #[serde(default)] pub variables: HashMap<String, f32>,
+    /// Item sets (tools/inventory_catalog.py item_sets): name, pieces, bonuses
+    /// by pieces worn; and the level factors (_Template_Progressions, level 1
+    /// first) their LevelModifier bonuses scale by.
+    #[serde(default)] pub sets: HashMap<String, ItemSet>,
+    #[serde(default)] pub set_levels: HashMap<String, Vec<f32>> }
+#[derive(Deserialize, Clone, Debug, Default, PartialEq)]
+pub struct ItemSet { #[serde(default)] pub name: String, #[serde(default)] pub parts: Vec<String>,
+    #[serde(default)] pub tiers: Vec<(usize, Vec<SetLine>)> }
+/// One set bonus: its text and base value (empty text: a special effect).
+#[derive(Deserialize, Clone, Debug, Default, PartialEq)]
+pub struct SetLine { #[serde(default)] pub text: String, #[serde(default)] pub value: f32,
+    #[serde(default)] pub relative: bool, #[serde(default)] pub factor: String }
 #[derive(Deserialize, Clone, Debug, Default, PartialEq)]
 pub struct RewardCard { #[serde(default)] pub title: String, #[serde(default)] pub lines: Vec<String> }
 
@@ -887,6 +901,7 @@ pub fn overlay(mut commands:Commands,ui:Res<Interaction>,windows:Query<(&Window2
     (mut meshes,mut materials):(ResMut<Assets<Mesh>>,ResMut<Assets<UiMaterial>>),
     mut last:Local<Option<(String,u64,bool,bool,u32,bool)>>, settings:Res<settings::Settings>,keys:Res<ButtonInput<KeyCode>>,pointer:Res<Pointer>) {
     let catalog=catalogs.get(&data.catalog);
+    if let Some(n)=&net { preview::note_worn(&n.inventory); }
     let point=primary.single().ok().filter(|w|w.focused).and_then(|w|w.cursor_position().map(|p|p*(BASE_H/w.height().max(1.0))));
     let dragged=net.as_ref().and_then(|n|ui.drag.as_ref().filter(|d|d.active).and_then(|d|n.inventory.items.get(&d.id)));
     let mut anchor=None;

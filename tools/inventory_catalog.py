@@ -73,6 +73,73 @@ def reward_cards(db, table, local):
     return cards
 
 
+# A set bonus line's text (the original's Splendid Durian card, the user's
+# recording 20261105-1550-37 at 3:48: "(2): + 0.043 movement speed (level
+# dependent)", "+ 39 all resistance values", "+ 53 Armor value", "+ 59 damage",
+# "+ 199 critical value"). Others UNVERIFIED wording.
+SET_TEXTS = [
+    ('speed', ('movement',), 'movement speed'),
+    ('speed', ('skills',), 'attack speed'),
+    ('resistance', ('fire', 'ice', 'lightning', 'poison', 'darkmagic'), 'all resistance values'),
+    ('resistance', ('physical',), 'Armor value'),
+    ('resistance', ('fire',), 'fire resistance'),
+    ('resistance', ('ice',), 'ice resistance'),
+    ('resistance', ('lightning',), 'lightning resistance'),
+    ('resistance', ('poison',), 'poison resistance'),
+    ('damage', ('min', 'max'), 'damage'),
+    ('criticalvalue', (), 'critical value'),
+    ('maxhealthpoints', (), 'Health Points'),
+    ('maxskillresource', (), 'maximum resource'),
+    ('blockvalue', (), 'block value'),
+]
+
+
+def item_sets(db, local):
+    """Each set: its name, pieces and bonuses by pieces worn; each piece's set;
+    the level factors its bonuses scale by (_Template_Progressions)."""
+    sets, of, factors = {}, {}, set()
+    for sid, parts, modifiers in db.execute('SELECT Id, SetParts, Modifiers FROM _Template_ItemSet'):
+        pieces = [x for x in (parts or '').split(';') if x]
+        tiers = []
+        for chunk in (modifiers or '').split('|'):
+            m = re.match(r'\s*(\d+)\)(.*)', chunk)
+            if not m:
+                continue
+            lines = []
+            for mod in m.group(2).split(';'):
+                if ':' not in mod:
+                    continue
+                kind, args = mod.split(':', 1)
+                args = [a.strip() for a in args.split(',')]
+                low = [a.lower() for a in args]
+                text = next((t for k, scope, t in SET_TEXTS if k == kind.lower() and all(x in low for x in scope)
+                             and (scope or len(low) <= 4)), None)
+                try:
+                    value = float(args[0])
+                except ValueError:
+                    value = None
+                if text is None or value is None:
+                    lines.append(dict(text=''))
+                    continue
+                factor = next((a for a in args if a.lower().endswith(('factorabsolute', 'factorrelative'))), '') if 'levelmodifier' in low else ''
+                if factor:
+                    factors.add(factor.lower())
+                lines.append(dict(text=text, value=value, relative=len(low) > 1 and low[1] == 'relative', factor=factor.lower()))
+            tiers.append([int(m.group(1)), lines])
+        sets[sid] = dict(name=local(sid + 'Title', sid), parts=pieces, tiers=tiers)
+        for piece in pieces:
+            of.setdefault(piece, sid)
+    levels = {}
+    cursor = db.execute('SELECT * FROM _Template_Progressions ORDER BY Level')
+    columns = [c[0] for c in cursor.description]
+    for row in cursor:
+        r = {k.lower(): v for k, v in zip(columns, row)}
+        for f in factors:
+            if f in r:
+                levels.setdefault(f, []).append(round(float(r[f] or 0), 6))
+    return sets, of, levels
+
+
 def export_inventory(db, textures, loca, assets):
     table = loca.get('en', {})
     # A status effect's title loses to the item's own: both are keyed
@@ -190,6 +257,11 @@ def export_inventory(db, textures, loca, assets):
             if texture(brush):
                 result['reward_icons'][sid] = texture(brush)
     result['reward_cards'] = reward_cards(db, table, local)
+    # Set items' card section (crate::ui::controls::items::preview).
+    result['sets'], set_of, result['set_levels'] = item_sets(db, local)
+    for piece, sid in set_of.items():
+        if piece in result['items']:
+            result['items'][piece]['set'] = sid
     # The actor variables' upper limits (pet_hitpoint_01 10, pet_andermant_01 0.15).
     result['variables'] = {v: round(float(hi), 6) for v, hi in db.execute('SELECT Id, UpperLimit FROM _Template_ActorVariables')}
     path = os.path.join(assets, 'interface', 'inventory.items.json')

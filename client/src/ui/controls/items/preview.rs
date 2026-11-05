@@ -1,7 +1,7 @@
 //! Item sections follow tooltip.bxml's text, gem, separator and currency
 //! templates. Only fields whose wire meaning is known are shown as values.
 use super::*;
-use crate::ui::controls::tooltips::card::{Card, WHITE, MUTED, BLUE, GOLD, GREEN, plain};
+use crate::ui::controls::tooltips::card::{Card, WHITE, MUTED, BLUE, GOLD, plain};
 
 fn number(value: f32, advanced: bool) -> String {
     let s = if advanced || value.abs()<1.0 { format!("{value:.3}") } else { format!("{value:.0}") };
@@ -236,6 +236,57 @@ pub(super) fn reward_item(catalog: &Catalog, layout: Option<&Layout>, template: 
 }
 
 /// An item's rarity and the colour its name is written in.
+/// The templates worn now, for the set section's count (noted by the item
+/// overlay from the inventory, rebuilt only when its revision changes).
+static WORN: std::sync::RwLock<(u64, Vec<String>)> = std::sync::RwLock::new((u64::MAX, Vec::new()));
+
+pub(super) fn note_worn(inventory: &crate::gameplay::inventory::InventoryState) {
+    if WORN.read().is_ok_and(|w| w.0 == inventory.revision) { return; }
+    let worn = inventory.allocation.slots.iter().filter(|(_, s)| !s.is_empty())
+        .filter_map(|(id, _)| inventory.items.get(id).map(|i| i.template.clone())).collect();
+    if let Ok(mut w) = WORN.write() { *w = (inventory.revision, worn); }
+}
+
+/// A set piece's section, as the original's card: "<set> (worn/pieces)" in the
+/// Set colour, each piece (white when worn), then "Bonus for pieces of
+/// equipment belonging to the same set:" and "(n): + value text (level
+/// dependent)" at the item's level, lit once that many are worn.
+/// EVIDENCE: the original's Splendid Durian Battle Mace card (the user's
+///   recording 20261105-1550-37 at 3:48): "Splendid Durian Armor (0/7)", 7
+///   pieces, "(2): + 0.043 movement speed (level dependent)" .. "(6): + 199
+///   critical value (level dependent)" at item level 36; the same numbers here
+///   (base x _Template_Progressions factor). gui.window itemsetModifierBonusTitle.
+/// UNVERIFIED: the colours of worn pieces and reached bonuses (the original's
+///   shot had none worn: all grey); special-effect bonuses are not written out.
+fn set_section(card: &mut Card, catalog: &Catalog, set: &crate::ui::controls::items::ItemSet, level: u32) {
+    let worn = WORN.read().map(|w| w.1.clone()).unwrap_or_default();
+    let count = set.parts.iter().filter(|p| worn.contains(p)).count();
+    card.gap(4.0);
+    card.text(&format!("{} ({}/{})", set.name, count, set.parts.len()), SET_TINT);
+    for part in &set.parts {
+        let name = catalog.items.get(part).map_or_else(|| readable(part), |m| m.name.clone());
+        if worn.contains(part) { card.text(&name, WHITE); } else { card.hint(&name); }
+    }
+    card.hint("Bonus for pieces of equipment belonging to the same set:");
+    for (n, lines) in &set.tiers {
+        for line in lines {
+            let text = if line.text.is_empty() { format!("({n}): special effect") } else {
+                let factor = if line.factor.is_empty() { 1.0 } else {
+                    catalog.set_levels.get(&line.factor).and_then(|l| l.get(level.max(1) as usize - 1).or(l.last())).copied().unwrap_or(1.0)
+                };
+                let v = line.value * factor;
+                let value = if line.relative { format!("{:.0}%", v * 100.0) } else if v.abs() < 1.0 { format!("{v:.3}") } else { format!("{v:.0}") };
+                let tail = if line.factor.is_empty() { "" } else { " (level dependent)" };
+                format!("({n}): + {value} {}{tail}", line.text)
+            };
+            if count >= *n { card.text(&text, BLUE); } else { card.hint(&text); }
+        }
+    }
+}
+
+/// A Set item's name colour (cards and ground labels).
+pub(crate) const SET_TINT: Color = Color::srgb(0.098, 0.745, 0.843);
+
 pub(super) fn rarity<'a>(catalog: &'a Catalog, template: &str, item: Option<&ItemInfo>) -> (&'a str, Color) {
     let rarity = item.map(|i| ["Common", "Improved", "Magic", "Extraordinary", "Legendary", "Unique", "Set", "Mythic"].get(i.kind as usize).copied().unwrap_or("Item"))
         .unwrap_or_else(||catalog.items.get(template).map_or("Item",|m|m.rarity.as_str()));
@@ -247,7 +298,9 @@ pub(super) fn rarity<'a>(catalog: &'a Catalog, template: &str, item: Option<&Ite
     //   user's recording 20261031-1414-12): (108, 225, 83).
     // Magic and Rare measured on the original's Blue Dragonspawn arrow cards
     // (recording 20261031-1506-03): (19, 120, 236) and (226, 0, 236).
-    let tint = match rarity { "Unique" => Color::srgb(1.0,0.9,0.0), "Set" => GREEN, "Magic" => Color::srgb(0.07,0.47,0.93),
+    // Set measured on the original's trader card "Splendid Durian Battle Mace"
+    // (the user's recording 20261105-1550-37 at 3:48): (25, 190, 215), turquoise.
+    let tint = match rarity { "Unique" => Color::srgb(1.0,0.9,0.0), "Set" => SET_TINT, "Magic" => Color::srgb(0.07,0.47,0.93),
         "Uncommon" => Color::srgb(0.42,0.88,0.33),
         "Extraordinary" | "Rare" => Color::srgb(0.89,0.0,0.93), "Legendary" | "Epic" => Color::srgb(1.0,0.65,0.15), _ => color(catalog,item) };
     (rarity, tint)
@@ -378,6 +431,7 @@ pub(super) fn headed_card(d: &DisplayItem, catalog: &Catalog, layout: Option<&La
             card.section(if matches!(rarity,"Unique"|"Set") {"Item Effects"} else {"Description"});
             card.text(&meta.unwrap().description,if matches!(rarity,"Unique"|"Set") {GOLD} else {WHITE});
         }
+        if let Some(set)=meta.and_then(|m|catalog.sets.get(&m.set)) { set_section(&mut card,catalog,set,item.durability); }
         if meta.is_some_and(|m|!m.slots.is_empty() && m.max_stack==1) {
             card.section("Customization");
             if item.named.is_empty() || item.named == "none" {card.hint("Not yet dyed");}
