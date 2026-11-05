@@ -886,6 +886,15 @@ pub(super) fn sticker_card(catalog:&Catalog, layout:Option<&Layout>, template:&s
     preview::sticker(catalog,layout,template,title,status,bag,class,upgrade,None)
 }
 #[allow(clippy::too_many_arguments)]
+/// The worn item of the slot a `template` goes in, as the inventory shows it
+/// beside a hovered item (overlay): its card under "Equipped". None when the
+/// item is worn nowhere or its slots are empty.
+pub(super) fn equipped_card(catalog:&Catalog, layout:Option<&Layout>, net:&crate::network::net::Net, template:&str, advanced:bool)->Option<tooltips::card::Card> {
+    let slots=&catalog.items.get(template)?.slots;
+    let worn=slots.iter().find_map(|s|net.inventory.at(Place::Equipment(*s)))?;
+    Some(preview::headed_card(&DisplayItem{item:Some(worn),template:&worn.template,amount:worn.third,unlock:0,read_only:true,waiting:false},catalog,layout,advanced,Some("Equipped")))
+}
+
 pub(super) fn reward_item_card(catalog:&Catalog, layout:Option<&Layout>, template:&str, footer:&str, lifetime:u32, status:Option<&effects::Catalog>, bag:&HashMap<String,f32>, class:&str)->tooltips::card::Card {
     preview::reward_item(catalog,layout,template,footer,lifetime,status,bag,class)
 }
