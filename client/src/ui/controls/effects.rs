@@ -38,9 +38,36 @@ const ROWS: usize = 3;
 pub(in crate::ui) const TARGET: usize = 2;
 /// Server ticks per second.
 const TICKS: u32 = 25;
-/// The slot's Icon: Arial 9, white, outlined (TextEffect 1, size 2), bottom right.
-const COUNT_SIZE: f32 = 9.0;
+/// The stack count: white, outlined (the slot's Icon text: TextEffect 1, size
+/// 2), its digits about 0.43 of the icon high, centred a little right of the
+/// middle and low in the icon.
+/// EVIDENCE: the original's Fanaticism "2"/"4"/"5" (the user's recording
+///   20261104-2354-43 and shots): digit centre at 0.61 of the icon's width, its
+///   foot at 0.9 of its height, 0.43 of it high.
+/// FAILURE (2026-11-05): Arial 9 at the bottom-right corner: small, "10" ran
+///   over the frame.
+const COUNT_SIZE: f32 = 12.0;
 const COUNT_OUTLINE: f32 = 2.0;
+const COUNT_X: f32 = 0.61;
+const COUNT_FOOT: f32 = 0.93;
+/// A timed buff's lit sector over the time it has left: from 12 o'clock,
+/// clockwise, shrinking as it runs (the cooldown sweep's shape), a flat green
+/// over the icon, under its frame.
+/// EVIDENCE: the original's Fanaticism, 30 fps (the user's recordings
+///   20261104-2331-32 and 20261104-2354-43): the whole icon lit when it starts,
+///   the left half at 3 s of 5; over the dark crypt floor (8, 22, 14) the
+///   sector reads (35, 86, 10): green (61, 158, 0) at alpha 0.55; permanent
+///   effects (the pet) have none.
+const SWEEP_COLOR: [f32; 4] = [0.24, 0.62, 0.0, 0.55];
+const SWEEP_STEPS: f32 = 240.0;
+/// In its last seconds a timed effect blinks: icon, background, frame and count
+/// fade out and back, the sector stays.
+/// EVIDENCE: the same frames: from 3 s left, fully gone at 0.53-0.6 s and
+///   1.2-1.27 s, full again at 0.83 s: a 0.667 s period, full a little longer
+///   than gone.
+const BLINK_FROM: f32 = 3.0;
+const BLINK_PERIOD: f32 = 0.667;
+const FADE_LEVELS: u8 = 16;
 /// The monster row's parent in interactinfo, its slots' size and spacing
 /// (reference pixels; the bottom bar's are 25.6 and 2.5).
 const TARGET_ROOT: &str = "Canvas/Label_bg/TargetEffects";
@@ -120,13 +147,44 @@ impl AssetLoader for CatalogLoader {
     fn extensions(&self) -> &[&str] { &["status.catalog.json"] }
 }
 
-/// What a slot shows: the effect (its wire index), its stacks, and the server
-/// tick it ends at (0: it does not end).
+/// What a slot shows: the effect (its wire index), its stacks, the server tick
+/// it ends at (0: it does not end) and how many ticks it lasts in all.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(in crate::ui) struct Shown {
     pub index: u16,
     pub stacks: u32,
     pub end: u32,
+    pub duration: u32,
+}
+
+/// How a slot is animated now: its lit sector (in SWEEP_STEPS of the turn, 0:
+/// none) and its blink (FADE_LEVELS: fully shown).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::ui) struct Anim {
+    pub sweep: u16,
+    pub fade: u8,
+}
+
+impl Default for Anim {
+    fn default() -> Self { Anim { sweep: 0, fade: FADE_LEVELS } }
+}
+
+/// A slot's sector and blink at `now`.
+fn anim(shown: Shown, now: u32) -> Anim {
+    let left = shown.end.wrapping_sub(now) as i32;
+    if shown.end == 0 || shown.duration == 0 || left <= 0 { return Anim::default(); }
+    let part = (left as f32 / shown.duration as f32).min(1.0);
+    let seconds = left as f32 / TICKS as f32;
+    let fade = if seconds > BLINK_FROM { FADE_LEVELS } else {
+        let phase = (BLINK_FROM - seconds) / BLINK_PERIOD;
+        let shown = (0.5 + 0.75 * (phase * std::f32::consts::TAU).cos()).clamp(0.0, 1.0);
+        (shown * FADE_LEVELS as f32).round() as u8
+    };
+    Anim { sweep: (part * SWEEP_STEPS).ceil() as u16, fade }
+}
+
+fn anims(slots: &[[Option<Shown>; SLOTS]; ROWS], now: u32) -> [[Anim; SLOTS]; ROWS] {
+    slots.map(|row| row.map(|s| s.map_or_else(Anim::default, |s| anim(s, now))))
 }
 
 /// What the slots are assigned from.
@@ -145,6 +203,8 @@ pub(in crate::ui) struct StatusBar {
     /// Each row's slots, Slot1 first, and their time labels.
     pub slots: [[Option<Shown>; SLOTS]; ROWS],
     pub times: [[String; SLOTS]; ROWS],
+    /// Each slot's sector and blink, written when one of them moves on.
+    pub anim: [[Anim; SLOTS]; ROWS],
     /// Each row's effects in arrival order: an effect keeps its place while it
     /// runs, refreshed or not (the server sends each refresh as a new instance).
     order: [Vec<u16>; ROWS],
@@ -163,9 +223,14 @@ pub(in crate::ui) struct EffectSlot {
     pub rect: [f32; 4],
 }
 
-/// What a slot's children draw now, and how far its row was shifted.
+/// What a slot's children draw now, how far its row was shifted, its
+/// animation, and its sector (redrawn alone as it moves on).
 #[derive(Component, Default)]
-pub(in crate::ui) struct Drawn(Option<(Shown, f32)>);
+pub(in crate::ui) struct Drawn {
+    key: Option<(Shown, f32)>,
+    anim: Anim,
+    sweep: Option<Entity>,
+}
 
 fn numbered(id: &str, prefix: &str) -> Option<(usize, usize)> {
     let (parent, leaf) = id.rsplit_once('/')?;
@@ -240,7 +305,9 @@ pub(in crate::ui) fn sync(net: Option<NonSend<Net>>, time: Res<Time<Real>>, cata
     let state = bar.bypass_change_detection();
     let assign = state.inputs != inputs;
     let due = matches!((state.next, now), (Some(next), Some(now)) if reached(now, next));
-    if !assign && !due { return; }
+    // The sectors and blinks move on with the server tick (25 a second at most).
+    let moved = now.is_some_and(|now| anims(&state.slots, now) != state.anim);
+    if !assign && !due && !moved { return; }
     let mut changed = false;
     if assign {
         state.inputs = inputs;
@@ -264,6 +331,8 @@ pub(in crate::ui) fn sync(net: Option<NonSend<Net>>, time: Res<Time<Real>>, cata
     };
     state.next = next;
     if times != state.times { state.times = times; changed = true; }
+    let anim = now.map_or_else(default, |now| anims(&state.slots, now));
+    if anim != state.anim { state.anim = anim; changed = true; }
     if changed { bar.set_changed(); }
 }
 
@@ -280,12 +349,15 @@ fn assign_row(order: &mut Vec<u16>, effects: &HashMap<u32, StatusEffectElement>,
     for e in elements {
         let Some(def) = catalog.effects.get(&e.index).filter(|d| d.debuff == debuff) else { continue };
         let stacks = e.spare.saturating_add(1);
-        let entry = running.entry(e.index).or_insert((Shown { index: e.index, stacks: 0, end: e.end }, e.instance));
+        let entry = running.entry(e.index).or_insert((Shown { index: e.index, stacks: 0, end: e.end, duration: e.duration }, e.instance));
         entry.0.stacks = entry.0.stacks.saturating_add(stacks).min(def.stacks.max(1));
-        entry.0.end = match (entry.0.end, e.end) {
-            (0, _) | (_, 0) => 0,
-            (a, b) => if reached(b, a) { b } else { a },
+        // The latest end, and the length of the instance that ends then.
+        let (end, duration) = match (entry.0.end, e.end) {
+            (0, _) | (_, 0) => (0, 0),
+            (a, b) => if reached(b, a) { (b, e.duration) } else { (a, entry.0.duration) },
         };
+        entry.0.end = end;
+        entry.0.duration = duration;
     }
     order.retain(|i| running.contains_key(i));
     let mut fresh: Vec<(u32, u16)> = running.iter().filter(|(i, _)| !order.contains(i)).map(|(i, r)| (r.1, *i)).collect();
@@ -410,10 +482,12 @@ pub(in crate::ui) fn card_lines(catalog: &Catalog, status: &str, params: &[f32],
     out
 }
 
-/// A figure as the modifier texts print it: at most two decimals.
+/// A figure as the original's buff cards print it: two decimals.
+/// EVIDENCE: its Fanaticism card "+ 42.00% attack speed", "+ 27.50% movement
+///   speed" (the user's shots, 2026-11-05).
+/// FAILURE (2026-11-05): "+ 105%", "+ 52.5%".
 fn number(value: f32) -> String {
-    let text = format!("{value:.2}");
-    text.trim_end_matches('0').trim_end_matches('.').to_owned()
+    format!("{value:.2}")
 }
 
 /// A hover line for this many stacks: its values times the stacks, in the text
@@ -451,6 +525,8 @@ pub(in crate::ui) fn draw(
     (mut meshes, mut materials): (ResMut<Assets<Mesh>>, ResMut<Assets<UiMaterial>>),
     (mut slots, new_slots): (Query<(Entity, &EffectSlot, &mut Drawn)>, Query<(), Added<EffectSlot>>),
     (mut labels, new_labels): (Query<(&Value, &mut Text2d, &mut Transform)>, Query<(), Added<Value>>),
+    // The icons slots wait for, held so they go on loading.
+    mut waiting: Local<Vec<Handle<Image>>>,
 ) {
     // A rebuilt window brings new labels and slots: they take the current state.
     if bar.is_changed() || !new_labels.is_empty() {
@@ -468,45 +544,86 @@ pub(in crate::ui) fn draw(
             }
         }
     }
-    if !bar.is_changed() && !screen.is_changed() && new_slots.is_empty() { return; }
+    if !bar.is_changed() && !screen.is_changed() && new_slots.is_empty() && waiting.is_empty() { return; }
+    // Swapped in at the end: an icon still loading keeps a handle throughout.
+    let mut still_waiting = Vec::new();
     let catalog = catalogs.get(&bar.catalog);
     for (entity, slot, mut drawn) in &mut slots {
         let want = bar.slots[slot.row][slot.slot].map(|shown| (shown, shift(slot.row, &bar.slots[slot.row])));
-        if want == drawn.0 && !screen.is_changed() { continue; }
+        let anim = bar.anim[slot.row][slot.slot];
+        let whole = want != drawn.key || anim.fade != drawn.anim.fade || screen.is_changed();
+        if !whole && anim.sweep == drawn.anim.sweep { continue; }
+        let [l, t, r, b] = slot.rect;
+        let rect = |dx: f32| [l + dx, t, r + dx, b];
+        if !whole {
+            // Only the sector moved on.
+            if let Some(old) = drawn.sweep.take() { commands.entity(old).despawn(); }
+            drawn.anim = anim;
+            if let Some((_, dx)) = want { drawn.sweep = sweep(&mut commands, &mut meshes, &mut materials, entity, slot.k, rect(dx), anim); }
+            continue;
+        }
         commands.entity(entity).despawn_related::<Children>();
-        drawn.0 = want;
+        drawn.key = None;
+        drawn.sweep = None;
         let (Some((shown, dx)), Some(catalog)) = (want, catalog) else { continue };
         let Some(def) = catalog.effects.get(&shown.index) else { continue };
-        let [l, t, r, b] = slot.rect;
-        let rect = [l + dx, t, r + dx, b];
+        // Shown once its icon is there: the first frame of a new buff showed
+        // its background and frame alone ("two bare glowing squares").
+        // FAILURE (2026-11-05): the user's recording 20261104-2354-43, 22.9 s.
+        let icon: Handle<Image> = assets.load(def.icon.clone());
+        if !def.icon.is_empty() && matches!(assets.load_state(&icon), bevy::asset::LoadState::Loading | bevy::asset::LoadState::NotLoaded) {
+            still_waiting.push(icon);
+            continue;
+        }
+        drawn.key = want;
+        drawn.anim = anim;
+        let rect = rect(dx);
+        let alpha = anim.fade as f32 / FADE_LEVELS as f32;
         let [background, frame] = catalog.configs.get(&def.config).cloned().unwrap_or_default();
-        // The inventory's order: background, image, frame (template::icon_layers).
+        // The inventory's order: background, image, frame (template::icon_layers);
+        // the lit sector over the image, under the frame.
         for (z, texture) in [(0.0, background), (0.1, def.icon.clone()), (0.2, frame)] {
             if texture.is_empty() { continue; }
+            let mut art = template::image_art(rect, texture.clone());
+            for c in art.color.chunks_mut(4) { c[3] *= alpha; }
             let mut run = Run { k: slot.k, ..default() };
-            run.push(&template::image_art(rect, texture.clone()), 0.0);
+            run.push(&art, 0.0);
             commands.spawn((Mesh2d(meshes.add(run.mesh())), MeshMaterial2d(materials.add(material(Some(assets.load(texture))))),
                 Transform::from_xyz(0.0, 0.0, z), RenderLayers::layer(LAYER), ChildOf(entity)));
         }
-        if shown.stacks > 1 { count(&mut commands, &assets, &screen, entity, rect, shown.stacks); }
+        drawn.sweep = sweep(&mut commands, &mut meshes, &mut materials, entity, slot.k, rect, anim);
+        if shown.stacks > 1 { count(&mut commands, &assets, &screen, entity, rect, shown.stacks, alpha); }
     }
+    *waiting = still_waiting;
 }
 
-/// The stack count at the icon's bottom right, outlined as the slot's Icon text
-/// is (crate::ui::outline_copies). The slot's parent is y-flipped for the
-/// artwork; the text flips back.
-fn count(commands: &mut Commands, assets: &AssetServer, screen: &Screen, slot: Entity, rect: [f32; 4], stacks: u32) {
-    let [_, _, r, b] = rect;
+/// The lit sector over what a timed effect has left (None: no sector).
+fn sweep(commands: &mut Commands, meshes: &mut Assets<Mesh>, materials: &mut Assets<UiMaterial>, slot: Entity, k: f32,
+    rect: [f32; 4], anim: Anim) -> Option<Entity> {
+    if anim.sweep == 0 { return None; }
+    let mut run = Run { k, ..default() };
+    run.push(&crate::ui::sweep_colored(rect, anim.sweep as f32 / SWEEP_STEPS, SWEEP_COLOR), 0.0);
+    Some(commands.spawn((Mesh2d(meshes.add(run.mesh())), MeshMaterial2d(materials.add(material(None))),
+        Transform::from_xyz(0.0, 0.0, 0.15), RenderLayers::layer(LAYER), ChildOf(slot))).id())
+}
+
+/// The stack count, low in the icon and a little right of its middle, outlined
+/// as the slot's Icon text is (crate::ui::outline_copies). The slot's parent is
+/// y-flipped for the artwork; the text flips back.
+fn count(commands: &mut Commands, assets: &AssetServer, screen: &Screen, slot: Entity, rect: [f32; 4], stacks: u32, alpha: f32) {
+    let [l, t, r, b] = rect;
     let font = TextFont { font: assets.load("fonts/tahoma.ttf").into(),
         font_size: bevy::text::FontSize::Px(COUNT_SIZE * FONT_SCALE * screen.scale), ..default() };
-    let text = commands.spawn((Text2d::new(stacks.to_string()), font.clone(), TextColor(Color::WHITE), Anchor::BOTTOM_RIGHT,
-        Transform::from_xyz(r - 1.0, b - 1.0, 0.5).with_scale(Vec3::new(1.0, -1.0, 1.0) / screen.scale),
+    let (x, y) = (l + (r - l) * COUNT_X, t + (b - t) * COUNT_FOOT);
+    let text = commands.spawn((Text2d::new(stacks.to_string()), font.clone(), TextColor(Color::WHITE.with_alpha(alpha)), Anchor::BOTTOM_CENTER,
+        Transform::from_xyz(x, y, 0.5).with_scale(Vec3::new(1.0, -1.0, 1.0) / screen.scale),
         RenderLayers::layer(LAYER), ChildOf(slot))).id();
     let radius = (0.5 + 0.35 * COUNT_OUTLINE).min(1.5);
     for (offset, shadow) in outline_copies(radius) {
-        let copy = OutlineCopy { offset, shadow, dz: -0.01, color: Color::BLACK };
-        commands.spawn((Text2d::new(stacks.to_string()), font.clone(), TextColor(Color::BLACK), Anchor::BOTTOM_RIGHT,
-            copy.transform(screen.scale), bevy::sprite::Text2dShadow { offset: shadow * screen.scale, color: Color::BLACK },
+        let black = Color::BLACK.with_alpha(alpha);
+        let copy = OutlineCopy { offset, shadow, dz: -0.01, color: black };
+        commands.spawn((Text2d::new(stacks.to_string()), font.clone(), TextColor(black), Anchor::BOTTOM_CENTER,
+            copy.transform(screen.scale), bevy::sprite::Text2dShadow { offset: shadow * screen.scale, color: black },
             RenderLayers::layer(LAYER), ChildOf(text), Visibility::Inherited, copy));
     }
 }
@@ -544,20 +661,34 @@ pub(in crate::ui) fn card(point: Vec2, offset_of: impl Fn(usize) -> Option<Vec2>
     let headed = def.lines.iter().any(|l| l.text.contains("<WhiteStart>"));
     let lines: Vec<(String, bool)> = if headed { card_lines(catalog, &def.id, params, bag, class) }
         else { def.lines.iter().filter_map(|l| line(l, params, shown.stacks, def.debuff)).map(|t| (t, false)).collect() };
-    let time = &bar.times[slot.row][slot.slot];
+    // The original's Fanaticism card: "Fanaticism  (4x)", a rule, "Effect", the
+    // line centred in blue with two decimals, a rule, "Duration: 3s" in blue,
+    // counting down while it is hovered (this card is built each frame and
+    // redrawn when it reads differently: tooltips::overlay).
+    // EVIDENCE: the user's shots and recording 20261104-2354-43 (5.8-8.5 s).
+    // FAILURE (2026-11-05): no "(4x)", "+ 105%", "Stacks: 10 / 10" and
+    //   "Remaining: 5 s" in grey.
+    // UNVERIFIED: the user's movement speed shot has no Duration line, the
+    //   recording's has; what decides it is unknown.
+    let time = bar.times[slot.row][slot.slot].replace(' ', "");
+    let duration = (!time.is_empty()).then(|| format!("Duration: {time}"));
     let mut hints = Vec::new();
-    if shown.stacks > 1 { hints.push(format!("Stacks: {} / {}", shown.stacks, def.stacks)); }
-    if !time.is_empty() { hints.push(format!("Remaining: {time}")); }
     // As the skill cards say it (tooltips::overlay).
-    if lines.iter().any(|(l, _)| l.contains('—')) { hints.push("—: value unavailable".into()); }
-    let title = format!("<i>{}</>", def.name);
-    super::items::fit_small(&mut card, std::iter::once(title.as_str()).chain(lines.iter().map(|(t, _)| t.as_str())).chain(hints.iter().map(String::as_str)));
+    if lines.iter().any(|(l, _)| l.contains('—')) { hints.push("—: value unavailable".to_owned()); }
+    let title = if shown.stacks > 1 { format!("<i>{}  ({}x)</>", def.name, shown.stacks) } else { format!("<i>{}</>", def.name) };
+    super::items::fit_small(&mut card, std::iter::once(title.as_str()).chain(lines.iter().map(|(t, _)| t.as_str()))
+        .chain(duration.iter().map(String::as_str)).chain(hints.iter().map(String::as_str)));
     card.text(&title, WHITE);
     if !lines.is_empty() {
         card.rule();
         card.centered("Effect", MUTED, false);
-        for (text, header) in &lines { card.text(text, if *header { WHITE } else { BLUE }); }
+        for (text, header) in &lines {
+            // A pet's headed sections stay as they were matched (left, white
+            // headers); a plain effect line is centred, as Fanaticism's.
+            if headed { card.text(text, if *header { WHITE } else { BLUE }); } else { card.centered(text, BLUE, false); }
+        }
     }
+    if let Some(duration) = &duration { card.rule(); card.text(duration, BLUE); }
     if !hints.is_empty() { card.gap(4.0); }
     for hint in &hints { card.hint(hint); }
     let x = slot.k * (width - BASE_W);
@@ -704,8 +835,8 @@ mod tests {
         effects.insert(4, element(11, 4, 700, 4));
         let positive = assign_row(&mut buffs, &effects, &catalog, false);
         let negative = assign_row(&mut debuffs, &effects, &catalog, true);
-        assert_eq!(positive[0], Some(Shown { index: 10, stacks: 1, end: 900 }));
-        assert_eq!(negative[0], Some(Shown { index: 11, stacks: 8, end: 700 }), "both frost instances: 3 + 5 stacks, the later end");
+        assert_eq!(positive[0], Some(Shown { index: 10, stacks: 1, end: 900, duration: 0 }));
+        assert_eq!(negative[0], Some(Shown { index: 11, stacks: 8, end: 700, duration: 0 }), "both frost instances: 3 + 5 stacks, the later end");
         assert!(positive[1].is_none() && negative[1].is_none());
         // A refresh is a new instance: the effect keeps its slot.
         effects.insert(5, element(12, 5, 0, 0));
@@ -744,10 +875,10 @@ mod tests {
         assert_eq!(remaining(25 * 3600 + 1, &units), ("1 hr".into(), 1));
         assert_eq!(remaining(25 * 86400 * 3, &units), ("2 d".into(), 25 * 86400));
         let mut slots: [[Option<Shown>; SLOTS]; ROWS] = default();
-        slots[0][0] = Some(Shown { index: 10, stacks: 1, end: 1000 + 25 * 90 });
-        slots[0][1] = Some(Shown { index: 12, stacks: 1, end: 0 });
-        slots[1][2] = Some(Shown { index: 11, stacks: 3, end: 1000 + 25 * 5 + 10 });
-        slots[TARGET][0] = Some(Shown { index: 11, stacks: 2, end: 1000 + 25 * 3 + 4 });
+        slots[0][0] = Some(Shown { index: 10, stacks: 1, end: 1000 + 25 * 90, duration: 0 });
+        slots[0][1] = Some(Shown { index: 12, stacks: 1, end: 0, duration: 0 });
+        slots[1][2] = Some(Shown { index: 11, stacks: 3, end: 1000 + 25 * 5 + 10, duration: 0 });
+        slots[TARGET][0] = Some(Shown { index: 11, stacks: 2, end: 1000 + 25 * 3 + 4, duration: 0 });
         let (times, next) = labels(&slots, 1000, &units);
         assert_eq!((times[0][0].as_str(), times[0][1].as_str(), times[1][2].as_str(), times[TARGET][0].as_str()), ("1 m", "", "6 s", "4 s"));
         assert_eq!(next, Some(1004), "the monster's frost label changes first, 4 ticks on");
@@ -755,15 +886,35 @@ mod tests {
     }
 
     #[test]
+    fn a_timed_buff_lights_what_it_has_left_and_blinks_in_its_last_seconds() {
+        let buff = Shown { index: 10, stacks: 4, end: 1000 + 125, duration: 125 };
+        assert_eq!(anim(buff, 1000), Anim { sweep: 240, fade: FADE_LEVELS }, "just started: all lit, shown");
+        assert_eq!(anim(buff, 1050).sweep, 144, "3 s of 5 left: three fifths lit");
+        assert_eq!(anim(buff, 1049).fade, FADE_LEVELS, "over 3 s left: no blink");
+        // 0.5 of the 0.667 s blink: gone; a whole one on: back.
+        let gone = 1050 + (0.5 * BLINK_PERIOD * TICKS as f32).round() as u32;
+        assert_eq!(anim(buff, gone).fade, 0);
+        assert_eq!(anim(buff, 1050 + (BLINK_PERIOD * TICKS as f32).round() as u32).fade, FADE_LEVELS);
+        assert_eq!(anim(buff, 1125), Anim::default(), "over: the server's removal follows");
+        assert_eq!(anim(Shown { end: 0, ..buff }, 1000), Anim::default(), "a permanent effect (the pet): no sector");
+        // The latest instance's length goes with its end.
+        let mut effects = HashMap::new();
+        effects.insert(1, StatusEffectElement { duration: 125, ..element(10, 1, 1125, 0) });
+        effects.insert(2, StatusEffectElement { duration: 75, ..element(10, 2, 1200, 0) });
+        let row = assign_row(&mut Vec::new(), &effects, &catalog(), false);
+        assert_eq!(row[0].map(|s| (s.end, s.duration)), Some((1200, 75)));
+    }
+
+    #[test]
     fn hover_lines_take_the_values_their_sign_and_stacks() {
         let catalog = catalog();
         let damage = &catalog.effects[&10].lines[0];
-        assert_eq!(line(damage, &[0.25], 1, false).as_deref(), Some("+ 25% damage"));
-        assert_eq!(line(damage, &[-0.125], 1, true).as_deref(), Some("- 12.5% damage"));
+        assert_eq!(line(damage, &[0.25], 1, false).as_deref(), Some("+ 25.00% damage"));
+        assert_eq!(line(damage, &[-0.125], 1, true).as_deref(), Some("- 12.50% damage"));
         assert_eq!(line(damage, &[0.0], 1, false), None, "a zero modifier says nothing");
         assert_eq!(line(damage, &[], 1, false).as_deref(), Some("+ —% damage"), "a missing parameter is unknown");
         let frost = &catalog.effects[&11].lines[0];
-        assert_eq!(line(frost, &[], 3, true).as_deref(), Some("- 6% movement speed"));
+        assert_eq!(line(frost, &[], 3, true).as_deref(), Some("- 6.00% movement speed"));
         let pet = &catalog.effects[&12].lines;
         assert_eq!(line(&pet[0], &[], 1, false).as_deref(), Some("<WhiteStart>Pet Effect:</>"));
         assert_eq!(line(&pet[1], &[], 1, false).as_deref(), Some("+ —% all resistance values"));
@@ -825,7 +976,7 @@ mod tests {
         app.world_mut().resource_mut::<HoverInfo>().0 = Some(("Skeleton".into(), 3, 50, 100));
         app.update();
         assert_eq!(assigned(&app), 3);
-        assert_eq!(slots(&app)[TARGET][0], Some(Shown { index: 11, stacks: 3, end: 0 }));
+        assert_eq!(slots(&app)[TARGET][0], Some(Shown { index: 11, stacks: 3, end: 0, duration: 0 }));
         assert!(slots(&app)[TARGET][1].is_none(), "its positive effects are not shown");
         for _ in 0..10 { app.update(); }
         assert_eq!(assigned(&app), 3);

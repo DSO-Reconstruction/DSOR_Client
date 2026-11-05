@@ -1962,6 +1962,11 @@ fn cooldown_sweep(rect: [f32; 4], remaining: f32) -> Art {
 
 /// The cooldown sweep at a given darkness (alpha of its black).
 fn sweep_art(rect: [f32; 4], remaining: f32, alpha: f32) -> Art {
+    sweep_colored(rect, remaining, [0.0, 0.0, 0.0, alpha])
+}
+
+/// The sweep in any colour (a timed buff's lit sector, controls::effects).
+fn sweep_colored(rect: [f32; 4], remaining: f32, color: [f32; 4]) -> Art {
     use std::f32::consts::{FRAC_PI_4, TAU};
     let [l, t, r, b] = rect;
     let (cx, cy) = ((l + r) * 0.5, (t + b) * 0.5);
@@ -1979,7 +1984,7 @@ fn sweep_art(rect: [f32; 4], remaining: f32, alpha: f32) -> Art {
     }
     let n = (pos.len() / 2) as u32;
     let idx = (1..n - 1).flat_map(|i| [0, i, i + 1]).collect();
-    Art { tex: None, uv: vec![0.0; pos.len()], color: [0.0, 0.0, 0.0, alpha].repeat(n as usize), pos, idx, saturation: 1.0 }
+    Art { tex: None, uv: vec![0.0; pos.len()], color: color.repeat(n as usize), pos, idx, saturation: 1.0 }
 }
 
 /// The hovered monster's info window, shown while one is under the cursor.
