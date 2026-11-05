@@ -841,6 +841,14 @@ impl GltfExtensionHandler for NebulaStates {
                 // other surface of its effect.
                 if !load_context.path().path().starts_with("effects") && !load_context.path().path().to_string_lossy().starts_with("effects_") {
                     m.depth_bias = crate::rendering::decals::DECAL_DEPTH_BIAS;
+                } else {
+                    // An effect's decal is a flat plane (crate::rendering::decals);
+                    // under a mirrored sprite (face_viewer) its front faces down
+                    // and the ground side was culled: the ranked monsters' marker
+                    // (status_enchantment_global_rank_*, under an upright
+                    // billboard) drew nothing ("only a small circle that looks
+                    // off", the user's recording 20261105-1900-00).
+                    m.cull_mode = None;
                 }
                 // The node's MatSpecularIntensity, as on lit surfaces (specular_scale):
                 // the decal ps adds specMap x MatSpecularIntensity x the light

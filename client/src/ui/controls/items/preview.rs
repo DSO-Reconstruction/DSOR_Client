@@ -262,12 +262,14 @@ fn set_section(card: &mut Card, catalog: &Catalog, set: &crate::ui::controls::it
     let worn = WORN.read().map(|w| w.1.clone()).unwrap_or_default();
     let count = set.parts.iter().filter(|p| worn.contains(p)).count();
     card.gap(4.0);
-    card.text(&format!("{} ({}/{})", set.name, count, set.parts.len()), SET_TINT);
+    // The set's name and the bonus heading green, as the original's card
+    // (recording 20261105-1900-00 at 0:09).
+    card.text(&format!("{} ({}/{})", set.name, count, set.parts.len()), SET_HEADING);
     for part in &set.parts {
         let name = catalog.items.get(part).map_or_else(|| readable(part), |m| m.name.clone());
         if worn.contains(part) { card.text(&name, WHITE); } else { card.hint(&name); }
     }
-    card.hint("Bonus for pieces of equipment belonging to the same set:");
+    card.text("Bonus for pieces of equipment belonging to the same set:", SET_HEADING);
     for (n, lines) in &set.tiers {
         for line in lines {
             // A written-out text with line breaks (a list of skills): one card
@@ -293,6 +295,12 @@ fn set_section(card: &mut Card, catalog: &Catalog, set: &crate::ui::controls::it
         }
     }
 }
+
+/// An item card's text and width against the shared card's (headed_card).
+/// The set section's headings (the original's card: green).
+const SET_HEADING: Color = Color::srgb(0.1, 0.85, 0.1);
+const ITEM_CARD_TEXT: f32 = 0.57;
+const ITEM_CARD_WIDTH: f32 = 0.83;
 
 /// A Set item's name colour (cards and ground labels).
 pub(crate) const SET_TINT: Color = Color::srgb(0.098, 0.745, 0.843);
@@ -324,7 +332,12 @@ pub(super) fn card(d: &DisplayItem, catalog: &Catalog, layout: Option<&Layout>, 
 /// one, gui.window.tooltip currentlyEquippedHeadline).
 pub(super) fn headed_card(d: &DisplayItem, catalog: &Catalog, layout: Option<&Layout>, advanced: bool, heading: Option<&str>) -> Card {
     let meta = catalog.items.get(d.template);
-    let mut card = Card::new(if advanced { 370.0 } else { 285.0 },layout);
+    // The original's item card is in a much smaller hand: its lines 14.7 px apart
+    // where ours were 26, the card 0.83 of ours wide (the user's recording
+    // 20261105-1900-00: the original's trader card at 0:09 beside ours at 0:25,
+    // same screen; two of ours side by side ran off the screen at 5:00).
+    let mut card = Card::new(if advanced { 370.0 } else { 285.0 } * ITEM_CARD_WIDTH, layout);
+    card.compact(ITEM_CARD_TEXT);
     card.background = Color::srgba(0.01, 0.01, 0.005, 0.985);
     if let Some(heading) = heading { card.centered(heading, MUTED, false); card.rule(); }
     let (rarity, tint) = rarity(catalog, d.template, d.item);

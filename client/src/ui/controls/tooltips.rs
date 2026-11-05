@@ -96,8 +96,8 @@ pub(in crate::ui) fn overlay(mut commands: Commands, windows: Query<(&Window2018
     (pointer,keys,figures,shown,views,real):(Res<Pointer>,Res<ButtonInput<KeyCode>>,Res<Figures>,Res<currency::Shown>,Res<systems::Views>,Res<Time<Real>>),
     (net, social_ui, map_names): (Option<NonSend<crate::network::net::Net>>, Res<social::SocialUi>, Res<Assets<crate::ui::local_map::MapNames>>), hotbar: Res<hotbar::Hotbar>,
     (data, catalogs, dialogue): (Res<items::Data>, Res<Assets<items::Catalog>>, Res<dialogue::Presentation>), layouts: Res<Assets<Layout>>, loaded: Res<Loaded>,
-    (skill_tables, status_bar, status_catalogs, status_slots): (Res<Assets<crate::gameplay::skills::SkillTable>>,
-        Res<effects::StatusBar>, Res<Assets<effects::Catalog>>, Query<&effects::EffectSlot>), assets: Res<AssetServer>,
+    (skill_tables, status_bar, status_catalogs, status_slots, cooldown_bonuses): (Res<Assets<crate::gameplay::skills::SkillTable>>,
+        Res<effects::StatusBar>, Res<Assets<effects::Catalog>>, Query<&effects::EffectSlot>, Res<crate::gameplay::stats::CooldownBonuses>), assets: Res<AssetServer>,
     (old, mut transforms, item_hovers): (Query<Entity, With<Tooltip>>, Query<&mut Transform, With<Tooltip>>,
         Query<(&social::ItemHover, &GlobalTransform, &InheritedVisibility)>),
     (mut meshes, mut materials): (ResMut<Assets<Mesh>>, ResMut<Assets<UiMaterial>>),
@@ -330,7 +330,11 @@ pub(in crate::ui) fn overlay(mut commands: Commands, windows: Query<(&Window2018
                     let resource = ["Rage", "Mana", "Concentration", "Steam"].get(s.class_id as usize).unwrap_or(&"Resource");
                     card.text(&format!("Base cost: <GreenStart>{:.0}%</> maximum {resource}",def.resource_cost*100.0), WHITE);
                     card.text(&format!("Essence Costs: {}",def.ammo_cost), WHITE);
-                    card.text(&format!("Cool-down: {} s",def.cooldown), WHITE);
+                    // With the equipment's changes, as the original shows it (a
+                    // cooldown jewel lowers the number here, the user, 2026-11-05).
+                    let seconds = cooldown_bonuses.seconds(&def.id, def.cooldown);
+                    let seconds = (seconds * 10.0).round() / 10.0;
+                    card.text(&format!("Cool-down: {seconds} s"), WHITE);
                 }
                 if !c.spells.available(s) && s.wire.is_some() { card.text(&format!("Required level: {}",s.unlock), Color::srgb(0.9,0.65,0.3)); }
                 // In the talents window: its upgrade's price and level, how to level it.

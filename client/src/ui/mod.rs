@@ -507,6 +507,10 @@ enum ValueKind {
     /// The hovered monster's title and level (interactinfo).
     TargetName,
     TargetLevel,
+    /// "9387/9387" on the hovered monster's bar (Healthbar/HealthValue).
+    TargetHealth,
+    /// Its rank's title (Healthbar/MonsterRank), empty for a plain monster.
+    TargetRank,
     /// A character sheet figure (crate::gameplay::stats::Sheet, by widget name).
     Sheet(&'static str),
     /// A status effect's time left: its half of the bar and slot
@@ -856,11 +860,31 @@ fn value_of(id: &str) -> Option<ValueKind> {
         "Wisdom" if id.contains("/bottombar_wisdom_bar/") => ValueKind::WisdomProgress,
         "ActorName" if id.contains("/Healthbar/") => ValueKind::TargetName,
         "Level" if id.contains("/Levelcircle4/") => ValueKind::TargetLevel,
+        "HealthValue" if id.contains("/Healthbar/") => ValueKind::TargetHealth,
+        "MonsterRank" if id.contains("/Healthbar/") => ValueKind::TargetRank,
         "CharacterName" => ValueKind::Name,
         "LocationName" => ValueKind::LocationName,
         "PageNumText" => ValueKind::Page,
         _ => return None,
     })
+}
+
+/// A monster level's colour by how far it is from ours (monster - own):
+/// yellow within 2, green 3..5 below, grey further below, orange 3..5 above,
+/// red further above.
+/// EVIDENCE: static.db4 _Globals LevelDifferenceRange0 2, Range1 5,
+///   LevelDifferenceColor0 (1,1,0), ColorEasy1 (0,1,0), ColorEasy2 (0.5,0.5,0.5),
+///   ColorHard1 (1,0.5,0), ColorHard2 (1,0,0); the user's recording
+///   20261105-1948-56 (level 36): 30 grey, 31/32 green, 35 yellow, 41 orange,
+///   46 red.
+pub(crate) fn level_difference_colour(diff: i64) -> Color {
+    match diff {
+        d if d.abs() <= 2 => Color::srgb(1.0, 1.0, 0.0),
+        d if d < -5 => Color::srgb(0.5, 0.5, 0.5),
+        d if d < 0 => Color::srgb(0.0, 1.0, 0.0),
+        d if d <= 5 => Color::srgb(1.0, 0.5, 0.0),
+        _ => Color::srgb(1.0, 0.0, 0.0),
+    }
 }
 
 /// The quick slots by wire slot: Shift + left button = 0, right button = 1, keys
@@ -1674,12 +1698,19 @@ fn update_values(
     for (v, mut t, colour) in &mut texts {
         // Layouts load asynchronously, even when the current figures are stable.
         if !changed && !t.is_added() { continue; }
-        // A ranked monster's name in its rank's colour (monsters::rank_colour).
-        if v.0 == ValueKind::TargetName {
-            if let Some(mut colour) = colour {
-                let want = hover.2.map_or(Color::WHITE, |c| Color::srgba(c[0], c[1], c[2], c[3]));
-                if colour.0 != want { colour.0 = want; }
-            }
+        // A ranked monster's name and rank title in its rank's colour
+        // (monsters::rank_colour); its level by how far it is from ours
+        // (level_difference_colour).
+        let want = match v.0 {
+            ValueKind::TargetName | ValueKind::TargetRank => Some(hover.2.map_or(Color::WHITE, |c| Color::srgba(c[0], c[1], c[2], c[3]))),
+            ValueKind::TargetLevel => Some(match (hover.0.as_ref(), figures.level) {
+                (Some(h), Some(own)) => level_difference_colour(h.1 as i64 - own as i64),
+                _ => Color::WHITE,
+            }),
+            _ => None,
+        };
+        if let (Some(want), Some(mut colour)) = (want, colour) {
+            if colour.0 != want { colour.0 = want; }
         }
         // Gold is counted in copper: 100 copper a silver, 100 silver a gold;
         // each shortened to its place on the currency bar.
@@ -1710,6 +1741,8 @@ fn update_values(
             ValueKind::EffectTime(..) => continue,
             ValueKind::TargetName => hover.0.as_ref().map(|h| h.0.clone()).unwrap_or_default(),
             ValueKind::TargetLevel => hover.0.as_ref().map(|h| h.1.to_string()).unwrap_or_default(),
+            ValueKind::TargetHealth => hover.0.as_ref().map(|h| format!("{}/{}", h.2, h.3)).unwrap_or_default(),
+            ValueKind::TargetRank => hover.0.as_ref().and(hover.3).unwrap_or_default().to_owned(),
             ValueKind::Sheet(w) => match sheet.0.get(w) {
                 Some(v) => v.clone(),
                 None => continue,
