@@ -94,9 +94,42 @@ SET_TEXTS = [
 ]
 
 
-def item_sets(db, local):
+def set_text(key, args, table):
+    """A set bonus's own text (gui.statuseffects.<key>), its placeholders filled
+    in order: a "...name" one with the next skill or talent named in the
+    modifier (db.skill2 / db.skilltalent2 <id>Title), the others with its
+    number (a relative one as a percentage, without its sign: "- {0}%
+    cooldown time" is -0.20)."""
+    text = table.get('gui.statuseffects.' + key) or table.get('gui.statuseffects.modifier_' + key) or ''
+    if not text:
+        return ''
+    fields = [a.strip() for a in args.split(',')]
+    relative = len(fields) > 1 and fields[1].lower() == 'relative'
+    numbers, names = [], []
+    for f in fields:
+        try:
+            v = float(f)
+            v = abs(v * 100 if relative else v)
+            numbers.append(('%.2f' % v).rstrip('0').rstrip('.'))
+            continue
+        except ValueError:
+            pass
+        name = table.get('db.skill2.' + f + 'Title') or table.get('db.skilltalent2.' + f + 'Title') or table.get('db.skill.' + f + 'Title')
+        if name:
+            names.append(name)
+    def fill(m):
+        if 'name' in m.group(0).lower():
+            return names.pop(0) if names else ''
+        return numbers.pop(0) if numbers else ''
+    text = re.sub(r'\{\d+:[^}]*\}', fill, text)
+    return re.sub(r'<[^>]*>', '', text).replace('\n', ' ').strip()
+
+
+def item_sets(db, local, table):
     """Each set: its name, pieces and bonuses by pieces worn; each piece's set;
-    the level factors its bonuses scale by (_Template_Progressions)."""
+    the level factors its bonuses scale by (_Template_Progressions). A bonus
+    with its own text ("#key": gui.statuseffects modifier_<key>, its value
+    written in as the essences' are) takes it as `fixed`; "#~" is not shown."""
     sets, of, factors = {}, {}, set()
     for sid, parts, modifiers in db.execute('SELECT Id, SetParts, Modifiers FROM _Template_ItemSet'):
         pieces = [x for x in (parts or '').split(';') if x]
@@ -106,10 +139,20 @@ def item_sets(db, local):
             if not m:
                 continue
             lines = []
-            for mod in m.group(2).split(';'):
+            for whole in m.group(2).split(';'):
+                mod, _, key = whole.partition('#')
+                key = key.strip()
+                if key == '~':
+                    continue
                 if ':' not in mod:
                     continue
                 kind, args = mod.split(':', 1)
+                if not key and kind.lower() == 'talentlevelbonus':
+                    key = 'TalentLevelBonus'
+                fixed = set_text(key, args, table) if key else ''
+                if fixed:
+                    lines.append(dict(fixed=fixed))
+                    continue
                 args = [a.strip() for a in args.split(',')]
                 low = [a.lower() for a in args]
                 text = next((t for k, scope, t in SET_TEXTS if k == kind.lower() and all(x in low for x in scope)
@@ -258,7 +301,7 @@ def export_inventory(db, textures, loca, assets):
                 result['reward_icons'][sid] = texture(brush)
     result['reward_cards'] = reward_cards(db, table, local)
     # Set items' card section (crate::ui::controls::items::preview).
-    result['sets'], set_of, result['set_levels'] = item_sets(db, local)
+    result['sets'], set_of, result['set_levels'] = item_sets(db, local, table)
     for piece, sid in set_of.items():
         if piece in result['items']:
             result['items'][piece]['set'] = sid

@@ -68,9 +68,10 @@ pub struct Catalog { pub items: HashMap<String, Definition>, pub ingredients: Ve
 #[derive(Deserialize, Clone, Debug, Default, PartialEq)]
 pub struct ItemSet { #[serde(default)] pub name: String, #[serde(default)] pub parts: Vec<String>,
     #[serde(default)] pub tiers: Vec<(usize, Vec<SetLine>)> }
-/// One set bonus: its text and base value (empty text: a special effect).
+/// One set bonus: its text and base value, or its own written-out text
+/// (`fixed`, gui.statuseffects); neither: a special effect without a text.
 #[derive(Deserialize, Clone, Debug, Default, PartialEq)]
-pub struct SetLine { #[serde(default)] pub text: String, #[serde(default)] pub value: f32,
+pub struct SetLine { #[serde(default)] pub fixed: String, #[serde(default)] pub text: String, #[serde(default)] pub value: f32,
     #[serde(default)] pub relative: bool, #[serde(default)] pub factor: String }
 #[derive(Deserialize, Clone, Debug, Default, PartialEq)]
 pub struct RewardCard { #[serde(default)] pub title: String, #[serde(default)] pub lines: Vec<String> }

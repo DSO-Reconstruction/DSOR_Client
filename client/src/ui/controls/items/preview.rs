@@ -270,7 +270,8 @@ fn set_section(card: &mut Card, catalog: &Catalog, set: &crate::ui::controls::it
     card.hint("Bonus for pieces of equipment belonging to the same set:");
     for (n, lines) in &set.tiers {
         for line in lines {
-            let text = if line.text.is_empty() { format!("({n}): special effect") } else {
+            let text = if !line.fixed.is_empty() { format!("({n}): {}", line.fixed) }
+            else if line.text.is_empty() { format!("({n}): special effect") } else {
                 let factor = if line.factor.is_empty() { 1.0 } else {
                     catalog.set_levels.get(&line.factor).and_then(|l| l.get(level.max(1) as usize - 1).or(l.last())).copied().unwrap_or(1.0)
                 };
