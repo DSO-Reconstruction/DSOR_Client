@@ -200,22 +200,39 @@ pub struct FacesViewer;
 #[reflect(Component, Default)]
 pub struct FacesViewerUpright;
 
-/// After the animation pose: each sprite node's world rotation becomes the
-/// camera's (its translation stays the animation's, its depth mirrored); an
-/// upright one takes only the camera's heading.
+/// After the animation pose: each sprite node turns to look at the camera (its
+/// translation stays the animation's, its depth mirrored); an upright one
+/// takes only the camera's heading.
+/// A full sprite faces the camera's position, not its rotation: what its
+/// children hang along its depth then stays on the line to the camera.
+/// EVIDENCE: the drop glows (dropitems/glow_*) hang their plane about 0.4 m
+///   along the sprite's depth; turned with the camera's rotation, perspective
+///   slid it sideways the further the drop lay from the screen's middle (a
+///   ring at the left with its glow on its right, the user's recording
+///   20261104-2220-45, 0:57); the original's stay on their items there.
+/// FAILURE (2026-11-05): before this, offline at a0302_wildforest, the haze
+///   right of its emitter on the left of the screen, left of it on the right.
 fn face_viewer(
     cameras: Query<&GlobalTransform, (With<Camera3d>, Without<crate::rendering::highlight::HighlightCamera>)>,
     mut sprites: Query<(&mut Transform, &ChildOf, Has<FacesViewerUpright>), With<FacesViewer>>,
     parents: Query<&GlobalTransform>,
 ) {
     let Some(cam) = cameras.iter().next() else { return };
-    let cam_rot = cam.compute_transform().rotation;
+    let cam = cam.compute_transform();
+    let cam_rot = cam.rotation;
     let (yaw, _, _) = cam_rot.to_euler(EulerRot::YXZ);
     let cam_heading = Quat::from_rotation_y(yaw);
+    let cam_up = cam_rot * Vec3::Y;
     for (mut tf, parent, upright) in &mut sprites {
         let Ok(p) = parents.get(parent.parent()) else { continue };
         let parent_rot = p.compute_transform().rotation;
-        tf.rotation = parent_rot.inverse() * if upright { cam_heading } else { cam_rot };
+        let facing = if upright { cam_heading } else {
+            // Its -Z away from the camera, +Z to it, as the camera's own.
+            let at = p.transform_point(tf.translation);
+            let away = at - cam.translation;
+            if away.length_squared() > 1e-6 { Transform::default().looking_to(away, cam_up).rotation } else { cam_rot }
+        };
+        tf.rotation = parent_rot.inverse() * facing;
         // A sprite turned fully is mirrored along its depth: what hangs under it
         // tilts towards the camera as in the original, not away.
         // EVIDENCE: dropitems/glow_magic blue_pPlane2 (tilted 40 deg in its
