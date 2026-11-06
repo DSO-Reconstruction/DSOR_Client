@@ -1071,6 +1071,13 @@ pub(in crate::ui) fn send(
                             _ => true,
                         };
                         if allowed {
+                            // A mount used from the bag also becomes the O slot's
+                            // mount, as in the original (stickers::apply_drop).
+                            // FAILURE (2026-11-07): the Manticore was ridden but O
+                            //   kept the Onyx Tiger.
+                            let mount = views.album.sticker(&id).and_then(|s| items_catalogs.get(&items_data.catalog)?.items.get(&s.template))
+                                .is_some_and(|m| m.item_category == "Mount");
+                            if mount { pointer.sticker_drop = Some((2, id.clone(), 8)); }
                             commands.push(command);
                             // Its icon pops (crate::ui::album_overlays), the window untouched.
                             pop_at.0 = Some((id.clone(), time.elapsed_secs_f64()));
