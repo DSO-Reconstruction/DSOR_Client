@@ -271,7 +271,12 @@ fn set_section(card: &mut Card, catalog: &Catalog, set: &crate::ui::controls::it
     }
     card.text("Bonus for pieces of equipment belonging to the same set:", SET_HEADING);
     for (n, lines) in &set.tiers {
+        // A textless bonus beside one with its own text is that text's mechanic
+        // (Chillingly Cold (4): the Cold Chill aura and the line describing it):
+        // no "special effect" line then.
+        let described = lines.iter().any(|l| !l.fixed.is_empty() || !l.text.is_empty());
         for line in lines {
+            if described && line.fixed.is_empty() && line.text.is_empty() { continue; }
             // A written-out text with line breaks (a list of skills): one card
             // line each, the first after "(n):".
             if line.fixed.contains('\n') {
