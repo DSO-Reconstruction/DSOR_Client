@@ -847,11 +847,12 @@ pub fn render(mut commands:Commands,windows:Query<(Entity,&Window2018,&WindowCon
         if d.amount>1 || matches!(cell,Cell::Ingredient(_)) {
             // The original's cream (248,229,200 sampled), its right edge about
             // 7 units in from the cell's (20 px of a 162 px pitch); ours sat
-            // on the frame (the user, 2026-11-07: "too far right").
-            let at=Vec3::new(pos.x+size.x-7.0,pos.y-size.y+19.0,0.3);
+            // on the frame (the user, 2026-11-07: "too far right"). Size: the
+            // original's digits 26 px in a 161 px pitch, ours 23 in 165 (14.5).
+            let at=Vec3::new(pos.x+size.x-7.0,pos.y-size.y+21.0,0.3);
             let count=stack_count(d.amount);
-            text_right(&mut commands,&assets,&screen,group,count.clone(),at+Vec3::new(1.0,-1.0,-0.01),14.5,Color::BLACK,size.x-7.0);
-            text_right(&mut commands,&assets,&screen,group,count,at,14.5,Color::srgb_u8(248,229,200),size.x-7.0);
+            text_right(&mut commands,&assets,&screen,group,count.clone(),at+Vec3::new(1.0,-1.0,-0.01),16.5,Color::BLACK,size.x-7.0);
+            text_right(&mut commands,&assets,&screen,group,count,at,16.5,Color::srgb_u8(248,229,200),size.x-7.0);
         }
         if let (Cell::Equipment(slot),Some(item),Some((mesh,face,size,font)))=(cell,d.item,level.as_ref()) { if let Some(c)=level_centre(slot,b.rect) {
             commands.spawn((Mesh2d(mesh.clone()),MeshMaterial2d(face.clone()),Transform::from_translation(screen.world(b.k,c.x-size.x/2.0,c.y-size.y/2.0).extend(0.35))
