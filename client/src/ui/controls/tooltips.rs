@@ -169,7 +169,17 @@ pub(in crate::ui) fn overlay(mut commands: Commands, windows: Query<(&Window2018
                                     heading = catalog.name(template, item).to_owned(); body = clean_text(&meta.description);
                                     icon = catalog.icon(template,item).0.map(str::to_owned);
                                     if slot.kind == 1 { body.push_str(&format!("\nQuantity: {}",item.map_or(0,|i| i.third))); }
-                                    detail = Some(items::preview_card(catalog,layouts.get(&data.tooltip),template,item,item.map_or(0,|i|i.third),settings.current.advanced_tooltips(&keys,pointer.focus.is_some())));
+                                    // A Collector's Bag shortcut (kind 2: the mount on O, a pet):
+                                    // the sticker's card, as the original's. As a bag item it read
+                                    // "Not yet collected" (no inventory stack) for an owned mount
+                                    // (the user's recording 20261106-1710-34, 0:30).
+                                    detail = Some(if slot.kind == 2 {
+                                        let name = catalog.name(template, None).to_owned();
+                                        items::sticker_card(catalog, layouts.get(&data.tooltip), template, &name,
+                                            status_catalogs.get(&status_bar.catalog), &views.album.bag_values(), &views.album.class, None)
+                                    } else {
+                                        items::preview_card(catalog,layouts.get(&data.tooltip),template,item,item.map_or(0,|i|i.third),settings.current.advanced_tooltips(&keys,pointer.focus.is_some()))
+                                    });
                                 }
                             } else { body = "Empty slot".into(); }
                         }

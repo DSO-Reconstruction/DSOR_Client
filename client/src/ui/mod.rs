@@ -1224,6 +1224,23 @@ fn spawn_windows(
                 if let Some(art) = own.art.as_mut() { art.tex = Some(format!("textures/ui/emblem_class_{}.png", class_emblem(class))); }
                 emblem = own;
                 &emblem
+            } else if let Some(k) = round_hover_scale(&w.id).filter(|_| w.art.is_some()) {
+                // A round slot's hover ring hugs its socket, as the original's.
+                // EVIDENCE: the user's recording 20261106-1710-34: at 0:55 the
+                //   original's companion ring stays inside the gold rim; ours
+                //   (0:58, potion R) spilled well over it, drawn over the whole
+                //   41.5 px button where the socket is 33.1.
+                let mut own = w.clone();
+                if let Some(art) = own.art.as_mut() {
+                    let [l, t, r, b] = bounds(&art.pos);
+                    let (cx, cy) = ((l + r) * 0.5, (t + b) * 0.5);
+                    for p in art.pos.chunks_exact_mut(2) {
+                        p[0] = cx + (p[0] - cx) * k;
+                        p[1] = cy + (p[1] - cy) * k;
+                    }
+                }
+                emblem = own;
+                &emblem
             } else { w };
             let gate = controls.gate(&layout.window, w);
             if let Some(art) = &w.art {
@@ -1333,7 +1350,11 @@ fn spawn_windows(
                     // (assets/fonts/tahoma.ttf, copied by hand).
                     TextFont {
                         font: assets.load("fonts/tahoma.ttf").into(),
-                        font_size: bevy::text::FontSize::Px(label.size * FONT_SCALE * screen.scale),
+                        // The Wisdom bar's "Wisdom Level n" a little smaller: the
+                        // original's is about 0.85 of ours high (the user's
+                        // recording 20261106-1710-34: 0:48 original, 3:09 ours).
+                        font_size: bevy::text::FontSize::Px(label.size * FONT_SCALE * screen.scale
+                            * if value == Some(ValueKind::BarWisdomLevel) { 0.85 } else { 1.0 }),
                         ..default()
                     },
                     TextColor(Color::srgba(label.color[0], label.color[1], label.color[2], label.color[3])),
@@ -1487,6 +1508,19 @@ fn follow_outlines(
             let offset = copy.shadow * screen.scale;
             if shadow.offset != offset { shadow.offset = offset; }
         }
+    }
+}
+
+/// The hover ring's scale on the bottom bar's round slots: the potion and
+/// companion buttons (41.5 px) around their 33.1 px sockets, the mount button's
+/// ring (36.5 px) around its 32.1 px icon. None for any other widget.
+fn round_hover_scale(id: &str) -> Option<f32> {
+    let parent = id.strip_suffix("/mouseover")?;
+    let leaf = parent.rsplit('/').next()?;
+    match leaf {
+        "LeftPotionTop" | "LeftPotionBottom" | "RightPotionTop" | "RightPotionBottom" => Some(0.82),
+        "Mountslot" => Some(0.9),
+        _ => None,
     }
 }
 
