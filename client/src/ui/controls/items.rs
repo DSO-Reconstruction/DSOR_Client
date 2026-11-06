@@ -755,10 +755,13 @@ pub(super) fn text(commands:&mut Commands,assets:&AssetServer,screen:&Screen,par
         TextColor(color),Anchor::TOP_LEFT,bevy::text::TextBounds::new_horizontal(width*screen.scale),
         Transform::from_translation(at).with_scale(Vec3::splat(1.0/screen.scale)),RenderLayers::layer(LAYER),ChildOf(parent)));
 }
-/// A stack's count as a cell writes it: whole below 1000, else thousands with
-/// a "k" ("4k", "50k"; the user, 2026-11-01: "it's 1000 that it shortens").
+/// A stack's count as a cell writes it: whole below 10000, else thousands with
+/// a "k" ("39k", "50k").
+/// EVIDENCE: the user's original shot (2026-11-07) writes "9502", "875",
+///   "48k", "50k"; the bar's essence "39k".
+/// FAILURE (2026-11-01 to 11-07): shortened from 1000, so 8938 showed "8k".
 pub(super) fn stack_count(amount:u32)->String {
-    if amount>=1000 {format!("{}k",amount/1000)} else {amount.to_string()}
+    if amount>=10_000 {format!("{}k",amount/1000)} else {amount.to_string()}
 }
 /// A right-aligned label whose top right is `at`.
 #[allow(clippy::too_many_arguments)]
@@ -842,10 +845,13 @@ pub fn render(mut commands:Commands,windows:Query<(Entity,&Window2018,&WindowCon
         // little larger than ours was, as the original's (the user's shots,
         // 2026-11-01: "50k", "380" 24 px high in a 145 px cell, ours 22).
         if d.amount>1 || matches!(cell,Cell::Ingredient(_)) {
-            let at=Vec3::new(pos.x+size.x-4.0,pos.y-size.y+19.0,0.3);
+            // The original's cream (248,229,200 sampled), its right edge about
+            // 7 units in from the cell's (20 px of a 162 px pitch); ours sat
+            // on the frame (the user, 2026-11-07: "too far right").
+            let at=Vec3::new(pos.x+size.x-7.0,pos.y-size.y+19.0,0.3);
             let count=stack_count(d.amount);
-            text_right(&mut commands,&assets,&screen,group,count.clone(),at+Vec3::new(1.0,-1.0,-0.01),14.5,Color::BLACK,size.x-4.0);
-            text_right(&mut commands,&assets,&screen,group,count,at,14.5,Color::WHITE,size.x-4.0);
+            text_right(&mut commands,&assets,&screen,group,count.clone(),at+Vec3::new(1.0,-1.0,-0.01),14.5,Color::BLACK,size.x-7.0);
+            text_right(&mut commands,&assets,&screen,group,count,at,14.5,Color::srgb_u8(248,229,200),size.x-7.0);
         }
         if let (Cell::Equipment(slot),Some(item),Some((mesh,face,size,font)))=(cell,d.item,level.as_ref()) { if let Some(c)=level_centre(slot,b.rect) {
             commands.spawn((Mesh2d(mesh.clone()),MeshMaterial2d(face.clone()),Transform::from_translation(screen.world(b.k,c.x-size.x/2.0,c.y-size.y/2.0).extend(0.35))
