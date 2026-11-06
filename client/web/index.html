@@ -29,13 +29,14 @@
      ?gpu=webgpu forces one. Game data: serve the converted asset tree as assets/
      next to this page. Pick a map with ?map=a0302_wildforest
 
-     Sign-in: with ?relay=wss://host and no account/session/user in the link, this
+     Sign-in: with no account/session/user (nor ?map=) in the link, this
      page asks for the account here and logs in THROUGH the relay (crates/relay
      `?login=host:port`: first text message the JSON body, one reply
      "<status>\n<body>"), so the password never appears in a URL. The game is then
      started with the session the account service returned (account + sid, as
      ?account=&sid= would), and that is taken out of the address bar again.
-     ?api=host:port names the account service as the relay reaches it
+     The relay is the page's own address (tools/serve_site.py) unless ?relay=
+     names another. ?api=host:port names the account service as the relay reaches it
      (default 127.0.0.1:8080). -->
 <body>
 <div id="login" hidden>
@@ -115,7 +116,11 @@
     });
   }
 
-  const relay = params.get('relay');
+  // The relay is this site's own address unless the link names another
+  // (tools/serve_site.py passes WebSockets to it): the link is the site.
+  const relay = params.get('relay')
+    || (location.protocol === 'https:' ? `wss://${location.host}`
+      : location.protocol === 'http:' ? `ws://${location.host}` : null);
   const signedIn = params.get('account') || params.get('sid') || params.get('user');
   const original = location.href;
   if (relay && !signedIn && !params.get('map')) {
@@ -129,6 +134,7 @@
     params.set('sid', String(reply.session.session_id));
     params.set('server', `${host}:${port}`);
     params.set('api', api);
+    params.set('relay', relay);
     history.replaceState(null, '', `${location.pathname}?${params}`);
   }
 
