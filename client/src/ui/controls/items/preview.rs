@@ -464,7 +464,7 @@ pub(super) fn headed_card(d: &DisplayItem, catalog: &Catalog, layout: Option<&La
         // and modifiers instead (card_lines), as the original's.
         if let Some(lines)=meta.filter(|m|!m.card_lines.is_empty()).map(|m|&m.card_lines) {
             card.section("Description");
-            for (i,line) in lines.iter().enumerate() {card.text(line,if i==0 {WHITE} else {BLUE});}
+            for (i,line) in lines.iter().enumerate() {if i==0 {card.text(&format!("<i>{line}</>"),WHITE);} else {card.text(line,BLUE);}}
         } else if meta.is_some_and(|m|!m.description.is_empty() && !m.description.starts_with("Localize:")) {
             card.section(if matches!(rarity,"Unique"|"Set") {"Item Effects"} else {"Description"});
             card.text(&meta.unwrap().description,if matches!(rarity,"Unique"|"Set") {GOLD} else {WHITE});
@@ -483,7 +483,7 @@ pub(super) fn headed_card(d: &DisplayItem, catalog: &Catalog, layout: Option<&La
         card.price(item.level);
     } else if let Some(m)=meta.filter(|m|!m.card_lines.is_empty()) {
         card.rule();
-        for (i,line) in m.card_lines.iter().enumerate() {card.text(line,if i==0 {WHITE} else {BLUE});}
+        for (i,line) in m.card_lines.iter().enumerate() {if i==0 {card.text(&format!("<i>{line}</>"),WHITE);} else {card.text(line,BLUE);}}
     } else if let Some(m)=meta.filter(|m|!m.description.is_empty() && !m.description.starts_with("Localize:")) {card.rule();card.text(&m.description,WHITE);}
     if d.waiting {card.hint("Free up a slot to collect this item automatically.");}
     if d.amount==0 {card.hint("Not yet collected");}

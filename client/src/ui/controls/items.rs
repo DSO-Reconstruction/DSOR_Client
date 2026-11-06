@@ -902,7 +902,8 @@ pub fn overlay(mut commands:Commands,ui:Res<Interaction>,windows:Query<(&Window2
     net:Option<NonSend<crate::network::net::Net>>,(data,catalogs,layouts):(Res<Data>,Res<Assets<Catalog>>,Res<Assets<Layout>>),assets:Res<AssetServer>,screen:Res<Screen>,
     (old,mut transforms):(Query<Entity,With<Overlay>>,Query<(&mut Transform,Option<&WornCard>),With<Overlay>>),
     (mut meshes,mut materials):(ResMut<Assets<Mesh>>,ResMut<Assets<UiMaterial>>),
-    mut last:Local<Option<(String,u64,bool,bool,u32,bool)>>, settings:Res<settings::Settings>,keys:Res<ButtonInput<KeyCode>>,pointer:Res<Pointer>) {
+    mut last:Local<Option<(String,u64,bool,bool,u32,bool)>>, settings:Res<settings::Settings>,keys:Res<ButtonInput<KeyCode>>,pointer:Res<Pointer>,
+    (status_bar,status_catalogs,views):(Res<super::effects::StatusBar>,Res<Assets<super::effects::Catalog>>,Res<super::systems::Views>)) {
     let catalog=catalogs.get(&data.catalog);
     if let Some(n)=&net { preview::note_worn(&n.inventory); }
     let point=primary.single().ok().filter(|w|w.focused).and_then(|w|w.cursor_position().map(|p|p*(BASE_H/w.height().max(1.0))));
@@ -923,7 +924,13 @@ pub fn overlay(mut commands:Commands,ui:Res<Interaction>,windows:Query<(&Window2
     let layout=layouts.get(&data.tooltip);
     let enabled=point.is_some() && ui.split.is_none() && (dragged.is_some() || (settings.current.tooltips && pointer.down.is_none() && pointer.drag.is_none() && pointer.spell_drag.is_none()));
     let key=display.as_ref().filter(|_|enabled).map(|d|(format!("{}:{}:{}",d.template,d.item.map_or(0,|i|i.id),d.amount),net.as_ref().map_or(0,|n|n.inventory.revision),dragged.is_some(),advanced,screen.scale.to_bits(),layout.is_some()));
-    let card=display.as_ref().zip(catalog).filter(|_|dragged.is_none()).map(|(d,c)|preview::card(d,c,layout,advanced));
+    // A pet or mercenary: its Collector's Bag card, with the Effect section
+    // (pet effect, bag bonuses) the original's inventory card shows; the item
+    // card had no stats at all (the user, 2026-11-06: "this dog shows no stats").
+    let card=display.as_ref().zip(catalog).filter(|_|dragged.is_none()).map(|(d,c)| match c.items.get(d.template).filter(|m| matches!(m.item_category.as_str(),"Pet"|"Mercenary")) {
+        Some(_)=>preview::sticker(c,layout,d.template,c.name(d.template,d.item),status_catalogs.get(&status_bar.catalog),&views.album.bag_values(),&views.album.class,None,None),
+        None=>preview::card(d,c,layout,advanced),
+    });
     // The worn item of the hovered one's slot, its card beside it under
     // "Equipped", as the original compares them (the user's recording
     // 20261031-1658-42: the worn Essence of Vigor beside the hovered one).

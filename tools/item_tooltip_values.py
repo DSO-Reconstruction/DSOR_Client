@@ -31,6 +31,11 @@ def program(raw, local=lambda key, fallback='': fallback):
         if not sep:
             continue
         args = [a.strip() for a in args.split(',')]
+        # "hideComparison": a modifier the card does not list as a value (the
+        # essences' DamageFactorPvP, shown only as "No effect in official
+        # arenas"; the original's essence card has no "Damage against players").
+        if any(a.lower() == 'hidecomparison' for a in args):
+            continue
         try:
             values = [float(v) for v in args[0].split('|')]
         except ValueError:
