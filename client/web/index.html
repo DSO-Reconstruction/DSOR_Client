@@ -8,15 +8,50 @@
   <style>
     html, body { margin: 0; height: 100%; background: #0d0f14; overflow: hidden; }
     canvas { display: block; width: 100%; height: 100%; outline: none; }
+    #login { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
+      font: 15px/1.4 system-ui, sans-serif; color: #e8dcc0; }
+    #login form { width: min(320px, calc(100% - 32px)); padding: 28px; background: #171a22;
+      border: 1px solid #3a3326; border-radius: 6px; box-shadow: 0 10px 40px #0008; }
+    #login h1 { margin: 0 0 18px; font-size: 22px; font-weight: 600; color: #e6b964; text-align: center; }
+    #login label { display: block; margin: 12px 0 4px; font-size: 13px; color: #b8ab8c; }
+    #login input { box-sizing: border-box; width: 100%; padding: 9px 10px; border-radius: 4px;
+      border: 1px solid #4a4232; background: #0f1117; color: #f2ead6; font: inherit; }
+    #login input:focus { outline: none; border-color: #e6b964; }
+    #login button { width: 100%; margin-top: 20px; padding: 10px; border: 0; border-radius: 4px;
+      background: #b8862f; color: #16120a; font: inherit; font-weight: 600; cursor: pointer; }
+    #login button:disabled { opacity: .6; cursor: default; }
+    #login .status { min-height: 1.4em; margin-top: 12px; font-size: 13px; text-align: center; }
+    #login .error { color: #ff8a73; }
   </style>
 </head>
 <!-- The browser client's loader (tools/build_web.sh): the WebGPU build when the
      browser gives a WebGPU adapter, the WebGL2 build otherwise. ?gpu=webgl2 or
      ?gpu=webgpu forces one. Game data: serve the converted asset tree as assets/
-     next to this page. Pick a map with ?map=a0302_wildforest -->
+     next to this page. Pick a map with ?map=a0302_wildforest
+
+     Sign-in: with ?relay=wss://host and no account/session/user in the link, this
+     page asks for the account here and logs in THROUGH the relay (crates/relay
+     `?login=host:port`: first text message the JSON body, one reply
+     "<status>\n<body>"), so the password never appears in a URL. The game is then
+     started with the session the account service returned (account + sid, as
+     ?account=&sid= would), and that is taken out of the address bar again.
+     ?api=host:port names the account service as the relay reaches it
+     (default 127.0.0.1:8080). -->
 <body>
+<div id="login" hidden>
+  <form autocomplete="on">
+    <h1>DSOR</h1>
+    <label for="user">Username</label>
+    <input id="user" name="username" autocomplete="username" required>
+    <label for="pass">Password</label>
+    <input id="pass" name="password" type="password" autocomplete="current-password" required>
+    <button type="submit">Sign in</button>
+    <div class="status" role="status"></div>
+  </form>
+</div>
 <script type="module">
-  const asked = new URLSearchParams(location.search).get('gpu');
+  const params = new URLSearchParams(location.search);
+  const asked = params.get('gpu');
   async function webgpu() {
     try {
       return !!(navigator.gpu && await navigator.gpu.requestAdapter());
@@ -24,10 +59,89 @@
       return false;
     }
   }
+
+  // One login at the account service through the relay; resolves to its JSON reply.
+  function relayLogin(relay, api, username, password) {
+    return new Promise((resolve, reject) => {
+      const base = relay.split('/').length === 3 ? relay + '/' : relay;
+      const url = base + (base.includes('?') ? '&' : '?') + 'login=' + encodeURIComponent(api);
+      let ws;
+      try { ws = new WebSocket(url); } catch (e) { reject('Cannot reach the relay.'); return; }
+      const timer = setTimeout(() => { ws.close(); reject('The account server did not answer.'); }, 15000);
+      ws.onopen = () => ws.send(JSON.stringify({ username, password }));
+      ws.onerror = () => { clearTimeout(timer); reject('Cannot reach the relay.'); };
+      ws.onmessage = (event) => {
+        clearTimeout(timer);
+        ws.close();
+        const text = String(event.data);
+        const cut = text.indexOf('\n');
+        const status = parseInt(cut < 0 ? text : text.slice(0, cut), 10);
+        let body = {};
+        try { body = JSON.parse(cut < 0 ? '{}' : text.slice(cut + 1)); } catch (e) {}
+        if (status >= 200 && status < 300 && body.session) resolve(body);
+        else reject(body.error || `Sign-in refused (${status || 'no answer'}).`);
+      };
+    });
+  }
+
+  function askLogin(relay, api) {
+    const box = document.getElementById('login');
+    const form = box.querySelector('form');
+    const status = box.querySelector('.status');
+    const button = form.querySelector('button');
+    box.hidden = false;
+    document.getElementById('user').focus();
+    return new Promise((resolve) => {
+      form.addEventListener('submit', async (event) => {
+        event.preventDefault();
+        const user = document.getElementById('user');
+        const pass = document.getElementById('pass');
+        button.disabled = true;
+        status.className = 'status';
+        status.textContent = 'Signing in...';
+        try {
+          const reply = await relayLogin(relay, api, user.value.trim(), pass.value);
+          pass.value = '';
+          box.remove();
+          resolve(reply);
+        } catch (error) {
+          pass.value = '';
+          status.className = 'status error';
+          status.textContent = String(error);
+          button.disabled = false;
+          pass.focus();
+        }
+      });
+    });
+  }
+
+  const relay = params.get('relay');
+  const signedIn = params.get('account') || params.get('sid') || params.get('user');
+  const original = location.href;
+  if (relay && !signedIn && !params.get('map')) {
+    const api = params.get('api') || '127.0.0.1:8080';
+    const reply = await askLogin(relay, api);
+    const launch = reply.launch || {};
+    const host = launch.host || api.split(':')[0];
+    const port = launch.login_port || 2190;
+    // The game reads its options from the address once, at start.
+    params.set('account', String(reply.session.account_id));
+    params.set('sid', String(reply.session.session_id));
+    params.set('server', `${host}:${port}`);
+    params.set('api', api);
+    history.replaceState(null, '', `${location.pathname}?${params}`);
+  }
+
   const kind = asked === 'webgl2' || asked === 'webgpu' ? asked : (await webgpu() ? 'webgpu' : 'webgl2');
   console.log(`DSOR: ${kind} build`);
   const client = await import(`./${kind}/dsor-client.js`);
-  await client.default({ module_or_path: `./${kind}/dsor-client_bg.wasm` });
+  // The session is read; it leaves the address bar (and so the history).
+  const restore = () => { if (location.href !== original) history.replaceState(null, '', original); };
+  try {
+    await client.default({ module_or_path: `./${kind}/dsor-client_bg.wasm` });
+  } finally {
+    restore();
+  }
 </script>
 </body>
 </html>
