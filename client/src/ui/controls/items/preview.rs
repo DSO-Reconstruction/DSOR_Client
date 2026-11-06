@@ -351,30 +351,27 @@ pub(super) fn headed_card(d: &DisplayItem, catalog: &Catalog, layout: Option<&La
     card.background = Color::srgba(0.01, 0.01, 0.005, 0.985);
     if let Some(heading) = heading { card.centered(heading, MUTED, false); card.rule(); }
     let (rarity, tint) = rarity(catalog, d.template, d.item);
-    // The heading as Dofus draws it: icon, name, "Level n \u{2022} type"
-    // (the item's level, else the level it requires; the rarity in the name's colour).
-    let (icon, background, frame) = catalog.icon_parts(d.template, d.item);
-    let icons: Vec<String> = [background, icon, frame].into_iter().flatten().map(str::to_owned).collect();
-    let level = d.item.map(|i| i.durability).filter(|l| *l > 0).or_else(|| meta.map(|m| m.required_level.max(d.unlock)));
-    // "EquipmentGem" -> "Equipment Gem".
-    let kind = meta.map(|m| m.category.as_str()).filter(|c| !c.is_empty()).map(|c| {
-        let mut out = String::new();
-        for (i, ch) in c.chars().enumerate() {
-            if i > 0 && ch.is_uppercase() && !out.ends_with(' ') { out.push(' '); }
-            out.push(ch);
-        }
-        out
-    });
-    let subtitle = match (level, kind) {
-        (Some(l), Some(k)) => format!("Level {l} \u{2022} {k}"),
-        (Some(l), None) => format!("Level {l}"),
-        (None, Some(k)) => k,
-        (None, None) => String::new(),
-    };
-    card.header(catalog.name(d.template,d.item), tint, &icons, &subtitle);
+    // The original's head: no icon; the name centred in its rarity's colour, a
+    // stack's count before it ("39047x Essence of Vigor"); equipment then its
+    // rarity ("Set Item", "Improved Item") and "Item level: n". No
+    // "Quantity: n / max" line.
+    // EVIDENCE: the user's original shots (2026-11-07): the Essence of Vigor
+    //   cards and the trader's Splendid Durian Gloves beside the Equipped
+    //   Steel Gauntlets.
+    // FAILURE (to 2026-11-07): an icon, "Level 55 • Ammunition" and
+    //   "Quantity: 996 / 50000" ("do you see this in the original???").
+    // UNVERIFIED: the original's italic slot line ("(Hands,Gloves)") is not
+    //   written (no such names in the catalog yet).
+    let essence = meta.is_some_and(|m| !m.card_lines.is_empty());
+    let name = catalog.name(d.template, d.item);
+    let title = if meta.is_some_and(|m| m.max_stack > 1) && d.amount > 1 { format!("{}x {}", d.amount, name.trim()) } else { name.trim().to_owned() };
+    card.centered(&title, tint, false);
+    if !essence && meta.is_some_and(|m| !m.slots.is_empty() && m.max_stack == 1) {
+        card.text(&format!("{rarity} Item"), tint);
+        if let Some(l) = d.item.map(|i| i.durability).filter(|l| *l > 0) { card.text(&format!("Item level: {l}"), WHITE); }
+    }
     if let Some(m) = meta {
         if m.required_level.max(d.unlock)>1 { card.hint(&format!("Required level: {}",m.required_level.max(d.unlock))); }
-        if m.max_stack>1 { card.text(&format!("Quantity: {} / {}",d.amount,m.max_stack),WHITE); }
     }
 
     if let Some(item) = d.item {
@@ -462,8 +459,8 @@ pub(super) fn headed_card(d: &DisplayItem, catalog: &Catalog, layout: Option<&La
         }
         // An essence's description is a "Localize:" placeholder: its slot line
         // and modifiers instead (card_lines), as the original's.
+        // An essence's lines follow its name directly, as the original's.
         if let Some(lines)=meta.filter(|m|!m.card_lines.is_empty()).map(|m|&m.card_lines) {
-            card.section("Description");
             for (i,line) in lines.iter().enumerate() {if i==0 {card.text(&format!("<i>{line}</>"),WHITE);} else {card.text(line,BLUE);}}
         } else if meta.is_some_and(|m|!m.description.is_empty() && !m.description.starts_with("Localize:")) {
             card.section(if matches!(rarity,"Unique"|"Set") {"Item Effects"} else {"Description"});
@@ -479,7 +476,8 @@ pub(super) fn headed_card(d: &DisplayItem, catalog: &Catalog, layout: Option<&La
         card.gap(4.0); card.rule();
         // release261: field_34 is per-instance glyph yield; field_30 is
         // the complete stack's selling value (server item_economy_values.py).
-        if item.fifty_second>0 {card.melting(item.fifty_second);}
+        // The original's essence card has no melting value.
+        if item.fifty_second>0 && !essence {card.melting(item.fifty_second);}
         card.price(item.level);
     } else if let Some(m)=meta.filter(|m|!m.card_lines.is_empty()) {
         card.rule();
@@ -487,8 +485,8 @@ pub(super) fn headed_card(d: &DisplayItem, catalog: &Catalog, layout: Option<&La
     } else if let Some(m)=meta.filter(|m|!m.description.is_empty() && !m.description.starts_with("Localize:")) {card.rule();card.text(&m.description,WHITE);}
     if d.waiting {card.hint("Free up a slot to collect this item automatically.");}
     if d.amount==0 {card.hint("Not yet collected");}
-    if d.item.is_some() && d.amount>1 && !d.read_only {card.hint("Ctrl + click: split stack");}
-    if !advanced && d.item.is_some() {card.gap(3.0);card.rule();card.hint("Hold Y for advanced view.");}
+    if d.item.is_some() && d.amount>1 && !d.read_only && !essence {card.hint("Ctrl + click: split stack");}
+    if !advanced && d.item.is_some() && !essence {card.gap(3.0);card.rule();card.hint("Hold Y for advanced view.");}
     card
 }
 
