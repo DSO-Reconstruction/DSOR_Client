@@ -459,6 +459,15 @@ pub(in crate::ui) fn sync(
     if built.inputs != Some(inputs) || state.is_changed() {
         built.inputs = Some(inputs);
         built.current = [false; VIEW_WINDOWS.len()];
+        // The Collector's Bag bonuses and our class, closed bag or not: the
+        // pet cards anywhere write them (album::bonuses).
+        let fallback = SystemsCatalog::default();
+        let catalog = catalogs.get(&state.catalog).unwrap_or(&fallback);
+        let sources = Sources { net: &net, catalog, items, names, state: &state, class, talents: talent_catalog, bonuses: bonuses.as_deref().map(|b| &b.0) };
+        let bag = album::bonuses(&sources);
+        let class_name = sources.class_name();
+        if views.album.bag != bag { views.album.bag = bag; }
+        if views.album.class != class_name { views.album.class = class_name.to_owned(); }
     }
     // Development builds (and DSOR_FLAGS=uiaudit) rebuild the current views now
     // and then: one that changed means an input above was missed (a Net field

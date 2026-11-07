@@ -230,6 +230,31 @@ pub(in crate::ui) struct RewardView {
     pub hint: bool,
 }
 
+/// The Collector's Bag bonuses earned (variable -> millionths): every book's
+/// rewards reached by the stickers owned, capped by their variable's limit.
+/// Kept current whether the bag is open or not (systems::sync): a pet card
+/// hovered in the inventory writes them.
+/// FAILURE (2026-11-07): built only with the open album, so a pet's card
+///   showed "Collector's Bag Effect:" with nothing under it until the bag had
+///   been opened ("sometimes the collector bag buff doesn't show").
+pub(super) fn bonuses(sources: &Sources) -> std::collections::BTreeMap<String, u32> {
+    let (catalog, net) = (sources.catalog, sources.net);
+    let mut earned: std::collections::HashMap<&str, f32> = std::collections::HashMap::new();
+    if let Some(items) = sources.items {
+        for book in catalog.stickerbooks.iter().filter(|b| !b.rewards.is_empty()) {
+            let owned = catalog.stickers.iter().filter(|(id, def)| def.book == book.id
+                && owned_entry(&net.stickerbook, id, def).is_some_and(|e| e.state >= StickerbookEntry::OWNED)).count() as u32;
+            for (variable, amount) in book.rewards.iter().filter(|r| r.at <= owned).filter_map(|r| items.raises.get(&r.item)) {
+                *earned.entry(variable.as_str()).or_insert(0.0) += amount;
+            }
+        }
+        for (variable, value) in earned.iter_mut() {
+            if let Some(limit) = items.variables.get(*variable) { *value = value.min(*limit); }
+        }
+    }
+    earned.into_iter().map(|(k, v)| (k.to_owned(), (v * 1e6).round() as u32)).collect()
+}
+
 pub(super) fn album(sources: &Sources) -> Album {
     let catalog = sources.catalog;
     let state = sources.state;
@@ -329,20 +354,7 @@ pub(super) fn album(sources: &Sources) -> Album {
             RewardView { item: r.item.clone(), title, bonus: card.map(|c| c.lines.clone()), description, footer: format!("Reward for {} x {kind}", r.at), amount: r.amount, lifetime, hint }
         }).collect()).unwrap_or_default()
     };
-    let mut earned: std::collections::HashMap<&str, f32> = std::collections::HashMap::new();
-    if let Some(items) = sources.items {
-        for book in catalog.stickerbooks.iter().filter(|b| !b.rewards.is_empty()) {
-            let owned = catalog.stickers.iter().filter(|(id, def)| def.book == book.id
-                && owned_entry(&net.stickerbook, id, def).is_some_and(|e| e.state >= StickerbookEntry::OWNED)).count() as u32;
-            for (variable, amount) in book.rewards.iter().filter(|r| r.at <= owned).filter_map(|r| items.raises.get(&r.item)) {
-                *earned.entry(variable.as_str()).or_insert(0.0) += amount;
-            }
-        }
-        for (variable, value) in earned.iter_mut() {
-            if let Some(limit) = items.variables.get(*variable) { *value = value.min(*limit); }
-        }
-    }
-    let bag = earned.into_iter().map(|(k, v)| (k.to_owned(), (v * 1e6).round() as u32)).collect();
+    let bag = bonuses(sources);
     let banners = catalog.album_banners.len();
     let banner_index = if banners == 0 { 0 } else { state.album_banner % banners };
     let new = all.iter().filter(|(_, def)| def.new).take(MOST_NEW).map(|(id, def)| sticker(id, def)).collect();
