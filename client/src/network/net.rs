@@ -259,6 +259,9 @@ pub struct Net {
     pub talent_points: Option<dsor_proto::commands::inventory::TalentCategoryPointsInfo>,
     /// The Skill tree presets bought beyond the free ones (UnlockSkillTalentPreselectionInfo 285).
     pub skill_presets_unlocked: Option<u32>,
+    /// The travel map's access bits (NewPlayer +0x130): bit MapLookupIndex - 1
+    /// set for a map the character may travel to (local_map::MapNames::travel_unlocked).
+    pub travel_unlocks: Vec<u32>,
     /// The collector's album (StickerbookInfo 303, StickerbookItemInfo 304): the
     /// entries owned, by resource id (state 2 owned, 3 a favourite).
     pub stickerbook: HashMap<String, dsor_proto::commands::systems::StickerbookEntry>,
@@ -1129,6 +1132,7 @@ pub fn start_offline(world: &mut World, class: u8, gender: u8) {
         talents: None,
         talent_points: None,
         skill_presets_unlocked: None,
+        travel_unlocks: Vec::new(),
         stickerbook: HashMap::new(),
         recipes: Vec::new(),
         event_progress: HashMap::new(),
@@ -1443,6 +1447,7 @@ pub(crate) fn start_session(world: &mut World, config: NetConfig) {
         talents: None,
         talent_points: None,
         skill_presets_unlocked: None,
+        travel_unlocks: Vec::new(),
         stickerbook: HashMap::new(),
         recipes: Vec::new(),
         event_progress: HashMap::new(),
@@ -1944,6 +1949,7 @@ pub(crate) fn on_command(net: &mut Net, command: ServerCommand, actor: Option<u3
             // release261: NewPlayer carries no health or resource; InventoryInfo
             // ends with both (production inventory_codec.py:476-477).
             net.level = Some(p.words_240[1]);
+            net.travel_unlocks = p.words_272.clone();
             net.xp = Some((p.words_240[2], p.words_240[3], p.words_240[4]));
             net.wallet = Some(p.currencies);
             // +376, after the draken: the Glyphs of Power (DSOR_Server

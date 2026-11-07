@@ -94,7 +94,7 @@ const STICKER_GAP: f32 = 2.5;
 pub(in crate::ui) fn overlay(mut commands: Commands, windows: Query<(&Window2018, &WindowControls, &Visibility, &Transform), Without<Tooltip>>,
     primary: Query<&Window, With<PrimaryWindow>>, screen: Res<Screen>, settings: Res<settings::Settings>,
     (pointer,keys,figures,shown,views,real):(Res<Pointer>,Res<ButtonInput<KeyCode>>,Res<Figures>,Res<currency::Shown>,Res<systems::Views>,Res<Time<Real>>),
-    (net, social_ui, map_names): (Option<NonSend<crate::network::net::Net>>, Res<social::SocialUi>, Res<Assets<crate::ui::local_map::MapNames>>), hotbar: Res<hotbar::Hotbar>,
+    (net, social_ui, map_names, current_map): (Option<NonSend<crate::network::net::Net>>, Res<social::SocialUi>, Res<Assets<crate::ui::local_map::MapNames>>, Option<Res<crate::world::map::CurrentMap>>), hotbar: Res<hotbar::Hotbar>,
     (data, catalogs, dialogue): (Res<items::Data>, Res<Assets<items::Catalog>>, Res<dialogue::Presentation>), layouts: Res<Assets<Layout>>, loaded: Res<Loaded>,
     (skill_tables, status_bar, status_catalogs, status_slots): (Res<Assets<crate::gameplay::skills::SkillTable>>,
         Res<effects::StatusBar>, Res<Assets<effects::Catalog>>, Query<&effects::EffectSlot>), assets: Res<AssetServer>,
@@ -264,7 +264,9 @@ pub(in crate::ui) fn overlay(mut commands: Commands, windows: Query<(&Window2018
                 // A travel map destination: its name, kind and travel costs.
                 Action::Travel(map) => {
                     let Some(names) = map_names.get(&loaded.map_names) else { return };
-                    (heading, body) = names.travel_tooltip(map);
+                    let here = current_map.as_ref().is_some_and(|c| c.name == *map);
+                    let bits = net.as_deref().map_or(&[][..], |n| n.travel_unlocks.as_slice());
+                    (heading, body) = names.travel_tooltip(map, net.as_deref().and_then(|n| n.level), here, names.travel_unlocked(map, bits));
                 }
                 // A booking's credited item: its card.
                 Action::Social(social::Social::BookingItem(n)) if catalog.is_some() => {
@@ -424,7 +426,7 @@ pub(in crate::ui) fn overlay(mut commands: Commands, windows: Query<(&Window2018
             // Sized to its text at the size it is drawn.
             let mut card = Card::new(260.0,template);
             card.shrink(COMPACT_TEXT);
-            let width = heading.lines().chain(body.lines()).map(|s| crate::network::chat::text_width(s,card.text_size()))
+            let width = heading.lines().chain(body.lines()).map(|s| crate::network::chat::text_width(&card::plain(s),card.text_size()))
                 .fold(0.0,f32::max).ceil()+28.0;
             card.width = width.clamp(48.0,260.0);
             card

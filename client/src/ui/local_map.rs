@@ -88,20 +88,61 @@ impl MapNames {
     }
     /// A difficulty's name (_Template_MapDifficulty: Normal ... Parallel World Bloodshed).
     pub(in crate::ui) fn difficulty_name(&self, level: u32) -> String { self.0.get(&format!("difficulty:{level}")).cloned().unwrap_or_else(|| format!("Difficulty {level}")) }
-    /// A destination's gold price, copper (_Template_TravelCosts PriceVC).
-    pub(in crate::ui) fn travel_price(&self, map: &str) -> u64 {
-        self.0.get(&format!("travel_vc:{map}")).and_then(|v| v.parse().ok()).unwrap_or(0)
+    /// A destination's gold price, copper, for a player of `level`: its
+    /// PriceVC (_Template_TravelCosts) times the level's
+    /// VirtualCurrencyCostMultiplier (_Template_DynamicLevelCosts), rounded.
+    /// EVIDENCE: the user's original clip 20261107-1534-28, level 37 (x117.5):
+    ///   Spawning Ground 1400 -> 16 Gold 45 Silver 0 Copper, Great Desert 935 ->
+    ///   10 Gold 98 Silver 63 Copper.
+    /// FAILURE (to 2026-11-07): the bare PriceVC ("0 Gold 14 Silver 0 Copper").
+    pub(in crate::ui) fn travel_price(&self, map: &str, level: u32) -> u64 {
+        let vc = self.0.get(&format!("travel_vc:{map}")).and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
+        let mult = self.0.get(&format!("vc_mult:{level}")).and_then(|v| v.parse::<f64>().ok()).unwrap_or(1.0);
+        (vc as f64 * mult).round() as u64
     }
-    pub(in crate::ui) fn travel_tooltip(&self, map: &str) -> (String, String) {
-        let mut body = self.0.get(&format!("travel_desc:{map}")).cloned().unwrap_or_default();
-        let number = |key: &str| self.0.get(&format!("{key}:{map}")).and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
-        let (vc, rc) = (number("travel_vc"), number("travel_rc"));
-        if vc > 0 || rc > 0 {
-            body.push_str("\nTravel costs:");
-            if vc > 0 { body.push_str(&format!("\n{} Gold {} Silver {} Copper", vc / 10_000, vc / 100 % 100, vc % 100)); }
-            if vc > 0 && rc > 0 { body.push_str("\nor"); }
-            if rc > 0 { body.push_str(&format!("\n{rc} Andermant")); }
+    /// Whether the character may travel to `map`: its MapLookupIndex bit in
+    /// NewPlayer's travel map access bits (+0x130, DSOR_Server
+    /// static_game_database.travel_map_unlock_words). No bits (offline) or no
+    /// index: open.
+    pub(in crate::ui) fn travel_unlocked(&self, map: &str, bits: &[u32]) -> bool {
+        let index = self.0.get(&format!("travel_index:{map}")).and_then(|v| v.parse::<usize>().ok()).unwrap_or(0);
+        if bits.is_empty() || index == 0 { return true; }
+        let bit = index - 1;
+        bits.get(bit / 32).is_some_and(|w| w & (1 << (bit % 32)) != 0)
+    }
+    /// A destination's card as the original's: its name; its kind and "Level n"
+    /// in italics, the level coloured by its difference to the player's; then
+    /// "Your current location", or the red "Destination location not yet
+    /// unlocked"; then "Travel costs:" and the price ("Free" for none). A map
+    /// without a travel point (a boss's) says "No destination" instead.
+    /// EVIDENCE: the user's original clip 20261107-1534-28 (Temple Sector,
+    ///   Dungeon, Level 35 green, locked, 16 Gold 45 Silver 0 Copper at level 37;
+    ///   Desecrated Sanctum, Boss Dungeon, No destination; Hiraja, Urban Area,
+    ///   Free). Texts: gui.window.travelmap_travelCostHeading,
+    ///   travelingNotUnlocked, travelingNotPossible, travelingCurrentMap;
+    ///   gui.window.general_costless.
+    /// FAILURE (to 2026-11-07): every map "Wilderness", no level, locked maps
+    ///   looked open ("i tried to teleport to hagastove and it didn't work").
+    pub(in crate::ui) fn travel_tooltip(&self, map: &str, level: Option<u32>, current: bool, unlocked: bool) -> (String, String) {
+        let mut body = format!("<i>{}</>", self.0.get(&format!("travel_desc:{map}")).cloned().unwrap_or_default());
+        if let Some(map_level) = self.0.get(&format!("travel_level:{map}")).and_then(|v| v.parse::<i64>().ok()) {
+            let colour = level.map_or(Color::WHITE, |l| travel_level_colour(map_level - l as i64)).to_srgba();
+            let hex = format!("#{:02x}{:02x}{:02x}", (colour.red * 255.0) as u8, (colour.green * 255.0) as u8, (colour.blue * 255.0) as u8);
+            body.push_str(&format!("\n<{hex}><i>Level {map_level}</></>"));
         }
+        if self.0.get(&format!("travel_point:{map}")).is_some_and(|p| p == "0") {
+            body.push_str("\nNo destination");
+            return (self.caption(map), body);
+        }
+        if current { body.push_str("\nYour current location"); }
+        else if !unlocked { body.push_str("\n<#e60000>Destination location not yet unlocked</>"); }
+        let vc = self.travel_price(map, level.unwrap_or(1));
+        let rc = self.0.get(&format!("travel_rc:{map}")).and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
+        body.push_str("\nTravel costs:");
+        if vc > 0 { body.push_str(&format!("\n{} Gold {} Silver {} Copper", vc / 10_000, vc / 100 % 100, vc % 100)); }
+        if vc > 0 && rc > 0 { body.push_str("\nor"); }
+        if rc > 0 { body.push_str(&format!("\n{rc} Andermant")); }
+        if vc == 0 && rc == 0 { body.push_str("\nFree"); }
         (self.caption(map), body)
     }
 
@@ -114,6 +155,23 @@ impl MapNames {
             let mut chars = words.chars();
             chars.next().map(|first| first.to_uppercase().to_string() + chars.as_str()).unwrap_or_else(|| "Map".into())
         })
+    }
+}
+
+/// A travel map card's level colour by the map's level minus the player's:
+/// more than 5 below grey, below green, up to 2 above yellow, up to 5 orange,
+/// beyond red (_Globals LevelDifferenceRange0 2 / Range1 5).
+/// EVIDENCE: the original at level 37: 31 grey, 32, 33 and 35 green, 43 to 45
+///   red. UNVERIFIED: yellow (37 to 39) and orange (40 to 42) were not seen; a
+///   monster's yellow also takes 2 below (ui::level_difference_colour), the
+///   map's 35 at 37 is green.
+pub(in crate::ui) fn travel_level_colour(diff: i64) -> Color {
+    match diff {
+        d if d < -5 => Color::srgb(0.5, 0.5, 0.5),
+        d if d < 0 => Color::srgb(0.0, 1.0, 0.0),
+        d if d <= 2 => Color::srgb(1.0, 1.0, 0.0),
+        d if d <= 5 => Color::srgb(1.0, 0.5, 0.0),
+        _ => Color::srgb(1.0, 0.0, 0.0),
     }
 }
 
@@ -394,5 +452,40 @@ mod tests {
         assert!(walls.iter().all(|e| !((e[0] - a).length() < 0.001 && e[1] == c)));
         let raised = triangles.map(|t| t.map(|p| p + Vec3::Y));
         assert_eq!(boundary_edges(&[triangles[0], triangles[1], raised[0], raised[1]]).len(), 8);
+    }
+
+    fn untagged(s: &str) -> String {
+        let mut out = String::new(); let mut tag = false;
+        for c in s.chars() { match c { '<' => tag = true, '>' => tag = false, c if !tag => out.push(c), _ => {} } }
+        out
+    }
+
+    #[test]
+    fn travel_cards_say_kind_level_lock_and_the_levels_price() {
+        let names = MapNames([("c2203_dun", "Spawning Ground"), ("travel_desc:c2203_dun", "Dungeon"), ("travel_level:c2203_dun", "33"),
+            ("travel_index:c2203_dun", "56"), ("travel_point:c2203_dun", "1"), ("travel_vc:c2203_dun", "1400"), ("vc_mult:37", "117.5"),
+            ("c2310_boss", "Desecrated Sanctum"), ("travel_desc:c2310_boss", "Boss Dungeon"), ("travel_point:c2310_boss", "0"),
+            ("h0001_hub", "Hiraja"), ("travel_vc:h0001_hub", "0")]
+            .into_iter().map(|(k, v)| (k.to_owned(), v.to_owned())).collect());
+        assert_eq!(names.travel_price("c2203_dun", 37), 164_500, "16 Gold 45 Silver at level 37");
+        let mut bits = vec![0u32; 4];
+        assert!(!names.travel_unlocked("c2203_dun", &bits));
+        bits[55 / 32] |= 1 << (55 % 32);
+        assert!(names.travel_unlocked("c2203_dun", &bits));
+        assert!(names.travel_unlocked("c2203_dun", &[]), "no bits: open");
+        let (name, body) = names.travel_tooltip("c2203_dun", Some(37), false, false);
+        assert_eq!(name, "Spawning Ground");
+        let plain = untagged(&body);
+        assert_eq!(plain, "Dungeon
+Level 33
+Destination location not yet unlocked
+Travel costs:
+16 Gold 45 Silver 0 Copper");
+        assert!(body.contains("<#00ff00><i>Level 33"), "4 below: green");
+        assert_eq!(untagged(&names.travel_tooltip("c2310_boss", Some(37), false, true).1), "Boss Dungeon
+No destination");
+        assert!(names.travel_tooltip("h0001_hub", Some(37), true, true).1.ends_with("Your current location
+Travel costs:
+Free"));
     }
 }
