@@ -337,6 +337,28 @@ pub(super) fn rarity<'a>(catalog: &'a Catalog, template: &str, item: Option<&Ite
     (rarity, tint)
 }
 
+/// An equipment slot's name (gui.window equipmentSlot<Slot>), by slot index
+/// (items::cell).
+fn slot_name(slot: i8) -> Option<&'static str> {
+    Some(match slot {
+        0 => "Head", 1 => "Shoulders", 2 => "Torso", 3 => "Hands", 4 => "Feet", 5 => "Main Hand", 6 => "Off Hand",
+        7 => "Cloak", 8 => "1. Ring Finger", 9 => "2. Ring Finger", 10 => "Neck", 11 => "Hips", 12 => "Weapon Adornment",
+        13..=19 => "Rune Trinket", 20..=22 => "Jewel Trinket", 24 => "Dragon Crest",
+        25 => "Soul Necklace", 26 => "Soul Cloak", 27 => "Soul Belt",
+        _ => return None,
+    })
+}
+
+/// "EquipmentGem" -> "Equipment Gem".
+fn spaced(c: &str) -> String {
+    let mut out = String::new();
+    for (i, ch) in c.chars().enumerate() {
+        if i > 0 && ch.is_uppercase() && !out.ends_with(' ') { out.push(' '); }
+        out.push(ch);
+    }
+    out
+}
+
 pub(super) fn card(d: &DisplayItem, catalog: &Catalog, layout: Option<&Layout>, advanced: bool) -> Card {
     headed_card(d, catalog, layout, advanced, None)
 }
@@ -378,7 +400,7 @@ pub(super) fn headed_card(d: &DisplayItem, catalog: &Catalog, layout: Option<&La
             .max(width(&title, card.title_size()));
         card.width = (widest.ceil() + 34.0).clamp(150.0, card.width);
     }
-    if let Some(heading) = heading { card.centered(heading, MUTED, false); card.rule(); }
+    if let Some(heading) = heading { card.banner(heading); }
     let (rarity, tint) = rarity(catalog, d.template, d.item);
     // The original's head: no icon; the name centred in its rarity's colour, a
     // stack's count before it ("39047x Essence of Vigor"); equipment then its
@@ -394,6 +416,17 @@ pub(super) fn headed_card(d: &DisplayItem, catalog: &Catalog, layout: Option<&La
     card.heading(&title, tint);
     if !essence && meta.is_some_and(|m| !m.slots.is_empty() && m.max_stack == 1) {
         card.text(&format!("{rarity} Item"), tint);
+        // "(Hands,Gloves)": the slot it goes in, then its type, in italics.
+        // EVIDENCE: the user's original shot (2026-11-07): "(Hands,Gloves)"
+        //   on both glove cards; the slot names are gui.window
+        //   equipmentSlot<Slot> (Head, Shoulders, Torso, Hands, Feet...).
+        // UNVERIFIED: an item fitting two slots (rings) writes both here.
+        let slots: Vec<&str> = meta.map_or(Vec::new(), |m| m.slots.iter().filter_map(|s| slot_name(*s)).collect());
+        let kind = meta.map(|m| spaced(&m.category)).filter(|k| !k.is_empty());
+        let mut parts: Vec<String> = Vec::new();
+        for s in slots { if !parts.iter().any(|p| p == s) { parts.push(s.to_owned()); } }
+        if let Some(k) = kind { parts.push(k); }
+        if !parts.is_empty() { card.text(&format!("<i>({})</>", parts.join(",")), WHITE); }
         if let Some(l) = d.item.map(|i| i.durability).filter(|l| *l > 0) { card.text(&format!("Item level: {l}"), WHITE); }
     }
     if let Some(m) = meta {

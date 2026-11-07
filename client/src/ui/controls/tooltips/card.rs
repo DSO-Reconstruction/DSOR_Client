@@ -130,6 +130,21 @@ impl Card {
         self.rule();
     }
 
+    /// The comparison card's heading as the original's: the tooltip layout's
+    /// EquippedLabel banner (deco_elemente_5, its arrows past the card's
+    /// sides) across the card's top edge, the word centred in white on it.
+    /// EVIDENCE: the user's original shot (2026-11-07): the trader's gloves
+    ///   beside "Equipped" Steel Gauntlets, the banner 1.17 of the card wide,
+    ///   2.8 lines high, straddling the frame.
+    /// FAILURE (to 2026-11-07): a muted line and a rule inside the card.
+    pub fn banner(&mut self, value: &str) {
+        let (half, over) = (1.4 * self.size, 0.085 * self.width);
+        self.parts.push(Part::Art { template: "EquippedLabel/EquippedLabel".into(), rect: [-over, -half, self.width + over, half] });
+        self.y = -0.62 * self.size;
+        self.paragraph(value, WHITE, self.size, 12.0, true, false);
+        self.y = half + 8.0;
+    }
+
     pub fn text(&mut self, value: &str, color: Color) {
         self.paragraph(value, color, self.size, 16.0, false, false);
     }
