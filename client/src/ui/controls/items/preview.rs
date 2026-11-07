@@ -244,12 +244,17 @@ pub(super) fn reward_item(catalog: &Catalog, layout: Option<&Layout>, template: 
 /// The templates worn now, for the set section's count (noted by the item
 /// overlay from the inventory, rebuilt only when its revision changes).
 static WORN: std::sync::RwLock<(u64, Vec<String>)> = std::sync::RwLock::new((u64::MAX, Vec::new()));
+/// The equipment slot each worn item is in (item id -> slot), for its card's
+/// slot line.
+static WORN_SLOTS: std::sync::RwLock<Vec<(u32, i8)>> = std::sync::RwLock::new(Vec::new());
 
 pub(super) fn note_worn(inventory: &crate::gameplay::inventory::InventoryState) {
     if WORN.read().is_ok_and(|w| w.0 == inventory.revision) { return; }
     let worn = inventory.allocation.slots.iter().filter(|(_, s)| !s.is_empty())
         .filter_map(|(id, _)| inventory.items.get(id).map(|i| i.template.clone())).collect();
     if let Ok(mut w) = WORN.write() { *w = (inventory.revision, worn); }
+    let slots = inventory.allocation.slots.iter().filter_map(|(id, s)| s.first().map(|slot| (*id, *slot))).collect();
+    if let Ok(mut w) = WORN_SLOTS.write() { *w = slots; }
 }
 
 /// A set piece's section, as the original's card: "<set> (worn/pieces)" in the
@@ -420,8 +425,17 @@ pub(super) fn headed_card(d: &DisplayItem, catalog: &Catalog, layout: Option<&La
         // EVIDENCE: the user's original shot (2026-11-07): "(Hands,Gloves)"
         //   on both glove cards; the slot names are gui.window
         //   equipmentSlot<Slot> (Head, Shoulders, Torso, Hands, Feet...).
-        // UNVERIFIED: an item fitting two slots (rings) writes both here.
-        let slots: Vec<&str> = meta.map_or(Vec::new(), |m| m.slots.iter().filter_map(|s| slot_name(*s)).collect());
+        // An item fitting two slots (rings) writes only one: the one it is
+        // worn in, else the first.
+        // EVIDENCE: the user's original shots (2026-11-07): the worn Bronze
+        //   Ring "(1. Ring Finger,Ring)", Silver Ring "(2. Ring Finger,Ring)".
+        // FAILURE (2026-11-07): ours "(1. Ring Finger,2. Ring Finger,Ring)".
+        // UNVERIFIED: a ring in the bag (taken as the first slot here).
+        let worn = d.item.and_then(|i| WORN_SLOTS.read().ok().and_then(|w| w.iter().find(|(id, _)| *id == i.id).map(|(_, s)| *s)));
+        let slots: Vec<&str> = meta.map_or(Vec::new(), |m| {
+            let slot = worn.filter(|s| m.slots.contains(s)).or(m.slots.first().copied());
+            slot.and_then(slot_name).into_iter().collect()
+        });
         let kind = meta.map(|m| spaced(&m.category)).filter(|k| !k.is_empty());
         let mut parts: Vec<String> = Vec::new();
         for s in slots { if !parts.iter().any(|p| p == s) { parts.push(s.to_owned()); } }
@@ -582,6 +596,6 @@ mod tests {
         let catalog:Catalog=serde_json::from_str(include_str!("../../../../tests/fixtures/item_tooltips.json")).unwrap();
         let item=ItemInfo {template:"all_mythic_ring_death".into(),third:1,kind:7,durability:100,eighteenth:8477,..default()};
         let text=preview_card(&catalog,None,&item.template,Some(&item),1,false).text_content();
-        assert!(text.contains("(1. Ring Finger,2. Ring Finger,"),"{text}");
+        assert!(text.contains("(1. Ring Finger,Ring)"),"{text}");
     }
 }
