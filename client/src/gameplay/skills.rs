@@ -2870,6 +2870,9 @@ pub(crate) struct RankMarker(Entity);
 ///   (0:42) and Arisen Hero Rhenkis (0:56) stand on a lit ring; ours on none.
 /// UNVERIFIED: which tier a rank takes (all tiers draw the same models) and
 ///   the size cut (a navigation footprint over 1.2 m takes l).
+/// How far a rank marker sits over the monster's feet (metres).
+const RANK_MARKER_LIFT: f32 = 0.06;
+
 fn rank_marker_sequence(rank: &str, footprint: Option<f32>) -> Option<String> {
     let tier = match rank {
         "Rank_guardian" => 1,
@@ -2905,7 +2908,18 @@ fn rank_markers(
             None if alive => {
                 let rank = test.clone().or_else(|| net.as_ref().and_then(|n| n.monster_ranks.get(&m.actor).cloned()));
                 let Some(seq) = rank.and_then(|r| rank_marker_sequence(&r, m.footprint)).and_then(|n| sequences.0.get(&n)) else { continue };
-                let player = play_with(&mut commands, seq.clone(), Some(e), e, true, true);
+                // Its glowing dish (static_0_0, additive) is a shallow bowl
+                // whose bright rim lies 0.4-3 cm over the feet: under the
+                // ground's depth on uneven floors, so only the dull decal
+                // showed. Lifted a little, the rim draws as the original's
+                // bright band (the user's recording 20261107-0039-28: the
+                // original's rim 154 grey against ours 90; offline, a ring
+                // raised 1 m showed the dish's rim at 143).
+                let mut seq = seq.clone();
+                for track in &mut seq.tracks {
+                    if let Track::Fx { at, .. } = track { at[1] += RANK_MARKER_LIFT; }
+                }
+                let player = play_with(&mut commands, seq, Some(e), e, true, true);
                 commands.entity(e).insert(RankMarker(player));
             }
             _ => {}
