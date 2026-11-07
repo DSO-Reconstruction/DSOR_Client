@@ -1272,10 +1272,21 @@ fn cast_input(
     //   stopped the warrior ("je devrais pouvoir le faire en me deplacant sans
     //   que ca me stoppe", 2026-10-21).
     player.casting = skill.motion_unblock as f32 / FPS / rate;
+    // A jump's MotionUnblockFrame counts from its landing (LoopStartFrame +
+    // HitFrame): Enraging Leap's 9 is under its 15-frame flight, so counted
+    // from the cast it freed the warrior before he touched down.
+    // EVIDENCE: the user's recording 20261107-0216-47: the original's leap
+    //   (6:21-6:23) stays crouched on the spot about 0.8 video s after landing
+    //   before walking off, ours (1:26) 0.5.
+    // FAILURE (2026-11-07): "in the original you don't move instantly, here you
+    //   kinda do".
+    // UNVERIFIED: the exact hold (here 9 frames after landing, 0.36 s).
+    let landed = if skill.kind == "Jump" { skill.loop_start as f32 / FPS / rate + shifted_hit(skill, rate) } else { 0.0 };
+    player.casting += landed;
     if skill.motion_unblock > 0 {
         player.target = None;
     }
-    *next_cast = time.elapsed_secs_f64() + (skill.motion_unblock.max(skill.unblock).max(1) as f32 / FPS / rate) as f64;
+    *next_cast = time.elapsed_secs_f64() + (landed + skill.motion_unblock.max(skill.unblock).max(1) as f32 / FPS / rate) as f64;
 
     let tick = net.server_tick(now_ms(&time));
     // A fresh cast id per cast: the release261 server keys each cast's projectile
