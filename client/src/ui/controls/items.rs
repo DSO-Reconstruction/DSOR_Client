@@ -847,12 +847,14 @@ pub fn render(mut commands:Commands,windows:Query<(Entity,&Window2018,&WindowCon
         if d.amount>1 || matches!(cell,Cell::Ingredient(_)) {
             // The original's cream (248,229,200 sampled); its digits 26 px in a
             // 161 px pitch (ours were 23 in 165 at 14.5), ending 14 px inside
-            // the frame (ours 3: "they get in the frame") with their tops at
-            // 0.65 of the pitch (ours 0.60) (the user's shots, 2026-11-07).
-            let at=Vec3::new(pos.x+size.x-8.0,pos.y-size.y+18.0,0.3);
+            // the frame (ours 3: "they get in the frame"). Clean shots of both
+            // (2026-11-07, 131 px icons): the original's digits 27 px, ending
+            // 8 px left of and 7 px above the icon's corner; ours ended 3 px
+            // below it ("too down, literally in the frame").
+            let at=Vec3::new(pos.x+size.x-7.0,pos.y-size.y+22.5,0.3);
             let count=stack_count(d.amount);
-            text_right(&mut commands,&assets,&screen,group,count.clone(),at+Vec3::new(1.0,-1.0,-0.01),16.5,Color::BLACK,size.x-8.0);
-            text_right(&mut commands,&assets,&screen,group,count,at,16.5,Color::srgb_u8(248,229,200),size.x-8.0);
+            text_right(&mut commands,&assets,&screen,group,count.clone(),at+Vec3::new(1.0,-1.0,-0.01),16.5,Color::BLACK,size.x-7.0);
+            text_right(&mut commands,&assets,&screen,group,count,at,16.5,Color::srgb_u8(248,229,200),size.x-7.0);
         }
         if let (Cell::Equipment(slot),Some(item),Some((mesh,face,size,font)))=(cell,d.item,level.as_ref()) { if let Some(c)=level_centre(slot,b.rect) {
             commands.spawn((Mesh2d(mesh.clone()),MeshMaterial2d(face.clone()),Transform::from_translation(screen.world(b.k,c.x-size.x/2.0,c.y-size.y/2.0).extend(0.35))

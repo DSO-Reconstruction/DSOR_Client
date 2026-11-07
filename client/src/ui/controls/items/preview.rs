@@ -309,7 +309,7 @@ fn set_section(card: &mut Card, catalog: &Catalog, set: &crate::ui::controls::it
 /// An item card's text and width against the shared card's (headed_card).
 /// The set section's headings (the original's card: green).
 const SET_HEADING: Color = Color::srgb(0.1, 0.85, 0.1);
-const ITEM_CARD_TEXT: f32 = 0.593;
+const ITEM_CARD_TEXT: f32 = 0.568;
 const ITEM_CARD_WIDTH: f32 = 0.83;
 
 /// A Set item's name colour (cards and ground labels).
@@ -356,9 +356,25 @@ pub(super) fn headed_card(d: &DisplayItem, catalog: &Catalog, layout: Option<&La
     // of a cell apart, ours 0.150; digits 0.081 high, ours 0.078) (the user's
     // shots of the original's and our essence cards, 2026-11-07: "a little bit
     // small").
+    // Same-frame shots (2026-11-07, both windows 2000 px): the original's
+    // "Increases attack power..." 246 px, ours 257; its lines 11.5 px apart,
+    // ours 13; its "Essence of Vigor" 87 px, ours 83; its essence card 272 px
+    // wide round 246 of text, ours 335 ("the writing is still small").
     card.set_word_space(0.3);
-    card.set_leading(1.21);
+    card.set_leading(1.12);
+    card.scale_title(0.91);
     card.background = Color::srgba(0.01, 0.01, 0.005, 0.985);
+    let essence = meta.is_some_and(|m| !m.card_lines.is_empty());
+    let name = catalog.name(d.template, d.item);
+    let title = if meta.is_some_and(|m| m.max_stack > 1) && d.amount > 1 { format!("{}x {}", d.amount, name.trim()) } else { name.trim().to_owned() };
+    // An essence's card as wide as its longest line, as the original's.
+    if essence {
+        let width = |text: &str, size: f32| plain(text).lines()
+            .map(|l| crate::network::chat::text_width(l, size) + l.matches(' ').count() as f32 * 0.3 * size).fold(0.0, f32::max);
+        let widest = meta.map_or(0.0, |m| m.card_lines.iter().map(|l| width(l, card.text_size())).fold(0.0, f32::max))
+            .max(width(&title, card.title_size()));
+        card.width = (widest.ceil() + 34.0).clamp(150.0, card.width);
+    }
     if let Some(heading) = heading { card.centered(heading, MUTED, false); card.rule(); }
     let (rarity, tint) = rarity(catalog, d.template, d.item);
     // The original's head: no icon; the name centred in its rarity's colour, a
@@ -372,10 +388,7 @@ pub(super) fn headed_card(d: &DisplayItem, catalog: &Catalog, layout: Option<&La
     //   "Quantity: 996 / 50000" ("do you see this in the original???").
     // UNVERIFIED: the original's italic slot line ("(Hands,Gloves)") is not
     //   written (no such names in the catalog yet).
-    let essence = meta.is_some_and(|m| !m.card_lines.is_empty());
-    let name = catalog.name(d.template, d.item);
-    let title = if meta.is_some_and(|m| m.max_stack > 1) && d.amount > 1 { format!("{}x {}", d.amount, name.trim()) } else { name.trim().to_owned() };
-    card.centered(&title, tint, false);
+    card.heading(&title, tint);
     if !essence && meta.is_some_and(|m| !m.slots.is_empty() && m.max_stack == 1) {
         card.text(&format!("{rarity} Item"), tint);
         if let Some(l) = d.item.map(|i| i.durability).filter(|l| *l > 0) { card.text(&format!("Item level: {l}"), WHITE); }
