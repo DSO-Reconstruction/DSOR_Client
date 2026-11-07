@@ -576,4 +576,12 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn equipment_cards_write_their_slot_and_type() {
+        let catalog:Catalog=serde_json::from_str(include_str!("../../../../tests/fixtures/item_tooltips.json")).unwrap();
+        let item=ItemInfo {template:"all_mythic_ring_death".into(),third:1,kind:7,durability:100,eighteenth:8477,..default()};
+        let text=preview_card(&catalog,None,&item.template,Some(&item),1,false).text_content();
+        assert!(text.contains("(1. Ring Finger,2. Ring Finger,"),"{text}");
+    }
 }
