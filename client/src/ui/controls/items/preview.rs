@@ -362,7 +362,10 @@ pub(super) fn headed_card(d: &DisplayItem, catalog: &Catalog, layout: Option<&La
     // wide round 246 of text, ours 335 ("the writing is still small").
     card.set_word_space(0.3);
     card.set_leading(1.12);
-    card.scale_title(0.91);
+    // The name 1.2 times that: the original's "Essence" 55 px high zoomed
+    // where ours was 45 (the user, 2026-11-07: "the color of the essence
+    // writing" is still small).
+    card.scale_title(1.09);
     card.background = Color::srgba(0.01, 0.01, 0.005, 0.985);
     let essence = meta.is_some_and(|m| !m.card_lines.is_empty());
     let name = catalog.name(d.template, d.item);
