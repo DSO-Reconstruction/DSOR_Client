@@ -309,7 +309,7 @@ fn set_section(card: &mut Card, catalog: &Catalog, set: &crate::ui::controls::it
 /// An item card's text and width against the shared card's (headed_card).
 /// The set section's headings (the original's card: green).
 const SET_HEADING: Color = Color::srgb(0.1, 0.85, 0.1);
-const ITEM_CARD_TEXT: f32 = 0.57;
+const ITEM_CARD_TEXT: f32 = 0.593;
 const ITEM_CARD_WIDTH: f32 = 0.83;
 
 /// A Set item's name colour (cards and ground labels).
@@ -329,7 +329,10 @@ pub(super) fn rarity<'a>(catalog: &'a Catalog, template: &str, item: Option<&Ite
     // Set measured on the original's trader card "Splendid Durian Battle Mace"
     // (the user's recording 20261105-1550-37 at 3:48): (25, 190, 215), turquoise.
     let tint = match rarity { "Unique" => Color::srgb(1.0,0.9,0.0), "Set" => SET_TINT, "Magic" => Color::srgb(0.07,0.47,0.93),
-        "Uncommon" => Color::srgb(0.42,0.88,0.33),
+        "Uncommon" | "Improved" => Color::srgb(0.42,0.88,0.33),
+        // Mythic: red, measured on the original's "Ancestral Glory Ring" (the
+        // user's shot, 2026-11-07); ours was the default colour.
+        "Mythic" => Color::srgb_u8(180,35,8),
         "Extraordinary" | "Rare" => Color::srgb(0.89,0.0,0.93), "Legendary" | "Epic" => Color::srgb(1.0,0.65,0.15), _ => color(catalog,item) };
     (rarity, tint)
 }
@@ -348,6 +351,13 @@ pub(super) fn headed_card(d: &DisplayItem, catalog: &Catalog, layout: Option<&La
     // same screen; two of ours side by side ran off the screen at 5:00).
     let mut card = Card::new(if advanced { 370.0 } else { 285.0 } * ITEM_CARD_WIDTH, layout);
     card.compact(ITEM_CARD_TEXT);
+    // The original's hand: its words about a space further apart and its lines
+    // closer ("Selling price:" 0.63 of a bag cell wide, ours 0.56; lines 0.140
+    // of a cell apart, ours 0.150; digits 0.081 high, ours 0.078) (the user's
+    // shots of the original's and our essence cards, 2026-11-07: "a little bit
+    // small").
+    card.set_word_space(0.3);
+    card.set_leading(1.21);
     card.background = Color::srgba(0.01, 0.01, 0.005, 0.985);
     if let Some(heading) = heading { card.centered(heading, MUTED, false); card.rule(); }
     let (rarity, tint) = rarity(catalog, d.template, d.item);
