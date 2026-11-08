@@ -230,6 +230,31 @@ pub(in crate::ui) struct RewardView {
     pub hint: bool,
 }
 
+/// The Collector's Bag bonuses earned (variable -> millionths): every book's
+/// rewards reached by the stickers owned, capped by their variable's limit.
+/// Kept current whether the bag is open or not (systems::sync): a pet card
+/// hovered in the inventory writes them.
+/// FAILURE (2026-11-07): built only with the open album, so a pet's card
+///   showed "Collector's Bag Effect:" with nothing under it until the bag had
+///   been opened ("sometimes the collector bag buff doesn't show").
+pub(super) fn bonuses(sources: &Sources) -> std::collections::BTreeMap<String, u32> {
+    let (catalog, net) = (sources.catalog, sources.net);
+    let mut earned: std::collections::HashMap<&str, f32> = std::collections::HashMap::new();
+    if let Some(items) = sources.items {
+        for book in catalog.stickerbooks.iter().filter(|b| !b.rewards.is_empty()) {
+            let owned = catalog.stickers.iter().filter(|(id, def)| def.book == book.id
+                && owned_entry(&net.stickerbook, id, def).is_some_and(|e| e.state >= StickerbookEntry::OWNED)).count() as u32;
+            for (variable, amount) in book.rewards.iter().filter(|r| r.at <= owned).filter_map(|r| items.raises.get(&r.item)) {
+                *earned.entry(variable.as_str()).or_insert(0.0) += amount;
+            }
+        }
+        for (variable, value) in earned.iter_mut() {
+            if let Some(limit) = items.variables.get(*variable) { *value = value.min(*limit); }
+        }
+    }
+    earned.into_iter().map(|(k, v)| (k.to_owned(), (v * 1e6).round() as u32)).collect()
+}
+
 pub(super) fn album(sources: &Sources) -> Album {
     let catalog = sources.catalog;
     let state = sources.state;
@@ -329,20 +354,7 @@ pub(super) fn album(sources: &Sources) -> Album {
             RewardView { item: r.item.clone(), title, bonus: card.map(|c| c.lines.clone()), description, footer: format!("Reward for {} x {kind}", r.at), amount: r.amount, lifetime, hint }
         }).collect()).unwrap_or_default()
     };
-    let mut earned: std::collections::HashMap<&str, f32> = std::collections::HashMap::new();
-    if let Some(items) = sources.items {
-        for book in catalog.stickerbooks.iter().filter(|b| !b.rewards.is_empty()) {
-            let owned = catalog.stickers.iter().filter(|(id, def)| def.book == book.id
-                && owned_entry(&net.stickerbook, id, def).is_some_and(|e| e.state >= StickerbookEntry::OWNED)).count() as u32;
-            for (variable, amount) in book.rewards.iter().filter(|r| r.at <= owned).filter_map(|r| items.raises.get(&r.item)) {
-                *earned.entry(variable.as_str()).or_insert(0.0) += amount;
-            }
-        }
-        for (variable, value) in earned.iter_mut() {
-            if let Some(limit) = items.variables.get(*variable) { *value = value.min(*limit); }
-        }
-    }
-    let bag = earned.into_iter().map(|(k, v)| (k.to_owned(), (v * 1e6).round() as u32)).collect();
+    let bag = bonuses(sources);
     let banners = catalog.album_banners.len();
     let banner_index = if banners == 0 { 0 } else { state.album_banner % banners };
     let new = all.iter().filter(|(_, def)| def.new).take(MOST_NEW).map(|(id, def)| sticker(id, def)).collect();
@@ -481,7 +493,8 @@ pub(super) fn prepare_album(source: &Layout, album: &Album) -> Layout {
             "TextLabel_info" => set_text(w, FAVOURITES_TEXT),
             "PageNumText" => set_text(w, &format!("{} / {}", album.page + 1, album.pages)),
             // The bar's caption (its points label is authored transparent).
-            "ProgressBarTextLabel" => set_text(w, &format!("{} / {}", album.progress.0, album.progress.1)),
+            // "5/8", "19/33" in the original (the user's recordings), no spaces.
+            "ProgressBarTextLabel" => set_text(w, &format!("{}/{}", album.progress.0, album.progress.1)),
             "progresspoints" => set_text(w, ""),
             "progress" if id.starts_with(BAR) => clip_x(w, album.progress.0 as f32 / album.progress.1.max(1) as f32),
             "AdvertisementArtwork" if !album.banner.is_empty() => { if let Some(art) = &mut w.art { art.tex = Some(texture_path(&album.banner)); } }
@@ -657,7 +670,7 @@ mod tests {
         assert_eq!(ids.iter().position(|id| id == TURNING), ids.iter().position(|id| *id == image).map(|i| i + 1));
         assert!(ids.contains(&format!("{image}/DragRotateAreaLabel")));
         // The progress: collected of the book's; its reward along the bar.
-        assert_eq!(text_of(&prepared, &format!("{BAR}/ProgressBarTextLabel")), "1 / 2");
+        assert_eq!(text_of(&prepared, &format!("{BAR}/ProgressBarTextLabel")), "1/2");
         assert!(ids.contains(&format!("{INLAY}/Categorypage/ProgressLabel/Reward0/Linie/ItemSlot/Icon/Image")));
         // A missing sticker with an offer: the preview sells it.
         let selling = prepare_album(&album_source(), &Album { preview: Some(missing.clone()), ..album.clone() });

@@ -507,6 +507,10 @@ enum ValueKind {
     /// The hovered monster's title and level (interactinfo).
     TargetName,
     TargetLevel,
+    /// "9387/9387" on the hovered monster's bar (Healthbar/HealthValue).
+    TargetHealth,
+    /// Its rank's title (Healthbar/MonsterRank), empty for a plain monster.
+    TargetRank,
     /// A character sheet figure (crate::gameplay::stats::Sheet, by widget name).
     Sheet(&'static str),
     /// A status effect's time left: its half of the bar and slot
@@ -558,6 +562,9 @@ struct Figures {
     /// Total experience and the next level's (net.xp), for the bar's tooltip.
     xp_points: Option<(u32, u32)>,
     wisdom: (u32, f32),
+    /// Ancient Wisdom held and the next level's (the top level's own at the
+    /// top), for the wisdom bar's tooltip.
+    wisdom_points: Option<(u32, u32)>,
     bar: Vec<Option<String>>,
     name: String,
     online: bool,
@@ -856,11 +863,31 @@ fn value_of(id: &str) -> Option<ValueKind> {
         "Wisdom" if id.contains("/bottombar_wisdom_bar/") => ValueKind::WisdomProgress,
         "ActorName" if id.contains("/Healthbar/") => ValueKind::TargetName,
         "Level" if id.contains("/Levelcircle4/") => ValueKind::TargetLevel,
+        "HealthValue" if id.contains("/Healthbar/") => ValueKind::TargetHealth,
+        "MonsterRank" if id.contains("/Healthbar/") => ValueKind::TargetRank,
         "CharacterName" => ValueKind::Name,
         "LocationName" => ValueKind::LocationName,
         "PageNumText" => ValueKind::Page,
         _ => return None,
     })
+}
+
+/// A monster level's colour by how far it is from ours (monster - own):
+/// yellow within 2, green 3..5 below, grey further below, orange 3..5 above,
+/// red further above.
+/// EVIDENCE: static.db4 _Globals LevelDifferenceRange0 2, Range1 5,
+///   LevelDifferenceColor0 (1,1,0), ColorEasy1 (0,1,0), ColorEasy2 (0.5,0.5,0.5),
+///   ColorHard1 (1,0.5,0), ColorHard2 (1,0,0); the user's recording
+///   20261105-1948-56 (level 36): 30 grey, 31/32 green, 35 yellow, 41 orange,
+///   46 red.
+pub(crate) fn level_difference_colour(diff: i64) -> Color {
+    match diff {
+        d if d.abs() <= 2 => Color::srgb(1.0, 1.0, 0.0),
+        d if d < -5 => Color::srgb(0.5, 0.5, 0.5),
+        d if d < 0 => Color::srgb(0.0, 1.0, 0.0),
+        d if d <= 5 => Color::srgb(1.0, 0.5, 0.0),
+        _ => Color::srgb(1.0, 0.0, 0.0),
+    }
 }
 
 /// The quick slots by wire slot: Shift + left button = 0, right button = 1, keys
@@ -1039,7 +1066,7 @@ fn spawn_windows(
         } else if layout.window == controls::settings::WINDOW {
             prepared = controls::settings::prepare(layout); &prepared
         } else if layout.window == "bottombar" {
-            prepared = class_resource_gauge(controls::hotbar::prepare(layout), class); &prepared
+            prepared = controls::effects::prepare_times(class_resource_gauge(controls::hotbar::prepare(layout), class)); &prepared
         } else if layout.window == HOVER_WINDOW {
             prepared = controls::effects::prepare_target(layout); &prepared
         } else if layout.window == controls::items::DESTROY_DIALOG {
@@ -1200,6 +1227,23 @@ fn spawn_windows(
                 if let Some(art) = own.art.as_mut() { art.tex = Some(format!("textures/ui/emblem_class_{}.png", class_emblem(class))); }
                 emblem = own;
                 &emblem
+            } else if let Some(k) = round_hover_scale(&w.id).filter(|_| w.art.is_some()) {
+                // A round slot's hover ring hugs its socket, as the original's.
+                // EVIDENCE: the user's recording 20261106-1710-34: at 0:55 the
+                //   original's companion ring stays inside the gold rim; ours
+                //   (0:58, potion R) spilled well over it, drawn over the whole
+                //   41.5 px button where the socket is 33.1.
+                let mut own = w.clone();
+                if let Some(art) = own.art.as_mut() {
+                    let [l, t, r, b] = bounds(&art.pos);
+                    let (cx, cy) = ((l + r) * 0.5, (t + b) * 0.5);
+                    for p in art.pos.chunks_exact_mut(2) {
+                        p[0] = cx + (p[0] - cx) * k;
+                        p[1] = cy + (p[1] - cy) * k;
+                    }
+                }
+                emblem = own;
+                &emblem
             } else { w };
             let gate = controls.gate(&layout.window, w);
             if let Some(art) = &w.art {
@@ -1309,7 +1353,11 @@ fn spawn_windows(
                     // (assets/fonts/tahoma.ttf, copied by hand).
                     TextFont {
                         font: assets.load("fonts/tahoma.ttf").into(),
-                        font_size: bevy::text::FontSize::Px(label.size * FONT_SCALE * screen.scale),
+                        // The Wisdom bar's "Wisdom Level n" a little smaller: the
+                        // original's is about 0.85 of ours high (the user's
+                        // recording 20261106-1710-34: 0:48 original, 3:09 ours).
+                        font_size: bevy::text::FontSize::Px(label.size * FONT_SCALE * screen.scale
+                            * if value == Some(ValueKind::BarWisdomLevel) { 0.85 } else { 1.0 }),
                         ..default()
                     },
                     TextColor(Color::srgba(label.color[0], label.color[1], label.color[2], label.color[3])),
@@ -1466,6 +1514,19 @@ fn follow_outlines(
     }
 }
 
+/// The hover ring's scale on the bottom bar's round slots: the potion and
+/// companion buttons (41.5 px) around their 33.1 px sockets, the mount button's
+/// ring (36.5 px) around its 32.1 px icon. None for any other widget.
+fn round_hover_scale(id: &str) -> Option<f32> {
+    let parent = id.strip_suffix("/mouseover")?;
+    let leaf = parent.rsplit('/').next()?;
+    match leaf {
+        "LeftPotionTop" | "LeftPotionBottom" | "RightPotionTop" | "RightPotionBottom" => Some(0.82),
+        "Mountslot" => Some(0.9),
+        _ => None,
+    }
+}
+
 fn bounds(pos: &[f32]) -> [f32; 4] {
     let mut b = [f32::MAX, f32::MAX, f32::MIN, f32::MIN];
     for p in pos.chunks_exact(2) {
@@ -1604,6 +1665,8 @@ fn read_figures(net: Option<NonSend<crate::network::net::Net>>, mut figures: Res
             let progress = catalog.progress(crate::gameplay::talents::Tree::Knowledge, points.of(1));
             let wisdom = (progress.level, progress.fraction());
             if figures.wisdom != wisdom { figures.wisdom = wisdom; }
+            let points = Some((progress.value, progress.next.unwrap_or(progress.floor)));
+            if figures.wisdom_points != points { figures.wisdom_points = points; }
         }
     }
     if figures.bar != net.bar {
@@ -1667,13 +1730,27 @@ fn update_values(
     hover: Res<crate::actors::monsters::HoverInfo>,
     current_map: Option<Res<crate::world::map::CurrentMap>>,
     shown: Res<controls::currency::Shown>,
-    mut texts: Query<(&Value, &mut Text2d)>,
+    mut texts: Query<(&Value, &mut Text2d, Option<&mut TextColor>)>,
 ) {
     let changed = figures.is_changed() || settings.is_changed() || hotbar.is_changed() || sheet.is_changed() || hover.is_changed() || current_map.as_ref().is_some_and(|m| m.is_changed())
         || shown.is_changed();
-    for (v, mut t) in &mut texts {
+    for (v, mut t, colour) in &mut texts {
         // Layouts load asynchronously, even when the current figures are stable.
         if !changed && !t.is_added() { continue; }
+        // A ranked monster's name and rank title in its rank's colour
+        // (monsters::rank_colour); its level by how far it is from ours
+        // (level_difference_colour).
+        let want = match v.0 {
+            ValueKind::TargetName | ValueKind::TargetRank => Some(hover.2.map_or(Color::WHITE, |c| Color::srgba(c[0], c[1], c[2], c[3]))),
+            ValueKind::TargetLevel => Some(match (hover.0.as_ref(), figures.level) {
+                (Some(h), Some(own)) => level_difference_colour(h.1 as i64 - own as i64),
+                _ => Color::WHITE,
+            }),
+            _ => None,
+        };
+        if let (Some(want), Some(mut colour)) = (want, colour) {
+            if colour.0 != want { colour.0 = want; }
+        }
         // Gold is counted in copper: 100 copper a silver, 100 silver a gold;
         // each shortened to its place on the currency bar.
         // EVIDENCE: release261 UI::CurrencyBarWidget 0x1403DAA44 (copper / 10000
@@ -1703,6 +1780,8 @@ fn update_values(
             ValueKind::EffectTime(..) => continue,
             ValueKind::TargetName => hover.0.as_ref().map(|h| h.0.clone()).unwrap_or_default(),
             ValueKind::TargetLevel => hover.0.as_ref().map(|h| h.1.to_string()).unwrap_or_default(),
+            ValueKind::TargetHealth => hover.0.as_ref().map(|h| format!("{}/{}", h.2, h.3)).unwrap_or_default(),
+            ValueKind::TargetRank => hover.0.as_ref().and(hover.3).unwrap_or_default().to_owned(),
             ValueKind::Sheet(w) => match sheet.0.get(w) {
                 Some(v) => v.clone(),
                 None => continue,
@@ -1955,6 +2034,11 @@ fn cooldown_sweep(rect: [f32; 4], remaining: f32) -> Art {
 
 /// The cooldown sweep at a given darkness (alpha of its black).
 fn sweep_art(rect: [f32; 4], remaining: f32, alpha: f32) -> Art {
+    sweep_colored(rect, remaining, [0.0, 0.0, 0.0, alpha])
+}
+
+/// The sweep in any colour (a timed buff's lit sector, controls::effects).
+fn sweep_colored(rect: [f32; 4], remaining: f32, color: [f32; 4]) -> Art {
     use std::f32::consts::{FRAC_PI_4, TAU};
     let [l, t, r, b] = rect;
     let (cx, cy) = ((l + r) * 0.5, (t + b) * 0.5);
@@ -1972,7 +2056,7 @@ fn sweep_art(rect: [f32; 4], remaining: f32, alpha: f32) -> Art {
     }
     let n = (pos.len() / 2) as u32;
     let idx = (1..n - 1).flat_map(|i| [0, i, i + 1]).collect();
-    Art { tex: None, uv: vec![0.0; pos.len()], color: [0.0, 0.0, 0.0, alpha].repeat(n as usize), pos, idx, saturation: 1.0 }
+    Art { tex: None, uv: vec![0.0; pos.len()], color: color.repeat(n as usize), pos, idx, saturation: 1.0 }
 }
 
 /// The hovered monster's info window, shown while one is under the cursor.

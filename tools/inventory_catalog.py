@@ -12,7 +12,7 @@ SLOTS = {'HelmetSlot':[0], 'ShoulderSlot':[1], 'TorsoSlot':[2], 'GlovesSlot':[3]
          'RuneTrinketSlot':list(range(13,20)), 'JewelTrinketSlot':[20,21,22],
          'AncientTrinketSlot':[24], 'MercenaryAmuletSlot':[25],
          'MercenaryCloakSlot':[26], 'MercenaryBeltSlot':[27], 'ConsumableSlot':[37],
-         'AmmoSlot':[35,34]}
+         'AmmoSlot':[35,36]}
 
 
 def modifier_lines(modifiers, table):
@@ -39,6 +39,29 @@ def modifier_lines(modifiers, table):
                 pass
         lines.append(re.sub(r'\{\d+:s\}', number, text))
     return lines
+
+
+ACTOR_FEATURES = {'Movement': 'actorFeatureMovementDisabled', 'Skills': 'actorFeatureSkillExecutionDisabled',
+                  'RegularSkills': 'actorFeatureRegularSkillExecutionDisabled', 'DamageReception': 'actorFeatureDamageReceptionDisabled'}
+
+
+def emote_lines(r, modifiers, table):
+    """An emote's Effect lines as its card writes them: what its status turns
+    off ("Movement disabled", "Normal skills disabled"), its duration and
+    cooldowns ("Duration: 6s", "Cool-down time: 6s", "Cool-down time(PvP): 6s")."""
+    lines = []
+    for part in (modifiers or '').split(';'):
+        if part.startswith('ActorFeature:'):
+            for scope in part.split(',')[1:]:
+                text = table.get('gui.statuseffects.modifier_' + ACTOR_FEATURES.get(scope.strip(), ''), '')
+                if text:
+                    lines.append(text)
+    def seconds(v):
+        return '%gs' % round(float(v), 1)
+    for key, column in (('statusEffectDuration', 'StatusEffectDuration'), ('statusEffectCoolDown', 'CoolDown'), ('statusEffectCoolDownPvP', 'CoolDownPvP')):
+        if r.get(column):
+            lines.append(table.get('gui.window.tooltip_' + key, '').replace('{0:s}', seconds(r[column])))
+    return [line for line in lines if line]
 
 
 def reward_cards(db, table, local):
@@ -71,6 +94,119 @@ def reward_cards(db, table, local):
             lines.append(re.sub(r'\{\d+:s\}', number, text))
         cards[sid] = dict(title=local(sid + 'Title', sid), lines=lines)
     return cards
+
+
+# A set bonus line's text (the original's Splendid Durian card, the user's
+# recording 20261105-1550-37 at 3:48: "(2): + 0.043 movement speed (level
+# dependent)", "+ 39 all resistance values", "+ 53 Armor value", "+ 59 damage",
+# "+ 199 critical value"). Others UNVERIFIED wording.
+SET_TEXTS = [
+    ('speed', ('movement',), 'movement speed'),
+    ('speed', ('skills',), 'attack speed'),
+    ('resistance', ('fire', 'ice', 'lightning', 'poison', 'darkmagic'), 'all resistance values'),
+    ('resistance', ('physical',), 'Armor value'),
+    ('resistance', ('fire',), 'fire resistance'),
+    ('resistance', ('ice',), 'ice resistance'),
+    ('resistance', ('lightning',), 'lightning resistance'),
+    ('resistance', ('poison',), 'poison resistance'),
+    ('damage', ('min', 'max'), 'damage'),
+    ('criticalvalue', (), 'critical value'),
+    ('maxhealthpoints', (), 'Health Points'),
+    ('maxskillresource', (), 'maximum resource'),
+    ('blockvalue', (), 'block value'),
+]
+
+
+def set_text(key, args, table):
+    """A set bonus's own text (gui.statuseffects.<key>), its placeholders filled
+    in order: a "...name" one with the next skill or talent named in the
+    modifier (db.skill2 / db.skilltalent2 <id>Title), the others with its
+    number (a relative one as a percentage, without its sign: "- {0}%
+    cooldown time" is -0.20)."""
+    text = table.get('gui.statuseffects.' + key) or table.get('gui.statuseffects.modifier_' + key) or ''
+    if not text:
+        return ''
+    fields = [a.strip() for a in args.split(',')]
+    relative = len(fields) > 1 and fields[1].lower() == 'relative'
+    numbers, names = [], []
+    for f in fields:
+        try:
+            v = float(f)
+            v = abs(v * 100 if relative else v)
+            numbers.append(('%.2f' % v).rstrip('0').rstrip('.'))
+            continue
+        except ValueError:
+            pass
+        name = table.get('db.skill2.' + f + 'Title') or table.get('db.skilltalent2.' + f + 'Title') or table.get('db.skill.' + f + 'Title')
+        if name:
+            names.append(name)
+    def fill(m):
+        if 'name' in m.group(0).lower():
+            return names.pop(0) if names else ''
+        return numbers.pop(0) if numbers else ''
+    text = re.sub(r'\{\d+:[^}]*\}', fill, text)
+    # Its line breaks are written "\n" in the language files (Forgotten Glory's
+    # list of skills): kept as real ones, the card writes each part on a line.
+    text = re.sub(r'<[^>]*>', '', text).replace('\\n', '\n')
+    return '\n'.join(part.strip() for part in text.split('\n') if part.strip())
+
+
+def item_sets(db, local, table):
+    """Each set: its name, pieces and bonuses by pieces worn; each piece's set;
+    the level factors its bonuses scale by (_Template_Progressions). A bonus
+    with its own text ("#key": gui.statuseffects modifier_<key>, its value
+    written in as the essences' are) takes it as `fixed`; "#~" is not shown."""
+    sets, of, factors = {}, {}, set()
+    for sid, parts, modifiers in db.execute('SELECT Id, SetParts, Modifiers FROM _Template_ItemSet'):
+        pieces = [x for x in (parts or '').split(';') if x]
+        tiers = []
+        for chunk in (modifiers or '').split('|'):
+            m = re.match(r'\s*(\d+)\)(.*)', chunk)
+            if not m:
+                continue
+            lines = []
+            for whole in m.group(2).split(';'):
+                mod, _, key = whole.partition('#')
+                key = key.strip()
+                if key == '~':
+                    continue
+                if ':' not in mod:
+                    continue
+                kind, args = mod.split(':', 1)
+                if not key and kind.lower() == 'talentlevelbonus':
+                    key = 'TalentLevelBonus'
+                fixed = set_text(key, args, table) if key else ''
+                if fixed:
+                    lines.append(dict(fixed=fixed))
+                    continue
+                args = [a.strip() for a in args.split(',')]
+                low = [a.lower() for a in args]
+                text = next((t for k, scope, t in SET_TEXTS if k == kind.lower() and all(x in low for x in scope)
+                             and (scope or len(low) <= 4)), None)
+                try:
+                    value = float(args[0])
+                except ValueError:
+                    value = None
+                if text is None or value is None:
+                    lines.append(dict(text=''))
+                    continue
+                factor = next((a for a in args if a.lower().endswith(('factorabsolute', 'factorrelative'))), '') if 'levelmodifier' in low else ''
+                if factor:
+                    factors.add(factor.lower())
+                lines.append(dict(text=text, value=value, relative=len(low) > 1 and low[1] == 'relative', factor=factor.lower()))
+            tiers.append([int(m.group(1)), lines])
+        sets[sid] = dict(name=local(sid + 'Title', sid), parts=pieces, tiers=tiers)
+        for piece in pieces:
+            of.setdefault(piece, sid)
+    levels = {}
+    cursor = db.execute('SELECT * FROM _Template_Progressions ORDER BY Level')
+    columns = [c[0] for c in cursor.description]
+    for row in cursor:
+        r = {k.lower(): v for k, v in zip(columns, row)}
+        for f in factors:
+            if f in r:
+                levels.setdefault(f, []).append(round(float(r[f] or 0), 6))
+    return sets, of, levels
 
 
 def export_inventory(db, textures, loca, assets):
@@ -108,6 +244,7 @@ def export_inventory(db, textures, loca, assets):
             values.pop()
         return dict(status=sid, status_values=values)
     result = dict(items={}, ingredients=[], colors={}, appearances={}, icon_configs={}, rarity_backgrounds=[], enchantments={})
+    status_modifiers = dict(db.execute('SELECT Id, StartModifiers FROM _Template_StatusEffect'))
     cursor = db.execute('SELECT * FROM _Template_Item')
     columns = [c[0] for c in cursor.description]
     for values in cursor:
@@ -135,6 +272,9 @@ def export_inventory(db, textures, loca, assets):
             # description is only a "Localize:" placeholder).
             **({'card_lines': [table.get('gui.window.tooltip_ammoSlotInfo', '')] + modifier_lines(r.get('BaseModifier'), table)}
                if r.get('ItemCategory') == 'Ammunition' else {}),
+            # An emote's Effect section (the original's Coin Toss card).
+            **({'effect_lines': emote_lines(r, status_modifiers.get(r.get('StatusEffectId') or ''), table)}
+               if r.get('LocaleIdCategory') == 'itemtype_emote' else {}),
             # Seconds it lasts once received (ItemLifeTime: Premium (2 weeks)
             # "Duration: 7d 0h 0m 0s").
             **({'lifetime': int(r['ItemLifeTime'])} if r.get('ItemLifeTime') else {}),
@@ -190,6 +330,11 @@ def export_inventory(db, textures, loca, assets):
             if texture(brush):
                 result['reward_icons'][sid] = texture(brush)
     result['reward_cards'] = reward_cards(db, table, local)
+    # Set items' card section (crate::ui::controls::items::preview).
+    result['sets'], set_of, result['set_levels'] = item_sets(db, local, table)
+    for piece, sid in set_of.items():
+        if piece in result['items']:
+            result['items'][piece]['set'] = sid
     # The actor variables' upper limits (pet_hitpoint_01 10, pet_andermant_01 0.15).
     result['variables'] = {v: round(float(hi), 6) for v, hi in db.execute('SELECT Id, UpperLimit FROM _Template_ActorVariables')}
     path = os.path.join(assets, 'interface', 'inventory.items.json')

@@ -43,10 +43,14 @@ fn full_loadouts_match_authoritative_server_vectors() {
 }
 
 #[test]
-fn animation_rate_uses_the_server_breakpoints() {
-    for (raw, expected) in [(0.7,0.7),(1.0,1.0),(1.0255,1.0),(1.0256,1.25),(2.1053,2.5),(3.6364,4.1667),(6.0,4.1667),(99.0,4.1667)] {
+fn animation_rate_uses_each_skills_breakpoints() {
+    // (frames, sheet speed, rate): Magic Missile 15 frames steps at 30/29 and
+    // stops at 30/9 (4 frames); Fireball 20 at 40/11 (5 frames).
+    for (frames, raw, expected) in [(15,0.7,0.7),(15,1.0,1.0),(15,1.034,1.0),(15,1.035,15.0/14.0),
+            (15,3.333,15.0/5.0),(15,3.334,15.0/4.0),(15,99.0,15.0/4.0),
+            (20,3.636,20.0/6.0),(20,3.637,4.0),(20,6.0,4.0),(0,6.0,4.0)] {
         let stats = CharacterStats([("SkillExecutionSpeed".into(),raw)].into_iter().collect());
-        assert!((stats.animation_speed()-expected).abs() < 1e-6);
+        assert!((stats.animation_speed(frames)-expected).abs() < 1e-5, "{frames} {raw}");
     }
 }
 
@@ -84,4 +88,28 @@ fn equipment_adds_talent_ranks() {
     let bonuses = calculation::talent_bonuses(&data, &inventory);
     assert_eq!(bonuses.get("dwarf_turretcoveringfire_talent"), Some(&7));
     assert_eq!(bonuses.get("dwarf_talent_fire_master"), None, "the set's third part is missing");
+}
+
+#[test]
+fn a_set_shortens_its_skill_cooldown_as_the_server_does() {
+    // set_mage_dragan_event_lvl45 at 2 parts: CoolDown:-0.20,relative,frozenorb.
+    let mut fixture: serde_json::Value = serde_json::from_str(include_str!("../../../tests/fixtures/character_stats.json")).unwrap();
+    let item = |modifiers: serde_json::Value| serde_json::json!({"damage": [0.0, 0.0], "scaled": false, "modifiers": modifiers, "base": [], "enchantments": []});
+    let combat = &mut fixture["data"]["combat"];
+    for part in ["set_a", "set_b", "set_c"] { combat["items"][part] = item(serde_json::json!([])); }
+    combat["sets"].as_array_mut().unwrap().push(serde_json::json!({"parts": ["set_a", "set_b", "set_c"],
+        "tiers": [[2, [["cooldown", ["-0.20", "relative", "frozenorb"]]]]]}));
+    let data: StatsData = serde_json::from_value(fixture["data"].clone()).unwrap();
+    let mut inventory = crate::gameplay::inventory::InventoryState::default();
+    let wear = |inventory: &mut crate::gameplay::inventory::InventoryState, id: u32, template: &str| {
+        inventory.items.insert(id, ItemInfo { id, template: template.into(), durability: 1, ..default() });
+        inventory.allocation.slots.push((id, vec![id as i8]));
+    };
+    wear(&mut inventory, 1, "set_a");
+    let one = CooldownBonuses(calculation::cooldown_bonuses(&data, &inventory));
+    assert_eq!(one.seconds("FrozenOrb", 10.0), 10.0, "one part reaches no tier");
+    wear(&mut inventory, 2, "set_b");
+    let two = CooldownBonuses(calculation::cooldown_bonuses(&data, &inventory));
+    assert!((two.seconds("FrozenOrb", 10.0) - 8.0).abs() < 1e-9);
+    assert_eq!(two.seconds("fireball", 3.0), 3.0, "other skills keep theirs");
 }

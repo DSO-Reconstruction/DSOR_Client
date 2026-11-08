@@ -27,6 +27,8 @@ pub(in crate::ui) struct Card {
     leading: f32,
     /// Extra room after each space, in text sizes (a sticker's card).
     word_space: f32,
+    /// The item heading's icon size (reference pixels).
+    icon: f32,
     parts: Vec<Part>,
 }
 
@@ -41,7 +43,7 @@ impl Card {
         let font = |name: &str, fallback| layout.and_then(|l| l.widgets.iter().find(|w| w.id.ends_with(name)))
             .and_then(|w| w.text.as_ref()).map_or(fallback, |t| t.size * FONT_SCALE);
         Self { width, y: 16.0, background: Color::srgba(0.015, 0.015, 0.01, 0.94), size: font("/TextLabelDefaultTemplate", 12.0),
-            small: font("/TextLabelSmallTemplate", 10.8), title: font("/TextLabelHeadlineTemplate", 14.4), leading: 1.3, word_space: 0.0, parts: vec![] }
+            small: font("/TextLabelSmallTemplate", 10.8), title: font("/TextLabelHeadlineTemplate", 14.4), leading: 1.3, word_space: 0.0, icon: 64.0, parts: vec![] }
     }
 
     /// Lines closer together (a sticker's card, items::preview::sticker).
@@ -66,6 +68,13 @@ impl Card {
         self.size *= k;
         self.small *= k;
         self.title *= k;
+    }
+
+    /// The whole card in a smaller hand: its text and its heading's icon times
+    /// `k` (an item card, items::preview::headed_card).
+    pub fn compact(&mut self, k: f32) {
+        self.scale_text(k);
+        self.icon *= k;
     }
 
     /// The body text size (reference pixels), for a card sized to its text.
@@ -107,18 +116,33 @@ impl Card {
     /// FAILURE: "je veux l'image comme sur dofus le nom a droite, le niveau le
     ///   type comme sur dofus principalement".
     pub fn header(&mut self, name: &str, color: Color, icons: &[String], subtitle: &str) {
-        const ICON: f32 = 64.0;
+        let icon = self.icon;
         let start = self.y;
         for path in icons {
-            self.parts.push(Part::Icon { path: path.clone(), at: Vec2::new(14.0, start), size: ICON });
+            self.parts.push(Part::Icon { path: path.clone(), at: Vec2::new(14.0, start), size: icon });
         }
-        let left = if icons.is_empty() { 16.0 } else { 14.0 + ICON + 12.0 };
+        let left = if icons.is_empty() { 16.0 } else { 14.0 + icon + 12.0 * icon / 64.0 };
         self.y += 6.0;
         self.paragraph(name, color, self.title, left, false, true);
         self.y += 2.0;
         self.paragraph(subtitle, WHITE, self.size, left, false, false);
-        self.y = self.y.max(start + ICON + 4.0);
+        self.y = self.y.max(start + icon + 4.0);
         self.rule();
+    }
+
+    /// The comparison card's heading as the original's: the tooltip layout's
+    /// EquippedLabel banner (deco_elemente_5, its arrows past the card's
+    /// sides) across the card's top edge, the word centred in white on it.
+    /// EVIDENCE: the user's original shot (2026-11-07): the trader's gloves
+    ///   beside "Equipped" Steel Gauntlets, the banner 1.17 of the card wide,
+    ///   2.8 lines high, straddling the frame.
+    /// FAILURE (to 2026-11-07): a muted line and a rule inside the card.
+    pub fn banner(&mut self, value: &str) {
+        let (half, over) = (1.4 * self.size, 0.085 * self.width);
+        self.parts.push(Part::Art { template: "EquippedLabel/EquippedLabel".into(), rect: [-over, -half, self.width + over, half] });
+        self.y = -0.62 * self.size;
+        self.paragraph(value, WHITE, self.size, 12.0, true, false);
+        self.y = half + 8.0;
     }
 
     pub fn text(&mut self, value: &str, color: Color) {

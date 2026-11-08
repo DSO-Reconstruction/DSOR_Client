@@ -1,11 +1,17 @@
 //! Release261's eight skill, five collection and four consumable shortcuts.
-//! Essences are inventory equipment 35/34, independent of those seventeen slots.
+//! Essences are inventory equipment 35/36, independent of those seventeen slots.
 use super::*;
 use crate::gameplay::inventory::{InventoryState, Place};
 use dsor_proto::commands::{inventory::{ItemInfo, QuickSlot as Slot, UseStickerBookItem}, ClientCommand};
 
 pub(super) const PRIMARY_ESSENCE: usize = 17;
 pub(super) const BACKUP_ESSENCE: usize = 18;
+/// The parked essence's equipment slot: 36, as the server keeps it (DSOR_Server
+/// protocol/inventory_codec.py SECONDARY_AMMUNITION_SLOT; 34 before its #43).
+/// FAILURE (2026-11-01): still 34 here, the backup essence the server put in 36
+///   never showed, could not be taken out, and the swap key did nothing (the
+///   user's recording 20261101-1509-35).
+pub(in crate::ui) const BACKUP_ESSENCE_SLOT: i8 = 36;
 
 /// Item and sticker use cooldowns (_Template_Item.CoolDown, shared by its
 /// CoolDownCategory: every mount VanityItem 0.5 s, pets 2-5 s, Shadow Souls 30
@@ -145,7 +151,7 @@ pub(in crate::ui) fn skill_id(index: usize, bar: usize, net: Option<&crate::netw
 }
 
 pub(super) fn essence(inventory: &InventoryState, index: usize) -> Option<&ItemInfo> {
-    inventory.at(Place::Equipment(if index == PRIMARY_ESSENCE { 35 } else { 34 }))
+    inventory.at(Place::Equipment(if index == PRIMARY_ESSENCE { 35 } else { BACKUP_ESSENCE_SLOT }))
 }
 
 /// A sticker shortcut's background (its rarity's or its icon configuration's),
@@ -262,7 +268,7 @@ mod tests {
         assert_eq!(item(&Slot { kind:1, id:Some("potion".into()) }, &state).unwrap().id, 5);
         state.allocation.placements.clear(); state.allocation.bank.push((5,0));
         assert!(item(&Slot { kind:1, id:Some("5".into()) }, &state).is_none());
-        state.allocation.slots = vec![(5,vec![34])];
+        state.allocation.slots = vec![(5,vec![BACKUP_ESSENCE_SLOT])];
         assert!(essence(&state, PRIMARY_ESSENCE).is_none()); assert_eq!(essence(&state, BACKUP_ESSENCE).unwrap().third,12);
     }
 }

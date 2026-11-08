@@ -45,25 +45,40 @@ pub struct CharacterStats(pub HashMap<String, f64>);
 /// CharacterStats. The Skills & Talents window shows them (a green "7/17").
 #[derive(Resource, Default, Debug, PartialEq)]
 pub struct TalentBonuses(pub HashMap<String, u32>);
+
+/// The cooldown changes the equipment makes, by skill id in lower case:
+/// (relative, absolute seconds) (calculation::cooldown_bonuses); recomputed
+/// with CharacterStats.
+#[derive(Resource, Default, Debug, PartialEq)]
+pub struct CooldownBonuses(pub HashMap<String, (f64, f64)>);
+impl CooldownBonuses {
+    /// A skill's cooldown with them, as the server times it:
+    /// base x (1 + relative) + absolute, never below 0.
+    pub fn seconds(&self, skill: &str, base: f32) -> f64 {
+        let (rel, abs) = self.0.get(&skill.to_lowercase()).copied().unwrap_or((0.0, 0.0));
+        (base as f64 * (1.0 + rel).max(0.0) + abs).max(0.0)
+    }
+}
 impl CharacterStats {
     pub fn value(&self, key: &str) -> Option<f32> { self.0.get(key).map(|v| *v as f32) }
-    pub fn animation_speed(&self) -> f32 {
+    /// The rate a skill of `frames` frames (its SkillUnblockFrame) plays at.
+    pub fn animation_speed(&self, frames: u32) -> f32 {
         // SkillExecutionSpeed stops at its 4.0 limit (_Template_ActorAttributes):
-        // past it the original attacks no faster, the 6-frame rate 4.1667,
-        // whatever the sheet adds up to (the server caps it the same way).
+        // past it the original attacks no faster, whatever the sheet adds up
+        // to (the server caps it the same way).
         // Offline: DSOR_TEST_ATTACK_SPEED=<sheet value> stands in for the sheet's.
         static TEST: std::sync::OnceLock<Option<f64>> = std::sync::OnceLock::new();
         let test = *TEST.get_or_init(|| std::env::var("DSOR_TEST_ATTACK_SPEED").ok().and_then(|v| v.parse().ok()));
         let raw = test.or_else(|| self.0.get("SkillExecutionSpeed").copied()).unwrap_or(1.0).clamp(0.01, 4.0);
         if raw < 1.0 { return raw as f32; }
-        // Server local_combat_state.effective_attack_speed: discrete sequence
-        // breakpoints, distinct from the raw speed printed on the sheet.
-        [(1.0256,1.25),(1.0811,1.3158),(1.1429,1.3889),(1.2121,1.4706),
-         (1.2903,1.5625),(1.3793,1.6667),(1.4815,1.7857),(1.6,1.9231),
-         (1.7391,2.0833),(1.9048,2.2727),(2.1053,2.5),(2.3529,2.7778),
-         (2.6667,3.125),(3.0769,3.5714),(3.6364,4.1667),(4.4444,5.0),
-         (5.7143,6.25),(8.0,8.3333),(13.3333,12.5),(40.0,25.0)]
-            .into_iter().take_while(|(threshold,_)| raw+1e-9 >= *threshold).last().map_or(1.0, |(_,rate)| rate)
+        // Server local_combat_state.effective_attack_speed: sequences advance
+        // in whole frames, so a skill of U frames plays in k frames from the
+        // sheet speed 2U/(2k + 1) on (every row of the official 2015
+        // breakpoint table: Magic Missile 30/29 ... 30/9, Fireball 40/39 ...
+        // 40/11). FAILURE: one 20-frame table for every skill, a frame off.
+        let frames = if frames == 0 { 20 } else { frames } as f64;
+        let shown = (frames / raw - 0.5 - 1e-9).ceil().max(1.0);
+        (frames / shown) as f32
     }
     /// What the player's skills cost relative to their ResourceCost (1 without
     /// a modifier; 0 inside Banner of War).
@@ -229,6 +244,7 @@ impl Plugin for StatsPlugin {
             .init_resource::<SheetRows>()
             .init_resource::<CharacterStats>()
             .init_resource::<TalentBonuses>()
+            .init_resource::<CooldownBonuses>()
             .add_systems(Startup, |mut commands: Commands, assets: Res<AssetServer>| {
                 commands.insert_resource(Data(assets.load("characters/stats.json")));
             })
@@ -244,6 +260,7 @@ fn update_stats(
     mut output: ResMut<CharacterStats>,
     mut previous: Local<Option<(u8, u32, u64, u64)>>,
     mut bonuses: ResMut<TalentBonuses>,
+    mut cooldowns: ResMut<CooldownBonuses>,
 ) {
     let _profile = crate::diagnostics::hud::FrameSpan::new("stats::update_stats");
     let (Some(d), Some(net), Some(player)) = (stats.get(&data.0), net, players.iter().next()) else {
@@ -261,6 +278,8 @@ fn update_stats(
     output.0 = calculation::calculate(d, CLASSES[class as usize], level, &net.inventory, effects);
     let talents = calculation::talent_bonuses(d, &net.inventory);
     if bonuses.0 != talents { bonuses.0 = talents; }
+    let changed = calculation::cooldown_bonuses(d, &net.inventory);
+    if cooldowns.0 != changed { cooldowns.0 = changed; }
 }
 
 /// One actor attribute.

@@ -96,12 +96,12 @@ pub(in crate::ui) fn overlay(mut commands: Commands, windows: Query<(&Window2018
     (pointer,keys,figures,shown,views,real):(Res<Pointer>,Res<ButtonInput<KeyCode>>,Res<Figures>,Res<currency::Shown>,Res<systems::Views>,Res<Time<Real>>),
     (net, social_ui, map_names, current_map): (Option<NonSend<crate::network::net::Net>>, Res<social::SocialUi>, Res<Assets<crate::ui::local_map::MapNames>>, Option<Res<crate::world::map::CurrentMap>>), hotbar: Res<hotbar::Hotbar>,
     (data, catalogs, dialogue): (Res<items::Data>, Res<Assets<items::Catalog>>, Res<dialogue::Presentation>), layouts: Res<Assets<Layout>>, loaded: Res<Loaded>,
-    (skill_tables, status_bar, status_catalogs, status_slots): (Res<Assets<crate::gameplay::skills::SkillTable>>,
-        Res<effects::StatusBar>, Res<Assets<effects::Catalog>>, Query<&effects::EffectSlot>), assets: Res<AssetServer>,
-    (old, mut transforms, item_hovers): (Query<Entity, With<Tooltip>>, Query<&mut Transform, With<Tooltip>>,
+    (skill_tables, status_bar, status_catalogs, status_slots, cooldown_bonuses): (Res<Assets<crate::gameplay::skills::SkillTable>>,
+        Res<effects::StatusBar>, Res<Assets<effects::Catalog>>, Query<&effects::EffectSlot>, Res<crate::gameplay::stats::CooldownBonuses>), assets: Res<AssetServer>,
+    (old, mut transforms, item_hovers): (Query<Entity, With<Tooltip>>, Query<(&mut Transform, Has<SecondCard>), With<Tooltip>>,
         Query<(&social::ItemHover, &GlobalTransform, &InheritedVisibility)>),
     (mut meshes, mut materials): (ResMut<Assets<Mesh>>, ResMut<Assets<UiMaterial>>),
-    mut last: Local<Option<(Card, u32, bool)>>) {
+    mut last: Local<Option<(Card, Option<Card>, u32, bool)>>) {
     let point = primary.single().ok().filter(|w| w.focused).and_then(|w| w.cursor_position().map(|p| p*(BASE_H/w.height().max(1.0))));
     let enabled = settings.current.tooltips && pointer.down.is_none() && pointer.drag.is_none() && pointer.spell_drag.is_none();
     let catalog = catalogs.get(&data.catalog);
@@ -113,6 +113,8 @@ pub(in crate::ui) fn overlay(mut commands: Commands, windows: Query<(&Window2018
     let mut above = false;
     // A sticker's card opens under its sticker (STICKER_GAP).
     let mut under_sticker = false;
+    // A second card beside the first (a reward's worn counterpart, "Equipped").
+    let mut second: Option<Card> = None;
     // A talents window card shown as a compact hint (a title alone).
     let mut hint = false;
     let template = layouts.get(&data.tooltip);
@@ -169,7 +171,17 @@ pub(in crate::ui) fn overlay(mut commands: Commands, windows: Query<(&Window2018
                                     heading = catalog.name(template, item).to_owned(); body = clean_text(&meta.description);
                                     icon = catalog.icon(template,item).0.map(str::to_owned);
                                     if slot.kind == 1 { body.push_str(&format!("\nQuantity: {}",item.map_or(0,|i| i.third))); }
-                                    detail = Some(items::preview_card(catalog,layouts.get(&data.tooltip),template,item,item.map_or(0,|i|i.third),settings.current.advanced_tooltips(&keys,pointer.focus.is_some())));
+                                    // A Collector's Bag shortcut (kind 2: the mount on O, a pet):
+                                    // the sticker's card, as the original's. As a bag item it read
+                                    // "Not yet collected" (no inventory stack) for an owned mount
+                                    // (the user's recording 20261106-1710-34, 0:30).
+                                    detail = Some(if slot.kind == 2 {
+                                        let name = catalog.name(template, None).to_owned();
+                                        items::sticker_card(catalog, layouts.get(&data.tooltip), template, &name,
+                                            status_catalogs.get(&status_bar.catalog), &views.album.bag_values(), &views.album.class, None)
+                                    } else {
+                                        items::preview_card(catalog,layouts.get(&data.tooltip),template,item,item.map_or(0,|i|i.third),settings.current.advanced_tooltips(&keys,pointer.focus.is_some()))
+                                    });
                                 }
                             } else { body = "Empty slot".into(); }
                         }
@@ -227,6 +239,11 @@ pub(in crate::ui) fn overlay(mut commands: Commands, windows: Query<(&Window2018
                         detail = Some(items::reward_item_card(catalog, layouts.get(&data.tooltip), &reward.item, &reward.footer, reward.lifetime,
                             status_catalogs.get(&status_bar.catalog), &views.album.bag_values(), &views.album.class));
                         under_sticker = true;
+                        // What is worn in its slot, beside it under "Equipped", as the
+                        // original's essence reward (the user's recording
+                        // 20261031-1658-42: "39121x Essence of Vigor" beside it).
+                        second = net.as_deref().and_then(|n| items::equipped_card(catalog, layouts.get(&data.tooltip), n, &reward.item,
+                            settings.current.advanced_tooltips(&keys, pointer.focus.is_some())));
                     } else {
                         let lines = reward.bonus.clone().unwrap_or_default();
                         items::fit_small(&mut card, std::iter::once(title.as_str()).chain(lines.iter().map(String::as_str)).chain(std::iter::once(footer.as_str())));
@@ -332,7 +349,11 @@ pub(in crate::ui) fn overlay(mut commands: Commands, windows: Query<(&Window2018
                     let resource = ["Rage", "Mana", "Concentration", "Steam"].get(s.class_id as usize).unwrap_or(&"Resource");
                     card.text(&format!("Base cost: <GreenStart>{:.0}%</> maximum {resource}",def.resource_cost*100.0), WHITE);
                     card.text(&format!("Essence Costs: {}",def.ammo_cost), WHITE);
-                    card.text(&format!("Cool-down: {} s",def.cooldown), WHITE);
+                    // With the equipment's changes, as the original shows it (a
+                    // cooldown jewel lowers the number here, the user, 2026-11-05).
+                    let seconds = cooldown_bonuses.seconds(&def.id, def.cooldown);
+                    let seconds = (seconds * 10.0).round() / 10.0;
+                    card.text(&format!("Cool-down: {seconds} s"), WHITE);
                 }
                 if !c.spells.available(s) && s.wire.is_some() { card.text(&format!("Required level: {}",s.unlock), Color::srgb(0.9,0.65,0.3)); }
                 // In the talents window: its upgrade's price and level, how to level it.
@@ -401,7 +422,9 @@ pub(in crate::ui) fn overlay(mut commands: Commands, windows: Query<(&Window2018
                         // FAILURE (2026-10-24): "Health", "Experience: earn experience to
                         //   level up" without the numbers (the user's shots beside the original's).
                         else if widget.id.contains("bottombar_xp_bar") { Some(figures.xp_points.map_or_else(|| "Experience points".to_owned(), |(n, of)| format!("{n} / {of} Experience points"))) }
-                        else if widget.id.contains("bottombar_wisdom_bar") { Some("Ancient Wisdom".into()) }
+                        // gui.window bottomBarWisdomXp: the original's "3920161 / 3622960 Wisdom".
+                        // FAILURE (2026-10-30): "Ancient Wisdom" without the numbers.
+                        else if widget.id.contains("bottombar_wisdom_bar") { Some(figures.wisdom_points.map_or_else(|| "Wisdom".to_owned(), |(n, of)| format!("{n} / {of} Wisdom"))) }
                         else { match gauge_of(&widget.id) {
                             Some(Gauge::Health | Gauge::HealthBar) => Some(format!("{:.0} / {:.0} Health Points", figures.health.0, figures.health.1)),
                             Some(Gauge::Resource | Gauge::ResourceBar) => Some(format!("{:.0} / {:.0} {}", figures.resource.0, figures.resource.1,
@@ -441,21 +464,38 @@ pub(in crate::ui) fn overlay(mut commands: Commands, windows: Query<(&Window2018
         }
         card
     }));
-    let key = card.as_ref().map(|c| (c.clone(), screen.scale.to_bits(), template.is_some()));
+    let key = card.as_ref().map(|c| (c.clone(), second.clone(), screen.scale.to_bits(), template.is_some()));
     let at = card.as_ref().zip(anchor).map(|(c,a)| if under_sticker {
         card::under(a, Vec2::new(c.width,c.height()), Vec2::new(screen.width,BASE_H), STICKER_GAP)
     } else {
         card::placement(a,Vec2::new(c.width,c.height()),Vec2::new(screen.width,BASE_H),compact || above)
     });
+    // Left of the first card, else right of it; level with its top.
+    let second_at = second.as_ref().zip(card.as_ref()).zip(at).map(|((s,c),(p,scale))| {
+        let left = p.x-(s.width+6.0)*scale;
+        let x = if left >= 8.0 { left } else { (p.x+(c.width+6.0)*scale).min(screen.width-s.width*scale-8.0) };
+        (Vec2::new(x,p.y),scale)
+    });
     if *last == key {
-        if let Some((at,scale))=at { for mut tf in &mut transforms { tf.translation=screen.world(0.0,at.x,at.y).extend(850.0); tf.scale=Vec3::splat(scale); } }
+        for (mut tf, is_second) in &mut transforms {
+            let Some((at,scale)) = (if is_second { second_at } else { at }) else { continue };
+            tf.translation=screen.world(0.0,at.x,at.y).extend(850.0); tf.scale=Vec3::splat(scale);
+        }
         return;
     }
     *last=key; for e in &old { commands.entity(e).despawn(); }
     let (Some(card),Some((at,scale)))=(card,at) else{return;};
     let root=commands.spawn((Tooltip,Transform::from_translation(screen.world(0.0,at.x,at.y).extend(850.0)).with_scale(Vec3::splat(scale)),Visibility::Inherited)).id();
     card.draw(&mut commands,&assets,&screen,&mut meshes,&mut materials,root,template);
+    if let (Some(s),Some((p,scale)))=(second,second_at) {
+        let root=commands.spawn((Tooltip,SecondCard,Transform::from_translation(screen.world(0.0,p.x,p.y).extend(850.0)).with_scale(Vec3::splat(scale)),Visibility::Inherited)).id();
+        s.draw(&mut commands,&assets,&screen,&mut meshes,&mut materials,root,template);
+    }
 }
+
+/// The second tooltip card (overlay's `second`).
+#[derive(Component)]
+pub(in crate::ui) struct SecondCard;
 
 #[cfg(test)]
 mod tests {

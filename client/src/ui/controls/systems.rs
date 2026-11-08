@@ -459,6 +459,15 @@ pub(in crate::ui) fn sync(
     if built.inputs != Some(inputs) || state.is_changed() {
         built.inputs = Some(inputs);
         built.current = [false; VIEW_WINDOWS.len()];
+        // The Collector's Bag bonuses and our class, closed bag or not: the
+        // pet cards anywhere write them (album::bonuses).
+        let fallback = SystemsCatalog::default();
+        let catalog = catalogs.get(&state.catalog).unwrap_or(&fallback);
+        let sources = Sources { net: &net, catalog, items, names, state: &state, class, talents: talent_catalog, bonuses: bonuses.as_deref().map(|b| &b.0) };
+        let bag = album::bonuses(&sources);
+        let class_name = sources.class_name();
+        if views.album.bag != bag { views.album.bag = bag; }
+        if views.album.class != class_name { views.album.class = class_name.to_owned(); }
     }
     // Development builds (and DSOR_FLAGS=uiaudit) rebuild the current views now
     // and then: one that changed means an input above was missed (a Net field
@@ -1071,6 +1080,13 @@ pub(in crate::ui) fn send(
                             _ => true,
                         };
                         if allowed {
+                            // A mount used from the bag also becomes the O slot's
+                            // mount, as in the original (stickers::apply_drop).
+                            // FAILURE (2026-11-07): the Manticore was ridden but O
+                            //   kept the Onyx Tiger.
+                            let mount = views.album.sticker(&id).and_then(|s| items_catalogs.get(&items_data.catalog)?.items.get(&s.template))
+                                .is_some_and(|m| m.item_category == "Mount");
+                            if mount { pointer.sticker_drop = Some((2, id.clone(), 8)); }
                             commands.push(command);
                             // Its icon pops (crate::ui::album_overlays), the window untouched.
                             pop_at.0 = Some((id.clone(), time.elapsed_secs_f64()));

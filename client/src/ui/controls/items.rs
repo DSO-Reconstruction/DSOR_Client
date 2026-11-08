@@ -18,6 +18,8 @@ pub struct Definition {
     /// An essence's card text: its slot's line, then its modifiers' (tools/
     /// inventory_catalog.py modifier_lines).
     #[serde(default)] pub card_lines: Vec<String>,
+    /// An emote's Effect section (tools/inventory_catalog.py emote_lines).
+    #[serde(default)] pub effect_lines: Vec<String>,
     /// Seconds it lasts once received (ItemLifeTime), 0 for ever.
     #[serde(default)] pub lifetime: u32,
     /// A pet's status effect and its values by rarity ($0..: its Pet Effect;
@@ -26,6 +28,8 @@ pub struct Definition {
     #[serde(default)] pub status_values: Vec<f32>,
     #[serde(default)] pub unique_values: Vec<String>,
     #[serde(default)] pub unique_effects: Vec<String>,
+    /// The item set it belongs to (_Template_ItemSet), if any.
+    #[serde(default)] pub set: String,
 }
 /// A rolled appearance's icon and icon configuration (_Template_ItemAppearance).
 #[derive(Deserialize)]
@@ -57,7 +61,20 @@ pub struct Catalog { pub items: HashMap<String, Definition>, pub ingredients: Ve
     /// Such a reward's hover card: its title and lines (tools/inventory_catalog.py
     /// reward_cards).
     #[serde(default)] pub reward_cards: HashMap<String, RewardCard>,
-    #[serde(default)] pub variables: HashMap<String, f32> }
+    #[serde(default)] pub variables: HashMap<String, f32>,
+    /// Item sets (tools/inventory_catalog.py item_sets): name, pieces, bonuses
+    /// by pieces worn; and the level factors (_Template_Progressions, level 1
+    /// first) their LevelModifier bonuses scale by.
+    #[serde(default)] pub sets: HashMap<String, ItemSet>,
+    #[serde(default)] pub set_levels: HashMap<String, Vec<f32>> }
+#[derive(Deserialize, Clone, Debug, Default, PartialEq)]
+pub struct ItemSet { #[serde(default)] pub name: String, #[serde(default)] pub parts: Vec<String>,
+    #[serde(default)] pub tiers: Vec<(usize, Vec<SetLine>)> }
+/// One set bonus: its text and base value, or its own written-out text
+/// (`fixed`, gui.statuseffects); neither: a special effect without a text.
+#[derive(Deserialize, Clone, Debug, Default, PartialEq)]
+pub struct SetLine { #[serde(default)] pub fixed: String, #[serde(default)] pub text: String, #[serde(default)] pub value: f32,
+    #[serde(default)] pub relative: bool, #[serde(default)] pub factor: String }
 #[derive(Deserialize, Clone, Debug, Default, PartialEq)]
 pub struct RewardCard { #[serde(default)] pub title: String, #[serde(default)] pub lines: Vec<String> }
 
@@ -163,7 +180,7 @@ pub(super) fn cell(w: &Widget) -> Option<Cell> {
         "Back"=>7,"RingLeftHand"=>8,"RingRightHand"=>9,"Neck"=>10,"Waist"=>11,"WeaponMount"=>12,
         "RuneTrinket1"=>13,"RuneTrinket2"=>14,"RuneTrinket3"=>15,"RuneTrinket4"=>16,"RuneTrinket5"=>17,"RuneTrinket6"=>18,"RuneTrinket7"=>19,
         "JewelTrinket1"=>20,"JewelTrinket2"=>21,"JewelTrinket3"=>22,"Ammo"=>35,"AncientTrinket1"=>24,
-        "MercenaryNeck"=>25,"MercenaryBack"=>26,"MercenaryWaist"=>27,"AmmoAlt1"=>35,"AmmoAlt2"=>34,
+        "MercenaryNeck"=>25,"MercenaryBack"=>26,"MercenaryWaist"=>27,"AmmoAlt1"=>35,"AmmoAlt2"=>hotbar::BACKUP_ESSENCE_SLOT,
         _=>return None,
     }; Some(Cell::Equipment(slot))
 }
@@ -181,7 +198,7 @@ fn item_cell(window: &str, action: &Action) -> Option<Cell> {
     match (window, action) {
         ("inventory", Action::Item(cell)) => Some(*cell),
         ("bottombar", Action::Skill(hotbar::PRIMARY_ESSENCE)) => Some(Cell::Equipment(35)),
-        ("bottombar", Action::Skill(hotbar::BACKUP_ESSENCE)) => Some(Cell::Equipment(34)),
+        ("bottombar", Action::Skill(hotbar::BACKUP_ESSENCE)) => Some(Cell::Equipment(hotbar::BACKUP_ESSENCE_SLOT)),
         _ => None,
     }
 }
@@ -738,6 +755,21 @@ pub(super) fn text(commands:&mut Commands,assets:&AssetServer,screen:&Screen,par
         TextColor(color),Anchor::TOP_LEFT,bevy::text::TextBounds::new_horizontal(width*screen.scale),
         Transform::from_translation(at).with_scale(Vec3::splat(1.0/screen.scale)),RenderLayers::layer(LAYER),ChildOf(parent)));
 }
+/// A stack's count as a cell writes it: whole below 10000, else thousands with
+/// a "k" ("39k", "50k").
+/// EVIDENCE: the user's original shot (2026-11-07) writes "9502", "875",
+///   "48k", "50k"; the bar's essence "39k".
+/// FAILURE (2026-11-01 to 11-07): shortened from 1000, so 8938 showed "8k".
+pub(super) fn stack_count(amount:u32)->String {
+    if amount>=10_000 {format!("{}k",amount/1000)} else {amount.to_string()}
+}
+/// A right-aligned label whose top right is `at`.
+#[allow(clippy::too_many_arguments)]
+fn text_right(commands:&mut Commands,assets:&AssetServer,screen:&Screen,parent:Entity,value:String,at:Vec3,size:f32,color:Color,width:f32) {
+    commands.spawn((Text2d::new(value),TextFont{font:assets.load("fonts/tahoma.ttf").into(),font_size:bevy::text::FontSize::Px(size*TEXT_SCALE*screen.scale),..default()},
+        TextColor(color),Anchor::TOP_RIGHT,bevy::text::TextLayout::justify(bevy::text::Justify::Right),bevy::text::TextBounds::new_horizontal(width*screen.scale),
+        Transform::from_translation(at).with_scale(Vec3::splat(1.0/screen.scale)),RenderLayers::layer(LAYER),ChildOf(parent)));
+}
 /// An item as a cell draws it, top-left at `at`: its rarity background, its icon,
 /// and its frame over both (icons_toolkit/frame_slim_*). False without an icon.
 /// FAILURE (2026-10-19): the dragged copy left out the frame ("dragged only with
@@ -809,10 +841,20 @@ pub fn render(mut commands:Commands,windows:Query<(Entity,&Window2018,&WindowCon
             commands.spawn((Sprite{image:assets.load("textures/ui/icon_questionmark.png"),custom_size:Some(mark),..default()},Anchor::TOP_LEFT,
                 Transform::from_translation(Vec3::new(pos.x+(size.x-mark.x)/2.0,pos.y-(size.y-mark.y)/2.0,0.25)),RenderLayers::layer(LAYER),ChildOf(group)));
         }
+        // At the cell's bottom right, thousands shortened ("4k", "50k"), a
+        // little larger than ours was, as the original's (the user's shots,
+        // 2026-11-01: "50k", "380" 24 px high in a 145 px cell, ours 22).
         if d.amount>1 || matches!(cell,Cell::Ingredient(_)) {
-            let at=Vec3::new(pos.x+3.0,pos.y-size.y+17.0,0.3);
-            text(&mut commands,&assets,&screen,group,d.amount.to_string(),at+Vec3::new(1.0,-1.0,-0.01),13.0,Color::BLACK,size.x-4.0);
-            text(&mut commands,&assets,&screen,group,d.amount.to_string(),at,13.0,Color::WHITE,size.x-4.0);
+            // The original's cream (248,229,200 sampled); its digits 26 px in a
+            // 161 px pitch (ours were 23 in 165 at 14.5), ending 14 px inside
+            // the frame (ours 3: "they get in the frame"). Clean shots of both
+            // (2026-11-07, 131 px icons): the original's digits 27 px, ending
+            // 8 px left of and 7 px above the icon's corner; ours ended 3 px
+            // below it ("too down, literally in the frame").
+            let at=Vec3::new(pos.x+size.x-7.0,pos.y-size.y+22.5,0.3);
+            let count=stack_count(d.amount);
+            text_right(&mut commands,&assets,&screen,group,count.clone(),at+Vec3::new(1.0,-1.0,-0.01),16.5,Color::BLACK,size.x-7.0);
+            text_right(&mut commands,&assets,&screen,group,count,at,16.5,Color::srgb_u8(248,229,200),size.x-7.0);
         }
         if let (Cell::Equipment(slot),Some(item),Some((mesh,face,size,font)))=(cell,d.item,level.as_ref()) { if let Some(c)=level_centre(slot,b.rect) {
             commands.spawn((Mesh2d(mesh.clone()),MeshMaterial2d(face.clone()),Transform::from_translation(screen.world(b.k,c.x-size.x/2.0,c.y-size.y/2.0).extend(0.35))
@@ -869,6 +911,15 @@ pub(super) fn sticker_card(catalog:&Catalog, layout:Option<&Layout>, template:&s
     preview::sticker(catalog,layout,template,title,status,bag,class,upgrade,None)
 }
 #[allow(clippy::too_many_arguments)]
+/// The worn item of the slot a `template` goes in, as the inventory shows it
+/// beside a hovered item (overlay): its card under "Equipped". None when the
+/// item is worn nowhere or its slots are empty.
+pub(super) fn equipped_card(catalog:&Catalog, layout:Option<&Layout>, net:&crate::network::net::Net, template:&str, advanced:bool)->Option<tooltips::card::Card> {
+    let slots=&catalog.items.get(template)?.slots;
+    let worn=slots.iter().find_map(|s|net.inventory.at(Place::Equipment(*s)))?;
+    Some(preview::headed_card(&DisplayItem{item:Some(worn),template:&worn.template,amount:worn.third,unlock:0,read_only:true,waiting:false},catalog,layout,advanced,Some("Equipped")))
+}
+
 pub(super) fn reward_item_card(catalog:&Catalog, layout:Option<&Layout>, template:&str, footer:&str, lifetime:u32, status:Option<&effects::Catalog>, bag:&HashMap<String,f32>, class:&str)->tooltips::card::Card {
     preview::reward_item(catalog,layout,template,footer,lifetime,status,bag,class)
 }
@@ -883,10 +934,12 @@ pub(super) fn preview_card(catalog:&Catalog, layout:Option<&Layout>, template:&s
 #[allow(clippy::too_many_arguments)]
 pub fn overlay(mut commands:Commands,ui:Res<Interaction>,windows:Query<(&Window2018,&WindowControls,&Visibility,&Transform),Without<Overlay>>,primary:Query<&Window,With<PrimaryWindow>>,
     net:Option<NonSend<crate::network::net::Net>>,(data,catalogs,layouts):(Res<Data>,Res<Assets<Catalog>>,Res<Assets<Layout>>),assets:Res<AssetServer>,screen:Res<Screen>,
-    (old,mut transforms):(Query<Entity,With<Overlay>>,Query<&mut Transform,With<Overlay>>),
+    (old,mut transforms):(Query<Entity,With<Overlay>>,Query<(&mut Transform,Option<&WornCard>),With<Overlay>>),
     (mut meshes,mut materials):(ResMut<Assets<Mesh>>,ResMut<Assets<UiMaterial>>),
-    mut last:Local<Option<(String,u64,bool,bool,u32,bool)>>, settings:Res<settings::Settings>,keys:Res<ButtonInput<KeyCode>>,pointer:Res<Pointer>) {
+    mut last:Local<Option<(String,u64,bool,bool,u32,bool)>>, settings:Res<settings::Settings>,keys:Res<ButtonInput<KeyCode>>,pointer:Res<Pointer>,
+    (status_bar,status_catalogs,views):(Res<super::effects::StatusBar>,Res<Assets<super::effects::Catalog>>,Res<super::systems::Views>)) {
     let catalog=catalogs.get(&data.catalog);
+    if let Some(n)=&net { preview::note_worn(&n.inventory); }
     let point=primary.single().ok().filter(|w|w.focused).and_then(|w|w.cursor_position().map(|p|p*(BASE_H/w.height().max(1.0))));
     let dragged=net.as_ref().and_then(|n|ui.drag.as_ref().filter(|d|d.active).and_then(|d|n.inventory.items.get(&d.id)));
     let mut anchor=None;
@@ -905,16 +958,55 @@ pub fn overlay(mut commands:Commands,ui:Res<Interaction>,windows:Query<(&Window2
     let layout=layouts.get(&data.tooltip);
     let enabled=point.is_some() && ui.split.is_none() && (dragged.is_some() || (settings.current.tooltips && pointer.down.is_none() && pointer.drag.is_none() && pointer.spell_drag.is_none()));
     let key=display.as_ref().filter(|_|enabled).map(|d|(format!("{}:{}:{}",d.template,d.item.map_or(0,|i|i.id),d.amount),net.as_ref().map_or(0,|n|n.inventory.revision),dragged.is_some(),advanced,screen.scale.to_bits(),layout.is_some()));
-    let card=display.as_ref().zip(catalog).filter(|_|dragged.is_none()).map(|(d,c)|preview::card(d,c,layout,advanced));
+    // A pet or mercenary: its Collector's Bag card, with the Effect section
+    // (pet effect, bag bonuses) the original's inventory card shows; the item
+    // card had no stats at all (the user, 2026-11-06: "this dog shows no stats").
+    let card=display.as_ref().zip(catalog).filter(|_|dragged.is_none()).map(|(d,c)| match c.items.get(d.template).filter(|m| matches!(m.item_category.as_str(),"Pet"|"Mercenary")) {
+        Some(_)=>preview::sticker(c,layout,d.template,c.name(d.template,d.item),status_catalogs.get(&status_bar.catalog),&views.album.bag_values(),&views.album.class,None,None),
+        None=>preview::card(d,c,layout,advanced),
+    });
+    // The worn item of the hovered one's slot, its card beside it under
+    // "Equipped", as the original compares them (the user's recording
+    // 20261031-1658-42: the worn Essence of Vigor beside the hovered one).
+    // UNVERIFIED: which of two slots (rings) the original compares with; the
+    // first one worn here. The user's original shot (2026-11-01) compared a
+    // level 140 Unique ring with a level 145 Legendary one (rarity first?).
+    let worn=display.as_ref().zip(catalog).zip(net.as_ref()).filter(|_|dragged.is_none()).and_then(|((d,c),n)| {
+        let hovered=d.item?;
+        let slots=&c.items.get(d.template)?.slots;
+        if slots.is_empty() || n.inventory.allocation.slots.iter().any(|(id,_)|*id==hovered.id) {return None;}
+        slots.iter().find_map(|s|n.inventory.at(Place::Equipment(*s))).filter(|w|w.id!=hovered.id)
+    });
+    let worn_card=worn.zip(catalog).map(|(w,c)|preview::headed_card(&DisplayItem{item:Some(w),template:&w.template,amount:w.third,unlock:0,read_only:true,waiting:false},c,layout,advanced,Some("Equipped")));
     let at=if dragged.is_some(){point.map(|p|(p-Vec2::splat(22.0),1.0))}else{card.as_ref().zip(anchor).map(|(c,a)|tooltips::card::placement(a,Vec2::new(c.width,c.height()),Vec2::new(screen.width,BASE_H),false))};
-    if *last==key && !catalogs.is_changed() && !layouts.is_changed() {if let Some((p,scale))=at {for mut tf in &mut transforms {tf.translation=screen.world(0.0,p.x,p.y).extend(800.0);tf.scale=Vec3::splat(scale);}}return;}
+    // Left of the hovered card, else right of it; level with its top.
+    let worn_at=worn_card.as_ref().zip(card.as_ref()).zip(at).map(|((w,c),(p,scale))| {
+        let left=p.x-(w.width+6.0)*scale;
+        let x=if left>=8.0 {left} else {(p.x+(c.width+6.0)*scale).min(screen.width-w.width*scale-8.0)};
+        (Vec2::new(x,p.y),scale)
+    });
+    if *last==key && !catalogs.is_changed() && !layouts.is_changed() {
+        for (mut tf,second) in &mut transforms {
+            let Some((p,scale))=(if second.is_some() {worn_at} else {at}) else{continue};
+            tf.translation=screen.world(0.0,p.x,p.y).extend(800.0);tf.scale=Vec3::splat(scale);
+        }
+        return;
+    }
     *last=key.clone();for e in &old {commands.entity(e).despawn();}if key.is_none(){return;}
     let (Some(d),Some((p,scale)),Some(catalog))=(display,at,catalog) else{return;};
     let root=commands.spawn((Overlay,Transform::from_translation(screen.world(0.0,p.x,p.y).extend(800.0)).with_scale(Vec3::splat(scale)),Visibility::Inherited)).id();
     if dragged.is_some() {
         sprites(&mut commands,&assets,catalog,d.template,d.item,Vec3::new(0.0,0.0,-0.01),Vec2::splat(44.0),Color::WHITE,root);
     } else if let Some(card)=card {card.draw(&mut commands,&assets,&screen,&mut meshes,&mut materials,root,layout);}
+    if let (Some(w),Some((p,scale)))=(worn_card,worn_at) {
+        let second=commands.spawn((Overlay,WornCard,Transform::from_translation(screen.world(0.0,p.x,p.y).extend(800.0)).with_scale(Vec3::splat(scale)),Visibility::Inherited)).id();
+        w.draw(&mut commands,&assets,&screen,&mut meshes,&mut materials,second,layout);
+    }
 }
+
+/// The worn item's card beside the hovered one (overlay).
+#[derive(Component)]
+pub(in crate::ui) struct WornCard;
 
 #[cfg(test)]
 mod tests {
@@ -1224,7 +1316,7 @@ mod tests {
         // The left column (weapon, cloak, rings, amulet, belt, weapon mod): top left.
         for slot in [5, 7, 8, 9, 10, 11, 12] { assert!(near(slot, Vec2::new(106.4, 204.8)), "slot {slot}"); }
         // No trinkets, mercenary pieces or essences.
-        for slot in [13, 20, 24, 25, 27, 34, 35] { assert_eq!(level_centre(slot, rect), None, "slot {slot}"); }
+        for slot in [13, 20, 24, 25, 27, 34, 35, 36] { assert_eq!(level_centre(slot, rect), None, "slot {slot}"); }
         // The face: the Green template's normal state, at its size, with its font size.
         let id = "Canvas/UpgradeButtonLabel/UpgradeButtonLabel/UpgradeButtonTemplate_Green/normal";
         let mut layout = crate::ui::controls::template::fixture::layout("inventory",

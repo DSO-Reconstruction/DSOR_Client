@@ -648,7 +648,7 @@ impl Plugin for SkillsPlugin {
             .add_systems(Startup, load)
             .add_systems(
                 Update,
-                (index_skills, cast_input.run_if(crate::screens::loading::gameplay_ready), remote_skills, status_visuals, trap_visuals, hold_for_status, test_cast, test_monster_cast, run_pending, carry_casters, fly_bullets, play_sequences, start_fx_animations, fx_particle_speed, retire_effects, shake_camera, test_shot, test_view, debug_fx_positions)
+                (index_skills, cast_input.run_if(crate::screens::loading::gameplay_ready), remote_skills, status_visuals, rank_markers, trap_visuals, hold_for_status, test_cast, test_monster_cast, run_pending, carry_casters, fly_bullets, play_sequences, start_fx_animations, fx_particle_speed, retire_effects, shake_camera, test_shot, test_view, debug_fx_positions)
                     .chain()
                     .after(crate::network::net::NetSystems).after(crate::actors::npc::NpcVisualSystems)
                     .before(crate::actors::character::drive_animations),
@@ -1097,7 +1097,7 @@ fn cast_input(
     time: Res<Time<Real>>,
     mut players: Query<(Entity, &mut Transform, &mut LocalPlayer, &Character)>,
     mut cooldowns: ResMut<SkillCooldowns>,
-    (hovered, monsters, mut debug_monsters, ui, mut ui_skills, settings, stats, resource_max): (
+    (hovered, monsters, mut debug_monsters, ui, mut ui_skills, settings, stats, resource_max, cooldown_bonuses): (
         Res<crate::actors::monsters::Hovered>,
         Query<(&GlobalTransform, &crate::actors::monsters::Monster, &CharacterAnim)>,
         ResMut<crate::actors::monsters::DebugMonsters>,
@@ -1106,6 +1106,7 @@ fn cast_input(
         Res<crate::ui::Settings>,
         Res<crate::gameplay::stats::CharacterStats>,
         Res<crate::gameplay::stats::ResourceMax>,
+        Res<crate::gameplay::stats::CooldownBonuses>,
     ),
     // queued: a target skill aimed at a monster out of reach, (slot, monster),
     // cast once the walk brings it in reach. next_cast: when the last cast lets
@@ -1264,17 +1265,28 @@ fn cast_input(
     player.facing = facing;
     // Turned now: the cast's effects take the caster's placement this frame.
     tf.rotation = Quat::from_rotation_y(facing);
-    let rate = if skill.scale_timing { stats.animation_speed().clamp(0.1, 10.0) } else { 1.0 };
+    let rate = if skill.scale_timing { stats.animation_speed(skill.unblock).clamp(0.1, 10.0) } else { 1.0 };
     // Movement waits for MotionUnblockFrame only: a skill with 0 there (Furious
     // Battle Cry, the auras, the buffs) goes off while the player keeps walking.
     // FAILURE: held until SkillUnblockFrame too and its walk dropped, Battle Cry
     //   stopped the warrior ("je devrais pouvoir le faire en me deplacant sans
     //   que ca me stoppe", 2026-10-21).
     player.casting = skill.motion_unblock as f32 / FPS / rate;
+    // A jump's MotionUnblockFrame counts from its landing (LoopStartFrame +
+    // HitFrame): Enraging Leap's 9 is under its 15-frame flight, so counted
+    // from the cast it freed the warrior before he touched down.
+    // EVIDENCE: the user's recording 20261107-0216-47: the original's leap
+    //   (6:21-6:23) stays crouched on the spot about 0.8 video s after landing
+    //   before walking off, ours (1:26) 0.5.
+    // FAILURE (2026-11-07): "in the original you don't move instantly, here you
+    //   kinda do".
+    // UNVERIFIED: the exact hold (here 9 frames after landing, 0.36 s).
+    let landed = if skill.kind == "Jump" { skill.loop_start as f32 / FPS / rate + shifted_hit(skill, rate) } else { 0.0 };
+    player.casting += landed;
     if skill.motion_unblock > 0 {
         player.target = None;
     }
-    *next_cast = time.elapsed_secs_f64() + (skill.motion_unblock.max(skill.unblock).max(1) as f32 / FPS / rate) as f64;
+    *next_cast = time.elapsed_secs_f64() + (landed + skill.motion_unblock.max(skill.unblock).max(1) as f32 / FPS / rate) as f64;
 
     let tick = net.server_tick(now_ms(&time));
     // A fresh cast id per cast: the release261 server keys each cast's projectile
@@ -1310,7 +1322,9 @@ fn cast_input(
         _ => ClientCommand::Skill(combat::Skill { base, server: None }),
     };
     net.send(&command);
-    cooldowns.0.insert(key, (now, now + skill.cooldown as f64));
+    // With the equipment's cooldown changes (sets: "- 20% cooldown time for
+    // Frozen Sphere"), as the server times it.
+    cooldowns.0.insert(key, (now, now + cooldown_bonuses.seconds(&skill.id, skill.cooldown)));
     if let Some(r) = net.resource.as_mut() {
         *r -= cost;
     }
@@ -2854,6 +2868,76 @@ struct StatusVisual {
 /// _Template_StatusEffect, which the skills' own sequences do not contain --
 /// stuns, burns, ice cubes, auras, a banner left on the ground.
 #[allow(clippy::too_many_arguments)]
+/// A ranked monster's marker under it, as long as it lives: the lit ring the
+/// original draws under guardians, champions, leaders and sentinels.
+#[derive(Component)]
+pub(crate) struct RankMarker(Entity);
+
+/// _Template_MonsterRanks.RankMarker ("statuseffect/status_ranked_monster" for
+/// these ranks, empty for the rest) as its looping sequences
+/// status_ranked_monster_t<tier>_<s|m|l> on fx_root (s and m draw
+/// effects/status_enchantment_global_rank_s, l rank_m).
+/// EVIDENCE: the user's recording 20261105-1550-37: the original's Guardian
+///   (0:42) and Arisen Hero Rhenkis (0:56) stand on a lit ring; ours on none.
+/// UNVERIFIED: which tier a rank takes (all tiers draw the same models) and
+///   the size cut (a navigation footprint over 1.2 m takes l).
+/// How far a rank marker sits over the monster's feet (metres).
+const RANK_MARKER_LIFT: f32 = 0.06;
+
+fn rank_marker_sequence(rank: &str, footprint: Option<f32>) -> Option<String> {
+    let tier = match rank {
+        "Rank_guardian" => 1,
+        "Rank_champion" | "Rank_treasure_mob_champion" => 2,
+        "Rank_leader" | "Rank_treasure_mob_leader" | "Rank_sentinel" | "Rank_treasure_mob" | "Rank_treasure_mob_sentinel" => 3,
+        _ => return None,
+    };
+    let size = match footprint.unwrap_or(0.5) { f if f <= 0.6 => "s", f if f <= 1.2 => "m", _ => "l" };
+    Some(format!("status_ranked_monster_t{tier}_{size}"))
+}
+
+/// Puts each living ranked monster's marker on it, takes it off when it dies.
+/// DSOR_TEST_RANK=<rank>: every monster counts as that rank (offline checks).
+fn rank_markers(
+    mut commands: Commands,
+    net: Option<NonSend<Net>>,
+    data: Res<SkillData>,
+    seqs: Res<Assets<SequenceTable>>,
+    monsters: Query<(Entity, &crate::monsters::Monster, &CharacterAnim, Option<&RankMarker>)>,
+    mut players: Query<&mut SequencePlayer>,
+    test: Local<Option<Option<String>>>,
+) {
+    let mut test = test;
+    let test = test.get_or_insert_with(|| std::env::var("DSOR_TEST_RANK").ok()).clone();
+    let Some(sequences) = seqs.get(&data.sequences) else { return };
+    for (e, m, anim, marker) in &monsters {
+        let alive = m.is_alive(anim);
+        match marker {
+            Some(RankMarker(player)) if !alive => {
+                if let Ok(mut p) = players.get_mut(*player) { p.stop = true; }
+                commands.entity(e).remove::<RankMarker>();
+            }
+            None if alive => {
+                let rank = test.clone().or_else(|| net.as_ref().and_then(|n| n.monster_ranks.get(&m.actor).cloned()));
+                let Some(seq) = rank.and_then(|r| rank_marker_sequence(&r, m.footprint)).and_then(|n| sequences.0.get(&n)) else { continue };
+                // Its glowing dish (static_0_0, additive) is a shallow bowl
+                // whose bright rim lies 0.4-3 cm over the feet: under the
+                // ground's depth on uneven floors, so only the dull decal
+                // showed. Lifted a little, the rim draws as the original's
+                // bright band (the user's recording 20261107-0039-28: the
+                // original's rim 154 grey against ours 90; offline, a ring
+                // raised 1 m showed the dish's rim at 143).
+                let mut seq = seq.clone();
+                for track in &mut seq.tracks {
+                    if let Track::Fx { at, .. } = track { at[1] += RANK_MARKER_LIFT; }
+                }
+                let player = play_with(&mut commands, seq, Some(e), e, true, true);
+                commands.entity(e).insert(RankMarker(player));
+            }
+            _ => {}
+        }
+    }
+}
+
 fn status_visuals(
     mut commands: Commands,
     time: Res<Time>,

@@ -1,7 +1,7 @@
 //! Item sections follow tooltip.bxml's text, gem, separator and currency
 //! templates. Only fields whose wire meaning is known are shown as values.
 use super::*;
-use crate::ui::controls::tooltips::card::{Card, WHITE, MUTED, BLUE, GOLD, GREEN, plain};
+use crate::ui::controls::tooltips::card::{Card, WHITE, MUTED, BLUE, GOLD, plain};
 
 fn number(value: f32, advanced: bool) -> String {
     let s = if advanced || value.abs()<1.0 { format!("{value:.3}") } else { format!("{value:.0}") };
@@ -112,13 +112,18 @@ pub(super) fn sticker(catalog: &Catalog, layout: Option<&Layout>, template: &str
     let description = meta.filter(|m| !m.description.is_empty() && upgrade.is_none())
         .map(|m| if m.description.contains('<') { m.description.clone() } else { format!("<i>{}</>", m.description) });
     let pet = meta.is_some_and(|m| matches!(m.item_category.as_str(), "Pet" | "Mercenary"));
-    let how = if pet { "(Right click to call your Companion over)" } else { "(Right click to mount or equip)" };
+    let emote = meta.is_some_and(|m| !m.effect_lines.is_empty());
+    let how = if pet { "(Right click to call your Companion over)" } else if emote { "(Right click to use the item)" } else { "(Right click to mount or equip)" };
     let used = "<i>Use, is not depleted when used</>";
     // As wide as its longest line, as the original's.
     // FAILURE (2026-10-30): a fixed wide card, its right half empty.
     // Its spaces widened (STICKER_WORD_SPACE); the Effect lines count too.
+    // An emote's: what it turns off, its duration and cooldowns (the original's
+    // Coin Toss card, the user's recording 20261031-1936-10).
     let effect = meta.filter(|m| !m.status.is_empty()).zip(status)
-        .map(|(m, s)| super::super::effects::card_lines(s, &m.status, &m.status_values, bag, class)).unwrap_or_default();
+        .map(|(m, s)| super::super::effects::card_lines(s, &m.status, &m.status_values, bag, class))
+        .or_else(|| meta.filter(|m| !m.effect_lines.is_empty()).map(|m| m.effect_lines.iter().map(|l| (l.clone(), false)).collect()))
+        .unwrap_or_default();
     let longest = |text: &str, size: f32| plain(text).lines()
         .map(|l| crate::network::chat::text_width(l, size) + l.matches(' ').count() as f32 * STICKER_WORD_SPACE * size).fold(0.0, f32::max);
     let size = card.text_size();
@@ -236,6 +241,85 @@ pub(super) fn reward_item(catalog: &Catalog, layout: Option<&Layout>, template: 
 }
 
 /// An item's rarity and the colour its name is written in.
+/// The templates worn now, for the set section's count (noted by the item
+/// overlay from the inventory, rebuilt only when its revision changes).
+static WORN: std::sync::RwLock<(u64, Vec<String>)> = std::sync::RwLock::new((u64::MAX, Vec::new()));
+/// The equipment slot each worn item is in (item id -> slot), for its card's
+/// slot line.
+static WORN_SLOTS: std::sync::RwLock<Vec<(u32, i8)>> = std::sync::RwLock::new(Vec::new());
+
+pub(super) fn note_worn(inventory: &crate::gameplay::inventory::InventoryState) {
+    if WORN.read().is_ok_and(|w| w.0 == inventory.revision) { return; }
+    let worn = inventory.allocation.slots.iter().filter(|(_, s)| !s.is_empty())
+        .filter_map(|(id, _)| inventory.items.get(id).map(|i| i.template.clone())).collect();
+    if let Ok(mut w) = WORN.write() { *w = (inventory.revision, worn); }
+    let slots = inventory.allocation.slots.iter().filter_map(|(id, s)| s.first().map(|slot| (*id, *slot))).collect();
+    if let Ok(mut w) = WORN_SLOTS.write() { *w = slots; }
+}
+
+/// A set piece's section, as the original's card: "<set> (worn/pieces)" in the
+/// Set colour, each piece (white when worn), then "Bonus for pieces of
+/// equipment belonging to the same set:" and "(n): + value text (level
+/// dependent)" at the item's level, lit once that many are worn.
+/// EVIDENCE: the original's Splendid Durian Battle Mace card (the user's
+///   recording 20261105-1550-37 at 3:48): "Splendid Durian Armor (0/7)", 7
+///   pieces, "(2): + 0.043 movement speed (level dependent)" .. "(6): + 199
+///   critical value (level dependent)" at item level 36; the same numbers here
+///   (base x _Template_Progressions factor). gui.window itemsetModifierBonusTitle.
+/// UNVERIFIED: the colours of worn pieces and reached bonuses (the original's
+///   shot had none worn: all grey); special-effect bonuses are not written out.
+fn set_section(card: &mut Card, catalog: &Catalog, set: &crate::ui::controls::items::ItemSet, level: u32) {
+    let worn = WORN.read().map(|w| w.1.clone()).unwrap_or_default();
+    let count = set.parts.iter().filter(|p| worn.contains(p)).count();
+    card.gap(4.0);
+    // The set's name and the bonus heading green, as the original's card
+    // (recording 20261105-1900-00 at 0:09).
+    card.text(&format!("{} ({}/{})", set.name, count, set.parts.len()), SET_HEADING);
+    for part in &set.parts {
+        let name = catalog.items.get(part).map_or_else(|| readable(part), |m| m.name.clone());
+        if worn.contains(part) { card.text(&name, WHITE); } else { card.hint(&name); }
+    }
+    card.text("Bonus for pieces of equipment belonging to the same set:", SET_HEADING);
+    for (n, lines) in &set.tiers {
+        // A textless bonus beside one with its own text is that text's mechanic
+        // (Chillingly Cold (4): the Cold Chill aura and the line describing it):
+        // no "special effect" line then.
+        let described = lines.iter().any(|l| !l.fixed.is_empty() || !l.text.is_empty());
+        for line in lines {
+            if described && line.fixed.is_empty() && line.text.is_empty() { continue; }
+            // A written-out text with line breaks (a list of skills): one card
+            // line each, the first after "(n):".
+            if line.fixed.contains('\n') {
+                for (i, part) in line.fixed.split('\n').enumerate() {
+                    let text = if i == 0 { format!("({n}): {part}") } else { part.to_owned() };
+                    if count >= *n { card.text(&text, BLUE); } else { card.hint(&text); }
+                }
+                continue;
+            }
+            let text = if !line.fixed.is_empty() { format!("({n}): {}", line.fixed) }
+            else if line.text.is_empty() { format!("({n}): special effect") } else {
+                let factor = if line.factor.is_empty() { 1.0 } else {
+                    catalog.set_levels.get(&line.factor).and_then(|l| l.get(level.max(1) as usize - 1).or(l.last())).copied().unwrap_or(1.0)
+                };
+                let v = line.value * factor;
+                let value = if line.relative { format!("{:.0}%", v * 100.0) } else if v.abs() < 1.0 { format!("{v:.3}") } else { format!("{v:.0}") };
+                let tail = if line.factor.is_empty() { "" } else { " (level dependent)" };
+                format!("({n}): + {value} {}{tail}", line.text)
+            };
+            if count >= *n { card.text(&text, BLUE); } else { card.hint(&text); }
+        }
+    }
+}
+
+/// An item card's text and width against the shared card's (headed_card).
+/// The set section's headings (the original's card: green).
+const SET_HEADING: Color = Color::srgb(0.1, 0.85, 0.1);
+const ITEM_CARD_TEXT: f32 = 0.568;
+const ITEM_CARD_WIDTH: f32 = 0.83;
+
+/// A Set item's name colour (cards and ground labels).
+pub(crate) const SET_TINT: Color = Color::srgb(0.098, 0.745, 0.843);
+
 pub(super) fn rarity<'a>(catalog: &'a Catalog, template: &str, item: Option<&ItemInfo>) -> (&'a str, Color) {
     let rarity = item.map(|i| ["Common", "Improved", "Magic", "Extraordinary", "Legendary", "Unique", "Set", "Mythic"].get(i.kind as usize).copied().unwrap_or("Item"))
         .unwrap_or_else(||catalog.items.get(template).map_or("Item",|m|m.rarity.as_str()));
@@ -247,41 +331,120 @@ pub(super) fn rarity<'a>(catalog: &'a Catalog, template: &str, item: Option<&Ite
     //   user's recording 20261031-1414-12): (108, 225, 83).
     // Magic and Rare measured on the original's Blue Dragonspawn arrow cards
     // (recording 20261031-1506-03): (19, 120, 236) and (226, 0, 236).
-    let tint = match rarity { "Unique" => Color::srgb(1.0,0.9,0.0), "Set" => GREEN, "Magic" => Color::srgb(0.07,0.47,0.93),
-        "Uncommon" => Color::srgb(0.42,0.88,0.33),
+    // Set measured on the original's trader card "Splendid Durian Battle Mace"
+    // (the user's recording 20261105-1550-37 at 3:48): (25, 190, 215), turquoise.
+    let tint = match rarity { "Unique" => Color::srgb(1.0,0.9,0.0), "Set" => SET_TINT, "Magic" => Color::srgb(0.07,0.47,0.93),
+        "Uncommon" | "Improved" => Color::srgb(0.42,0.88,0.33),
+        // Mythic: red, measured on the original's "Ancestral Glory Ring" (the
+        // user's shot, 2026-11-07); ours was the default colour.
+        "Mythic" => Color::srgb_u8(180,35,8),
         "Extraordinary" | "Rare" => Color::srgb(0.89,0.0,0.93), "Legendary" | "Epic" => Color::srgb(1.0,0.65,0.15), _ => color(catalog,item) };
     (rarity, tint)
 }
 
+/// An equipment slot's name (gui.window equipmentSlot<Slot>), by slot index
+/// (items::cell).
+fn slot_name(slot: i8) -> Option<&'static str> {
+    Some(match slot {
+        0 => "Head", 1 => "Shoulders", 2 => "Torso", 3 => "Hands", 4 => "Feet", 5 => "Main Hand", 6 => "Off Hand",
+        7 => "Cloak", 8 => "1. Ring Finger", 9 => "2. Ring Finger", 10 => "Neck", 11 => "Hips", 12 => "Weapon Adornment",
+        13..=19 => "Rune Trinket", 20..=22 => "Jewel Trinket", 24 => "Dragon Crest",
+        25 => "Soul Necklace", 26 => "Soul Cloak", 27 => "Soul Belt",
+        _ => return None,
+    })
+}
+
+/// "EquipmentGem" -> "Equipment Gem".
+fn spaced(c: &str) -> String {
+    let mut out = String::new();
+    for (i, ch) in c.chars().enumerate() {
+        if i > 0 && ch.is_uppercase() && !out.ends_with(' ') { out.push(' '); }
+        out.push(ch);
+    }
+    out
+}
+
 pub(super) fn card(d: &DisplayItem, catalog: &Catalog, layout: Option<&Layout>, advanced: bool) -> Card {
+    headed_card(d, catalog, layout, advanced, None)
+}
+
+/// An item's card under a heading (the worn item's "Equipped" beside a hovered
+/// one, gui.window.tooltip currentlyEquippedHeadline).
+pub(super) fn headed_card(d: &DisplayItem, catalog: &Catalog, layout: Option<&Layout>, advanced: bool, heading: Option<&str>) -> Card {
     let meta = catalog.items.get(d.template);
-    let mut card = Card::new(if advanced { 370.0 } else { 285.0 },layout);
+    // The original's item card is in a much smaller hand: its lines 14.7 px apart
+    // where ours were 26, the card 0.83 of ours wide (the user's recording
+    // 20261105-1900-00: the original's trader card at 0:09 beside ours at 0:25,
+    // same screen; two of ours side by side ran off the screen at 5:00).
+    let mut card = Card::new(if advanced { 370.0 } else { 285.0 } * ITEM_CARD_WIDTH, layout);
+    card.compact(ITEM_CARD_TEXT);
+    // The original's hand: its words about a space further apart and its lines
+    // closer ("Selling price:" 0.63 of a bag cell wide, ours 0.56; lines 0.140
+    // of a cell apart, ours 0.150; digits 0.081 high, ours 0.078) (the user's
+    // shots of the original's and our essence cards, 2026-11-07: "a little bit
+    // small").
+    // Same-frame shots (2026-11-07, both windows 2000 px): the original's
+    // "Increases attack power..." 246 px, ours 257; its lines 11.5 px apart,
+    // ours 13; its "Essence of Vigor" 87 px, ours 83; its essence card 272 px
+    // wide round 246 of text, ours 335 ("the writing is still small").
+    card.set_word_space(0.3);
+    card.set_leading(1.12);
+    // The name 1.2 times that: the original's "Essence" 55 px high zoomed
+    // where ours was 45 (the user, 2026-11-07: "the color of the essence
+    // writing" is still small).
+    card.scale_title(1.09);
     card.background = Color::srgba(0.01, 0.01, 0.005, 0.985);
+    let essence = meta.is_some_and(|m| !m.card_lines.is_empty());
+    let name = catalog.name(d.template, d.item);
+    let title = if meta.is_some_and(|m| m.max_stack > 1) && d.amount > 1 { format!("{}x {}", d.amount, name.trim()) } else { name.trim().to_owned() };
+    // An essence's card as wide as its longest line, as the original's.
+    if essence {
+        let width = |text: &str, size: f32| plain(text).lines()
+            .map(|l| crate::network::chat::text_width(l, size) + l.matches(' ').count() as f32 * 0.3 * size).fold(0.0, f32::max);
+        let widest = meta.map_or(0.0, |m| m.card_lines.iter().map(|l| width(l, card.text_size())).fold(0.0, f32::max))
+            .max(width(&title, card.title_size()));
+        card.width = (widest.ceil() + 34.0).clamp(150.0, card.width);
+    }
+    if let Some(heading) = heading { card.banner(heading); }
     let (rarity, tint) = rarity(catalog, d.template, d.item);
-    // The heading as Dofus draws it: icon, name, "Level n \u{2022} type"
-    // (the item's level, else the level it requires; the rarity in the name's colour).
-    let (icon, background, frame) = catalog.icon_parts(d.template, d.item);
-    let icons: Vec<String> = [background, icon, frame].into_iter().flatten().map(str::to_owned).collect();
-    let level = d.item.map(|i| i.durability).filter(|l| *l > 0).or_else(|| meta.map(|m| m.required_level.max(d.unlock)));
-    // "EquipmentGem" -> "Equipment Gem".
-    let kind = meta.map(|m| m.category.as_str()).filter(|c| !c.is_empty()).map(|c| {
-        let mut out = String::new();
-        for (i, ch) in c.chars().enumerate() {
-            if i > 0 && ch.is_uppercase() && !out.ends_with(' ') { out.push(' '); }
-            out.push(ch);
-        }
-        out
-    });
-    let subtitle = match (level, kind) {
-        (Some(l), Some(k)) => format!("Level {l} \u{2022} {k}"),
-        (Some(l), None) => format!("Level {l}"),
-        (None, Some(k)) => k,
-        (None, None) => String::new(),
-    };
-    card.header(catalog.name(d.template,d.item), tint, &icons, &subtitle);
+    // The original's head: no icon; the name centred in its rarity's colour, a
+    // stack's count before it ("39047x Essence of Vigor"); equipment then its
+    // rarity ("Set Item", "Improved Item") and "Item level: n". No
+    // "Quantity: n / max" line.
+    // EVIDENCE: the user's original shots (2026-11-07): the Essence of Vigor
+    //   cards and the trader's Splendid Durian Gloves beside the Equipped
+    //   Steel Gauntlets.
+    // FAILURE (to 2026-11-07): an icon, "Level 55 • Ammunition" and
+    //   "Quantity: 996 / 50000" ("do you see this in the original???").
+    // UNVERIFIED: the original's italic slot line ("(Hands,Gloves)") is not
+    //   written (no such names in the catalog yet).
+    card.heading(&title, tint);
+    if !essence && meta.is_some_and(|m| !m.slots.is_empty() && m.max_stack == 1) {
+        card.text(&format!("{rarity} Item"), tint);
+        // "(Hands,Gloves)": the slot it goes in, then its type, in italics.
+        // EVIDENCE: the user's original shot (2026-11-07): "(Hands,Gloves)"
+        //   on both glove cards; the slot names are gui.window
+        //   equipmentSlot<Slot> (Head, Shoulders, Torso, Hands, Feet...).
+        // An item fitting two slots (rings) writes only one: the one it is
+        // worn in, else the first.
+        // EVIDENCE: the user's original shots (2026-11-07): the worn Bronze
+        //   Ring "(1. Ring Finger,Ring)", Silver Ring "(2. Ring Finger,Ring)".
+        // FAILURE (2026-11-07): ours "(1. Ring Finger,2. Ring Finger,Ring)".
+        // UNVERIFIED: a ring in the bag (taken as the first slot here).
+        let worn = d.item.and_then(|i| WORN_SLOTS.read().ok().and_then(|w| w.iter().find(|(id, _)| *id == i.id).map(|(_, s)| *s)));
+        let slots: Vec<&str> = meta.map_or(Vec::new(), |m| {
+            let slot = worn.filter(|s| m.slots.contains(s)).or(m.slots.first().copied());
+            slot.and_then(slot_name).into_iter().collect()
+        });
+        let kind = meta.map(|m| spaced(&m.category)).filter(|k| !k.is_empty());
+        let mut parts: Vec<String> = Vec::new();
+        for s in slots { if !parts.iter().any(|p| p == s) { parts.push(s.to_owned()); } }
+        if let Some(k) = kind { parts.push(k); }
+        if !parts.is_empty() { card.text(&format!("<i>({})</>", parts.join(",")), WHITE); }
+        if let Some(l) = d.item.map(|i| i.durability).filter(|l| *l > 0) { card.text(&format!("Item level: {l}"), WHITE); }
+    }
     if let Some(m) = meta {
         if m.required_level.max(d.unlock)>1 { card.hint(&format!("Required level: {}",m.required_level.max(d.unlock))); }
-        if m.max_stack>1 { card.text(&format!("Quantity: {} / {}",d.amount,m.max_stack),WHITE); }
     }
 
     if let Some(item) = d.item {
@@ -367,10 +530,16 @@ pub(super) fn card(d: &DisplayItem, catalog: &Catalog, layout: Option<&Layout>, 
                 for effect in &m.unique_effects {card.text(effect,GOLD);}
             }
         }
-        if meta.is_some_and(|m|!m.description.is_empty()) {
+        // An essence's description is a "Localize:" placeholder: its slot line
+        // and modifiers instead (card_lines), as the original's.
+        // An essence's lines follow its name directly, as the original's.
+        if let Some(lines)=meta.filter(|m|!m.card_lines.is_empty()).map(|m|&m.card_lines) {
+            for (i,line) in lines.iter().enumerate() {if i==0 {card.text(&format!("<i>{line}</>"),WHITE);} else {card.text(line,BLUE);}}
+        } else if meta.is_some_and(|m|!m.description.is_empty() && !m.description.starts_with("Localize:")) {
             card.section(if matches!(rarity,"Unique"|"Set") {"Item Effects"} else {"Description"});
             card.text(&meta.unwrap().description,if matches!(rarity,"Unique"|"Set") {GOLD} else {WHITE});
         }
+        if let Some(set)=meta.and_then(|m|catalog.sets.get(&m.set)) { set_section(&mut card,catalog,set,item.durability); }
         if meta.is_some_and(|m|!m.slots.is_empty() && m.max_stack==1) {
             card.section("Customization");
             if item.named.is_empty() || item.named == "none" {card.hint("Not yet dyed");}
@@ -380,13 +549,17 @@ pub(super) fn card(d: &DisplayItem, catalog: &Catalog, layout: Option<&Layout>, 
         card.gap(4.0); card.rule();
         // release261: field_34 is per-instance glyph yield; field_30 is
         // the complete stack's selling value (server item_economy_values.py).
-        if item.fifty_second>0 {card.melting(item.fifty_second);}
+        // The original's essence card has no melting value.
+        if item.fifty_second>0 && !essence {card.melting(item.fifty_second);}
         card.price(item.level);
-    } else if let Some(m)=meta.filter(|m|!m.description.is_empty()) {card.rule();card.text(&m.description,WHITE);}
+    } else if let Some(m)=meta.filter(|m|!m.card_lines.is_empty()) {
+        card.rule();
+        for (i,line) in m.card_lines.iter().enumerate() {if i==0 {card.text(&format!("<i>{line}</>"),WHITE);} else {card.text(line,BLUE);}}
+    } else if let Some(m)=meta.filter(|m|!m.description.is_empty() && !m.description.starts_with("Localize:")) {card.rule();card.text(&m.description,WHITE);}
     if d.waiting {card.hint("Free up a slot to collect this item automatically.");}
     if d.amount==0 {card.hint("Not yet collected");}
-    if d.item.is_some() && d.amount>1 && !d.read_only {card.hint("Ctrl + click: split stack");}
-    if !advanced && d.item.is_some() {card.gap(3.0);card.rule();card.hint("Hold Y for advanced view.");}
+    if d.item.is_some() && d.amount>1 && !d.read_only && !essence {card.hint("Ctrl + click: split stack");}
+    if !advanced && d.item.is_some() && !essence {card.gap(3.0);card.rule();card.hint("Hold Y for advanced view.");}
     card
 }
 
@@ -416,5 +589,13 @@ mod tests {
                 assert!(text.contains(bonus),"{template}: {text}");
             }
         }
+    }
+
+    #[test]
+    fn equipment_cards_write_their_slot_and_type() {
+        let catalog:Catalog=serde_json::from_str(include_str!("../../../../tests/fixtures/item_tooltips.json")).unwrap();
+        let item=ItemInfo {template:"all_mythic_ring_death".into(),third:1,kind:7,durability:100,eighteenth:8477,..default()};
+        let text=preview_card(&catalog,None,&item.template,Some(&item),1,false).text_content();
+        assert!(text.contains("(1. Ring Finger,Ring)"),"{text}");
     }
 }

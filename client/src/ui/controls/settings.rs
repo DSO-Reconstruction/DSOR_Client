@@ -56,7 +56,7 @@ pub(crate) struct Preferences {
 /// (the one beside it); the map overlay moves to N.
 /// FAILURE: "pour ouvrir la map c tab sauf que tab c'est pour switch le sort
 ///   du bas entre mon clic droit et celui de la case a cote".
-const KEYMAP: u8 = 3;
+const KEYMAP: u8 = 5;
 
 /// The game bar's buttons a setting hides: each its own page group (shown on
 /// page 0), named as the button (crate::ui::controls::section).
@@ -81,10 +81,15 @@ pub(super) fn shortcuts() -> Vec<(String, String, &'static str)> {
         (2, "Action slot 1", "Digit1"), (3, "Action slot 2", "Digit2"),
         (4, "Action slot 3", "Digit3"), (5, "Action slot 4", "Digit4"),
         (6, "Action slot 5", "Digit5"), (7, "Alternate attack", "Digit6"),
-        (8, "Mount", "KeyO"), (9, "Companion", "KeyH"),
-        (13, "Consumable: left top", "KeyU"),
-        (14, "Consumable: left bottom", "KeyG"), (15, "Consumable: right top", "KeyR"),
-        (16, "Consumable: right bottom", "KeyT"),
+        // The original's keys on its bar (the user's shot, 2026-11-01): the
+        // consumables R and H on the left, U and D on the right; the companion
+        // leaves H for K (the user: "for companion ... is K").
+        (8, "Mount", "KeyO"), (9, "Companion", "KeyK"),
+        (13, "Consumable: left top", "KeyR"),
+        (14, "Consumable: left bottom", "KeyH"), (15, "Consumable: right top", "KeyU"),
+        // T opens the shop, as in the original (the user, 2026-11-01); this
+        // consumable has no key until the player gives it one.
+        (16, "Consumable: right bottom", "KeyD"),
     ] { result.push((format!("slot{slot}"), label.into(), key)); }
     for (id, label, key) in [
         ("inventory", "Inventory", "KeyI"), ("charactersheet", "Character", "KeyC"),
@@ -93,7 +98,7 @@ pub(super) fn shortcuts() -> Vec<(String, String, &'static str)> {
         ("swap_attack", "Swap secondary and alternate attack", "Tab"),
         ("travelmap", "World map", "KeyM"), ("socialscreen", "Social", "KeyF"),
         ("eventwindow", "Events", "KeyE"), ("leaderboards", "Rankings", "KeyL"),
-        ("matchmakingwindow", "Battlegrounds", "KeyJ"),
+        ("matchmakingwindow", "Battlegrounds", "KeyJ"), ("shopwindow", "Shop", "KeyT"),
         ("chat", "Expand / collapse chat", "KeyV"), ("essence", "Switch essences", "KeyX"),
         ("previous_bar", "Previous action bar", "BracketLeft"), ("next_bar", "Next action bar", "BracketRight"),
     ] { result.push((id.into(), label.into(), key)); }
@@ -194,6 +199,21 @@ impl Preferences {
             if !self.bindings.contains_key("swap_attack") {
                 let key = if taken(self, "Tab") { "" } else { "Tab" };
                 self.bindings.insert("swap_attack".into(), key.into());
+            }
+        }
+        if self.keymap < 4 {
+            // T moves from the bottom-right consumable to the shop.
+            if was(self, "slot16", "KeyT") { self.bindings.insert("slot16".into(), String::new()); }
+            if !self.bindings.contains_key("shopwindow") {
+                let key = if self.bindings.values().any(|k| k == "KeyT") { "" } else { "KeyT" };
+                self.bindings.insert("shopwindow".into(), key.into());
+            }
+        }
+        if self.keymap < 5 {
+            // The original's consumable keys, where the player kept ours.
+            let ours = [("slot9", "KeyH", "KeyK"), ("slot13", "KeyU", "KeyR"), ("slot14", "KeyG", "KeyH"), ("slot15", "KeyR", "KeyU"), ("slot16", "", "KeyD")];
+            if ours.iter().all(|(id, old, _)| was(self, id, old)) {
+                for (id, _, new) in ours { self.bindings.insert(id.into(), new.into()); }
             }
         }
         self.keymap = KEYMAP;
@@ -757,7 +777,7 @@ mod tests {
     fn saved_default_bindings_move_quests_to_q_once() {
         let parse = |raw: &str| { let mut p: Preferences = serde_json::from_str(raw).unwrap(); p.migrate(); p };
         let old = parse(r#"{"bindings":{"questlog":"KeyU","slot13":"KeyQ","inventory":"KeyI"}}"#);
-        assert_eq!((old.label("questlog"), old.label("slot13"), old.label("inventory"), old.keymap), ("Q".into(), "U".into(), "I".into(), KEYMAP));
+        assert_eq!((old.label("questlog"), old.label("slot13"), old.label("inventory"), old.keymap), ("Q".into(), "R".into(), "I".into(), KEYMAP), "U, then the original's R (keymap 5)");
         let chosen = parse(r#"{"bindings":{"questlog":"KeyJ","slot13":"KeyQ"}}"#);
         assert_eq!((chosen.label("questlog"), chosen.label("slot13")), ("J".into(), "Q".into()), "a player's own key stays");
         // Saved after the move, the old keys are the player's choice.
@@ -782,7 +802,7 @@ mod tests {
         // Saved at revision 1: the consumable on E moves to G; the windows take E, L and J.
         let old = parse(r#"{"keymap":1,"bindings":{"slot14":"KeyE","questlog":"KeyQ"}}"#);
         assert_eq!((old.label("slot14"), old.label("eventwindow"), old.label("leaderboards"), old.label("matchmakingwindow")),
-            ("G".into(), "E".into(), "L".into(), "J".into()));
+            ("H".into(), "E".into(), "L".into(), "J".into()), "G, then the original's H (keymap 5)");
         // A key the player gave to another action stays theirs.
         let mine = parse(r#"{"keymap":1,"bindings":{"slot14":"KeyR","questlog":"KeyL","slot15":"KeyG"}}"#);
         assert_eq!((mine.label("slot14"), mine.label("questlog"), mine.label("leaderboards"), mine.label("eventwindow")),
@@ -791,7 +811,7 @@ mod tests {
         assert!(old.pressed("eventwindow", &keys) && old.slot_pressed(&keys).is_none(), "E opens the events only");
         let defaults = Preferences::default();
         assert_eq!((defaults.label("eventwindow"), defaults.label("leaderboards"), defaults.label("matchmakingwindow"), defaults.label("slot14")),
-            ("E".into(), "L".into(), "J".into(), "G".into()));
+            ("E".into(), "L".into(), "J".into(), "H".into()));
         // The game bar's two comeback buttons: shown by default, rows of the
         // General tab's first page, edited in the draft until Apply.
         assert!(defaults.return_link && defaults.return_checkin);
