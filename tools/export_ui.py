@@ -208,12 +208,31 @@ def travel_details(loca):
     import sqlite3
     out = {}
     en = loca.get("en", {})
-    wilderness = en.get("gui.window_MapTypePvE") or "Wilderness"
+    wilderness = en.get("gui.window.general_MapTypePvE") or "Wilderness"
+    dungeon = en.get("gui.window.general_MapTypeDungeon") or "Dungeon"
+    # The card's kind by the map's AreaType (_Template_MapTemplate), as the
+    # original writes it: "Urban Area", "Wilderness", "Dungeon", "Boss Dungeon"
+    # (no loca key for the last). EVIDENCE: the user's original clip
+    # 20261107-1534-28 (Temple Sector Dungeon, Desecrated Sanctum Boss Dungeon,
+    # Mystra Wilderness, Hiraja Urban Area).
+    kinds = {"Hub": "Urban Area", "OpenPVE": wilderness, "ClosedPVE": dungeon, "Boss": f"Boss {dungeon}"}
     try:
         db = sqlite3.connect(f"file:{database}?mode=ro", uri=True)
-        for (map_id,) in db.execute("SELECT Id FROM _Template_TravelMap"):
+        areas = {m: (a, lvl) for m, a, lvl in db.execute("SELECT MapTemplate, AreaType, MapLevel FROM _Template_MapTemplate")}
+        for map_id, index, point in db.execute("SELECT Id, MapLookupIndex, HasTravelPoint FROM _Template_TravelMap"):
             desc = en.get(f"db.travelmap_{map_id}Desc", "")
-            out[f"travel_desc:{map_id}"] = wilderness if not desc.strip() or desc.startswith("Localize:") else desc
+            area, level = areas.get(map_id, (None, None))
+            out[f"travel_desc:{map_id}"] = kinds.get(area) or (wilderness if not desc.strip() or desc.startswith("Localize:") else desc)
+            # NewPlayer +0x130's unlock bit (index - 1), the map's level, and
+            # whether it can be travelled to at all ("No destination").
+            out[f"travel_index:{map_id}"] = str(int(index or 0))
+            if level: out[f"travel_level:{map_id}"] = str(int(level))
+            out[f"travel_point:{map_id}"] = "1" if point else "0"
+        # A gold price times the player's level's multiplier
+        # (_Template_DynamicLevelCosts VirtualCurrencyCostMultiplier: 117.5 at 37,
+        # the original's 1400 -> 16 Gold 45 Silver).
+        for level, mult in db.execute("SELECT Level, VirtualCurrencyCostMultiplier FROM _Template_DynamicLevelCosts"):
+            out[f"vc_mult:{int(level)}"] = repr(float(mult))
         for map_id, rc, vc in db.execute("SELECT Id, PriceRC, PriceVC FROM _Template_TravelCosts"):
             out[f"travel_vc:{map_id}"] = str(int(vc or 0))
             out[f"travel_rc:{map_id}"] = str(int(rc or 0))

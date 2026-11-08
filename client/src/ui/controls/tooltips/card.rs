@@ -352,8 +352,12 @@ fn rich(raw: &str, base: Color) -> Vec<(char, Color, bool)> {
             if tag.starts_with('/') { if stack.len() > 1 { stack.pop(); } }
             else {
                 let (color, italic) = *stack.last().unwrap();
+                // "#rrggbb": a colour of our own (the travel map card's level and
+                // its red "not yet unlocked", local_map::MapNames::travel_tooltip).
+                let hex = tag.strip_prefix('#').filter(|h| h.len() == 6).and_then(|h| u32::from_str_radix(h, 16).ok())
+                    .map(|v| Color::srgb_u8((v >> 16) as u8, (v >> 8) as u8, v as u8));
                 stack.push((match tag.as_str() { "WhiteStart" => WHITE, "GemBlueStart" | "MagicStart" => BLUE,
-                    "UniqueStart" | "SkillHighlightStart" => GOLD, "GreenStart" => GREEN, _ => color }, italic || tag == "i"));
+                    "UniqueStart" | "SkillHighlightStart" => GOLD, "GreenStart" => GREEN, _ => hex.unwrap_or(color) }, italic || tag == "i"));
             }
         } else if c == '{' {
             for next in chars.by_ref() { if next == '}' { break; } }

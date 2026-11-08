@@ -43,6 +43,31 @@ fn gold(copper: u64) -> String {
     format!("{} Gold {} Silver {} Copper", copper / 10_000, copper / 100 % 100, copper % 100)
 }
 
+/// The travel map's locked destinations, greyed as the original's (their
+/// layout's "disabled" art: desaturated, the travel stone grey) and not
+/// clickable: those whose bit NewPlayer's travel map access bits lack
+/// (local_map::MapNames::travel_unlocked). Redone when the bits, the names
+/// or the window change.
+/// EVIDENCE: the user's original clip 20261107-1534-28 (Atlantis: the main
+///   island grey, Helios and the hub in colour).
+/// FAILURE (to 2026-11-07): every area in colour; Hagastove Grotto offered a
+///   journey the server then refused ("rejected locked map travel").
+pub(in crate::ui) fn locks(
+    net: Option<NonSend<crate::network::net::Net>>,
+    mut windows: Windows,
+    (loaded, names): (Res<crate::ui::Loaded>, Res<Assets<crate::ui::local_map::MapNames>>),
+    mut done: Local<Option<(Vec<u32>, bool, Entity)>>,
+) {
+    let Some(net) = net else { return };
+    let names = names.get(&loaded.map_names);
+    let Some((root, _, mut c, _, _)) = windows.iter_mut().find(|(_, n, ..)| n.0 == "travelmap") else { return };
+    let key = (net.travel_unlocks.clone(), names.is_some(), root);
+    if done.as_ref() == Some(&key) { return; }
+    let Some(names) = names else { return };
+    c.lock_travel(|map| names.travel_unlocked(map, &net.travel_unlocks));
+    *done = Some(key);
+}
+
 #[derive(Component)] pub struct TravelText;
 
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
@@ -62,7 +87,7 @@ pub(in crate::ui) fn dialog(
     if let Some(map) = pointer.travel.take() {
         let source = net.travel_source.take().unwrap_or_default();
         // Only a stone's journey is paid (DSOR_Server map_transition.py).
-        let price = if source.is_empty() { 0 } else { names.map_or(0, |n| n.travel_price(&map)) };
+        let price = if source.is_empty() { 0 } else { names.map_or(0, |n| n.travel_price(&map, net.level.unwrap_or(1))) };
         *asked = Some((map, source, price));
     }
     if let Some(yes) = pointer.travel_answer.take() {

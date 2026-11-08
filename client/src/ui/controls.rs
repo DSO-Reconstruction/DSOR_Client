@@ -506,6 +506,9 @@ pub(super) struct WindowControls {
     chat_channels: [bool; 5],
     /// logout::WINDOW waiting for its countdown.
     waiting: bool,
+    /// The travel map's destinations the character may not travel to yet:
+    /// drawn in their greyed "disabled" art and not clickable (travel::locks).
+    locked_travel: std::collections::HashSet<String>,
 }
 
 impl WindowControls {
@@ -527,7 +530,7 @@ impl WindowControls {
                     .filter_map(|s| s.state.as_deref().and_then(State::parse)).fold(0, |bits, state| bits | state.bit()),
             }).collect();
         let mut controls = Self { map_mode: local_map::MapMode::Compact, buttons, regions: Vec::new(), drag_handle: DragHandle::from_layout(layout), inventory: 0, character: 0, bag: 0, bag_pages: 8, premium_bag: false, overflow_page: 0, overflow_pages: 1, ingredient: 0, rarity: 1, locked: false, hovered: None, pressed: None,
-            pages: HashMap::new(), toggles: default(), open_windows: Vec::new(), entries: HashMap::new(), spells: default(), chat_compact: false, chat_channels: [false; 5], waiting: false };
+            pages: HashMap::new(), toggles: default(), open_windows: Vec::new(), entries: HashMap::new(), spells: default(), chat_compact: false, chat_channels: [false; 5], waiting: false, locked_travel: default() };
         // The chat's entry starts empty, not with its "Enter text" sample.
         // Start unobtrusively at login; screenshots can opt into expanded mode.
         if layout.window == CHAT_WINDOW {
@@ -575,6 +578,16 @@ impl WindowControls {
         self.chat_compact = old.chat_compact;
         self.chat_channels = old.chat_channels;
         self.open_windows = old.open_windows;
+        self.locked_travel = old.locked_travel;
+    }
+
+    /// The travel map's locked destinations: those `unlocked` refuses
+    /// (travel::locks); unchanged when the same.
+    pub(super) fn lock_travel(&mut self, unlocked: impl Fn(&str) -> bool) {
+        let locked: std::collections::HashSet<String> = self.buttons.iter()
+            .filter_map(|b| if let Action::Travel(map) = &b.action { Some(map) } else { None })
+            .filter(|map| !unlocked(map)).cloned().collect();
+        if self.locked_travel != locked { self.locked_travel = locked; }
     }
 
     pub(super) fn gate(&self, window: &str, widget: &Widget) -> Gate {
@@ -630,6 +643,7 @@ impl WindowControls {
             Action::Tab("chat_channel", channel) | Action::ChatChannel(channel) => self.chat_channels.get(channel as usize).copied().unwrap_or(false),
             Action::Spell => button.spell.as_ref().is_some_and(|s| self.spells.available(s)),
             Action::Bag(items::EXTRA) => self.premium_bag,
+            Action::Travel(ref map) => !self.locked_travel.contains(map),
             Action::Bag(items::OVERFLOW) => true,
             Action::Bag(page) => page < self.bag_pages,
             Action::Page(-1) => self.bag == items::OVERFLOW && self.overflow_page > 0,
