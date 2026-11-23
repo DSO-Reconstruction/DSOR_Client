@@ -327,6 +327,9 @@ for r in db.execute("select rowid, * from _Template_Skill order by rowid"):
         # that same name: still drawn on the point, never flown (the server lands
         # every Shifted skill at LoopStartFrame + HitFrame).
         "shifted": (r["SkillBulletId"] or "") if r["SkillType"] == "Shifted" else "",
+        # The raw SkillBulletId: release261_221 sends it in every bullet skill
+        # command (72/73/75), both directions.
+        "bullet_id": r["SkillBulletId"] or "",
         # What the skill leaves on its victims and on the ground: (status id, D:).
         # The server places them (StatusEffect 82 / NewLocationEffect 64); kept for
         # offline play (client/src/actors/monsters.rs).

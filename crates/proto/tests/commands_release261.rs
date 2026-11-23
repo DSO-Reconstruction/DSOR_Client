@@ -129,7 +129,7 @@ fn the_fields_the_client_reads_land_where_the_server_put_them() {
     assert_eq!((h.attacker, h.combat_value_owner, h.combat_text.as_str(), actor), (921102, 986895, "DamageDonePoison", Some(589825)));
 
     let (ServerCommand::ActorStatsUpdate(s), _) = first("ActorStatsUpdateCommand") else { panic!() };
-    assert_eq!((s.health, s.resource), (4582421316, 77.5));
+    assert_eq!((s.health, s.resource, s.tertiary), (4582421316, 77.5, 12.25));
 
     let (ServerCommand::CurrencyChanged(c), _) = first("CurrencyChangedCommand") else { panic!() };
     assert_eq!((c.wallet, c.unknown_u64_5, c.notify), ([273, 4294967842, 819, 1092, 1365], 8589936230, true));
@@ -142,6 +142,8 @@ fn the_fields_the_client_reads_land_where_the_server_put_them() {
     assert_eq!((p.position, p.heading, p.equipment.len(), actor), ([15.5, 16.25, 17.125], 1.5, 2, Some(983297)));
     assert_eq!(p.equipment[0].skin_parts, ["skinA", "skinB"]);
     assert_eq!((p.armament, p.team, p.honor, p.title_type), (4, 2, 0x12345, 1));
+    // release261_221: level, fighting power, level, 0 ahead of the player kind.
+    assert_eq!((p.max_health, p.fighting_power, p.unknown_u32_248, p.unknown_u32_250), (0x2A, 0xABCD, 0x2A, 0));
     assert_eq!((p.tertiary.as_str(), p.pvp_title.as_str(), p.emblem.as_str()), ("ach_title_1", "pvptitle03", "emblem_x"));
     let (ServerCommand::RemotePlayerInfo(p), _) = first("RemotePlayerInfoCommand") else { panic!() };
     assert_eq!((p.team, p.title_type, p.unknown_text_e4.as_str(), p.emblem.as_str()), (2, 1, "ach_title_1", "emblem_x"));
@@ -153,11 +155,23 @@ fn the_fields_the_client_reads_land_where_the_server_put_them() {
     assert_eq!(t.server.map(|s| s.impact_tick), Some(0x0C0C0001));
     let (ServerCommand::TargetBulletSkill(t), _) = first("TargetBulletSkillCommand") else { panic!() };
     assert_eq!((t.base.marker, t.orbit, t.target, t.more_targets.as_slice()), (Some(false), 0x5D, 0x000C0077, &[0x000C0078, 0x000C0079][..]));
+    // release261_221: SkillBulletId after the orbit byte, in all three bullet skills.
+    assert_eq!(t.bullet, "dwarf_turret_bullet");
+    let (ServerCommand::BulletSkill(b), _) = first("BulletSkillCommand") else { panic!() };
+    assert_eq!((b.orbit, b.bullet.as_str()), (0x2D, "mage_icemissile_bullet_new"));
+    let (ServerCommand::TargetPointBulletSkill(b), _) = first("TargetPointBulletSkillCommand") else { panic!() };
+    assert_eq!((b.orbit, b.bullet.as_str(), b.points.len()), (0x3D, "ranger_arrow_bullet", 2));
     let (ServerCommand::Hit(h), _) = first("HitCommand") else { panic!() };
-    assert!(!h.tag_boundary);
+    assert!(!h.rift);
+
+    let (ServerCommand::NewPlayer(p), _) = first("NewPlayerCommand") else { panic!() };
+    assert_eq!((p.level, p.unknown_u32_fc, p.rank, p.name.as_str()), (0xF8F8F8F8, 0xFCFCFCFC, 0xFCu8 as i8, "HeroName"));
+    let (ServerCommand::InventoryInfo(i), _) = first("InventoryInfoCommand") else { panic!() };
+    assert_eq!((i.health, i.resource, i.tertiary, i.flag), (1234.5, 67.25, 8.5, true));
 
     let (ServerCommand::CharacterSelection(sel), _) = first("CharacterSelectionCommand") else { panic!() };
     assert_eq!(sel.characters.len(), 2);
+    assert_eq!((sel.unknown_u32_3, sel.unknown_u32_4, sel.unknown_text_0.as_str()), (0xD0D0, 0xE0E0, "DE"));
     assert_eq!((sel.characters[0].name.as_str(), sel.characters[0].unknown_u32_1, sel.characters[0].level), ("Alpha", 4886718345, 21));
 }
 

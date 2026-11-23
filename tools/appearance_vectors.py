@@ -43,9 +43,9 @@ def inventory(items, slots):
         InventoryInfo(items=items, equipment_slots=slots, storage_size=224), 1),))
 
 
-chest = ItemInfo(101, template_id='mage_base_torso_armor_block_critical', field_20=0xFFFF3030)
+chest = ItemInfo(101, template_id='mage_base_torso_armor_block_critical', dye_argb=0xFFFF3030)
 initial = inventory([chest], {101: (2,)})
-changed = encode_item_info_response(replace(chest, field_f8='mage_basic_torso_06', field_20=0xFF3050FF), actor_id=1)
+changed = encode_item_info_response(replace(chest, equipment_skin='mage_basic_torso_06', dye_argb=0xFF3050FF), actor_id=1)
 remote = RemotePlayer(actor_id=0x103C1, name='Appearance preview', guild_name='', class_id=1, gender=1,
     hair_style=0, beard_style=0, body_style=0, body_stature=0, template_row=0,
     position=(24.2, 0.0, 22.0), heading=0.0, character_id=2, account_id=2, level=10,

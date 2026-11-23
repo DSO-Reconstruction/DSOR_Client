@@ -203,7 +203,7 @@ impl Body for ItemInfo {
 // ── 87 InventoryInfo ────────────────────────────────────────────────────────
 
 /// InventoryInfoCommand (release261: 84): the whole inventory.
-/// Twelve collections, then six u32, two f32 and one bit.
+/// Twelve collections, then six u32, three f32 (release261_219+) and one bit.
 /// SOURCE (release261): dso-server-production protocol/inventory_codec.py:437-524
 ///   (three collections after `removed`: a u32 map, a u32 array, a string array).
 /// EVIDENCE: reader 0x9A7AA3 / writer 0x9ABBCB (dsor/inventory.py encode);
@@ -237,6 +237,10 @@ pub struct InventoryInfo {
     pub storage_sizes: [u32; 6],
     pub health: f32,
     pub resource: f32,
+    /// release261_219+: the tertiary resource (+0x1e0), ahead of the final bit.
+    /// SOURCE: dso-server-production protocol/inventory_codec.py
+    ///   write_inventory_info_body (b2f44c2).
+    pub tertiary: f32,
     pub flag: bool,
 }
 
@@ -268,6 +272,7 @@ impl Body for InventoryInfo {
         }
         got.health = r.f32()?;
         got.resource = r.f32()?;
+        got.tertiary = r.f32()?;
         got.flag = r.bit()?;
         Ok(got)
     }
@@ -303,6 +308,7 @@ impl Body for InventoryInfo {
         }
         w.f32(self.health);
         w.f32(self.resource);
+        w.f32(self.tertiary);
         w.bit(self.flag);
     }
 }

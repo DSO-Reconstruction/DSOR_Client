@@ -149,15 +149,15 @@ def main(argv: list[str]) -> int:
         field_00=0x00011111, actor_id=0x00022222, field_08=0x33,
         field_0c=True, field_0d=False)
     entry_plain = gp.StatusEffectEntry(
-        effect_id=0x0123, field_04=0x04040404, field_0c=0x0C0C0C0C,
-        field_14=0x14141414, field_08=0x08080808, field_18=0x18181818,
-        field_10=0x10101010, field_1c=0x1C1C1C1C, field_20=0x20202020,
-        field_25=True, field_26=False, field_39=True, has_details=False)
+        effect_id=0x0123, instance_id=0x04040404, end_tick=0x0C0C0C0C,
+        tick_interval=0x14141414, start_tick=0x08080808, stack_index=0x18181818,
+        total_duration=0x10101010, source_level=0x1C1C1C1C, source_actor_id=0x20202020,
+        update_timing=True, stacked=False, permanent=True, has_details=False)
     entry_aura = gp.StatusEffectEntry(
-        effect_id=0x0456, field_04=0x00000044, field_0c=0x000000CC,
-        field_14=0x00000014, field_08=0x00000088, field_18=3,
-        field_10=0x00000010, field_1c=0x0000001C, field_20=0x00000020,
-        field_25=False, field_26=True, field_39=False, has_details=True,
+        effect_id=0x0456, instance_id=0x00000044, end_tick=0x000000CC,
+        tick_interval=0x00000014, start_tick=0x00000088, stack_index=3,
+        total_duration=0x00000010, source_level=0x0000001C, source_actor_id=0x00000020,
+        update_timing=False, stacked=True, permanent=False, has_details=True,
         values=(1.5, -2.25, 100.125), field_38=False, field_3c=2,
         shape_values=(4.5, 2.75, 1.25, 10.5, -20.25, 30.0))
     status_effect = gp.StatusEffect(clear_existing=True,
@@ -327,7 +327,8 @@ def main(argv: list[str]) -> int:
     bullet = cp.BulletSkillServer(
         skill_level=0x0122, skill_index=0x0324, aim_angle=1.125,
         server_tick=0x25262728, cast_id=0x292A2B2C,
-        direction=(0.5, -0.25, 0.125, 1.0), variant=0x2D)
+        direction=(0.5, -0.25, 0.125, 1.0), variant=0x2D,
+        bullet_id="mage_icemissile_bullet_new")
     skill_vector("BulletSkillCommand", cp.BULLET_SKILL_COMMAND,
                  cp.BulletSkillServerCommand(bullet, 0x000C0004, ctx),
                  {"value": bullet, "actor_id": 0x000C0004, "context": ctx})
@@ -336,7 +337,8 @@ def main(argv: list[str]) -> int:
         server_tick=0x35363738, cast_id=0x393A3B3C,
         direction=(0.75, 0.5, -0.5, 1.0), variant=0x3D,
         target_position=(40.5, 41.25, 42.125),
-        additional_target_positions=((43.5, 44.5, 45.5),))
+        additional_target_positions=((43.5, 44.5, 45.5),),
+        bullet_id="ranger_arrow_bullet")
     skill_vector("TargetPointBulletSkillCommand",
                  cp.TARGET_POINT_BULLET_SKILL_COMMAND,
                  cp.TargetPointBulletSkillServerCommand(
@@ -361,7 +363,8 @@ def main(argv: list[str]) -> int:
         direction=(-0.5, 0.25, 0.75, 1.0), variant=0x5D,
         target_actor_id=0x000C0077,
         additional_target_actor_ids=(0x000C0078, 0x000C0079),
-        target_positions=((60.5, 61.25, 62.125), (63.5, 64.5, 65.5)))
+        target_positions=((60.5, 61.25, 62.125), (63.5, 64.5, 65.5)),
+        bullet_id="dwarf_turret_bullet")
     skill_vector("TargetBulletSkillCommand", cp.TARGET_BULLET_SKILL_COMMAND,
                  cp.TargetBulletSkillServerCommand(tbullet, 0x000C0007, ctx),
                  {"value": tbullet, "actor_id": 0x000C0007, "context": ctx})
@@ -394,6 +397,7 @@ def main(argv: list[str]) -> int:
     for c in (0.25, -0.75, 0.5, 1.0):
         w.write_float(c)
     w.write_uint8(0x7D)
+    w.write_string("mage_firebolt_bullet")  # release261_221 SkillBulletId
     w.write_uint32_le(0x000C0066)
     w.write_uint8(2)
     w.write_uint32_le(0x000C0067)
@@ -407,13 +411,15 @@ def main(argv: list[str]) -> int:
     assert decoded == cp.TargetBulletSkill(
         0x0172, 0x0374, 3.25, 0x75767778, 0x797A7B7C,
         (0.25, -0.75, 0.5, 1.0), 0x7D, 0x000C0066, (0x000C0067, 0x000C0068),
-        ((70.5, 71.25, 72.125), (73.5, 74.5, 75.5)), None)
+        ((70.5, 71.25, 72.125), (73.5, 74.5, 75.5)), None,
+        "mage_firebolt_bullet")
     add("TargetBulletSkillCommand", cp.TARGET_BULLET_SKILL_COMMAND, enc,
         decoded, encoder="BitWriter (decode_target_bullet_skill order)",
         built_by="hand")
 
     # ------------------------------------------------- Actor stats/vicinity
-    stats = gp.ActorStatsUpdate(stat_id=0x1_1122_3344, value=77.5)
+    stats = gp.ActorStatsUpdate(stat_id=0x1_1122_3344, value=77.5,
+                                tertiary_resource=12.25)
     add("ActorStatsUpdateCommand", gp.ACTOR_STATS_UPDATE_COMMAND,
         gp.encode_actor_stats_update_batch(stats, actor_id=0x000D0001),
         {"value": stats, "actor_id": 0x000D0001},
@@ -442,8 +448,8 @@ def main(argv: list[str]) -> int:
         position=(100.5, 200.25, -300.125), field_90=0x90909090,
         name="HeroName", appearance=(1, 2, 3, 4, 5, 6),
         template_row=0x0000E0E0, field_e8="FieldE8Str",
-        field_f0=0x1_F0F0_F0F0, field_f8=0xF8F8F8F8, field_fc=0xFC,
-        field_100=placement,
+        field_f0=0x1_F0F0_F0F0, field_f8=0xF8F8F8F8, field_fc=0xFCFCFCFC, field_100=0xFC,
+        field_104=placement,
         fields_110=tuple(0x11000000 + i for i in range(1, 9)),
         field_130=(0x13000001, 0x13000002),
         field_150=("str150a", "str150b"),
@@ -543,13 +549,13 @@ def main(argv: list[str]) -> int:
 
     # ------------------------------------------------------------ Inventory
     item1 = ic.ItemInfo(
-        item_id=0x00A00001, field_04=0x04, amount=0x0000000E, field_08=0x08,
+        item_id=0x00A00001, field_04=0x04, amount=0x0000000E, rarity=0x08,
         socket_count=2, field_11=0x11, field_12=0x12, field_18=0x00001818,
-        field_20=0xFF102030, field_1c=0x0000001C, field_28="dye_red",
-        item_level=0x00000087, field_30=0x0000000B, field_34=0x00000034,
-        field_3c=True, field_3d=False, template_id="item_template_1",
-        field_88="str88", field_100=(1.5, 2.5, 3.5), field_80="str80",
-        field_38=0x00000007, field_f8="transmog_1", field_3e=True,
+        dye_argb=0xFF102030, dye_color_id=0x0000001C, dye_id="dye_red",
+        item_level=0x00000087, stack_vc_value=0x0000000B, glyph_value=0x00000034,
+        needs_identification=True, field_3d=False, template_id="item_template_1",
+        field_88="str88", ground_position=(1.5, 2.5, 3.5), appearance="str80",
+        base_enchantment_tier=0x00000007, equipment_skin="transmog_1", field_3e=True,
         enchantments=[
             ic.ItemEnchantmentInfo(1.25, 0x01, 0x00000E08, 0x00000E0C,
                                    "ench_a"),
@@ -559,13 +565,13 @@ def main(argv: list[str]) -> int:
         socketed_templates=["gem_a", "gem_b"],
         created_at=(2026, 1, 2, 3, 4, 5))
     item2 = ic.ItemInfo(
-        item_id=0x00A00002, field_04=0x44, amount=1, field_08=0x88,
+        item_id=0x00A00002, field_04=0x44, amount=1, rarity=0x88,
         socket_count=1, field_11=0x21, field_12=0x22, field_18=0x00002828,
-        field_20=0x80405060, field_1c=0x0000002C, field_28="dye_blue",
-        item_level=0x00000050, field_30=0x0000001B, field_34=0x00000044,
-        field_3c=False, field_3d=True, template_id="item_template_2",
-        field_88="s88b", field_100=(4.5, 5.5, 6.5), field_80="s80b",
-        field_38=0x00000003, field_f8="", field_3e=False,
+        dye_argb=0x80405060, dye_color_id=0x0000002C, dye_id="dye_blue",
+        item_level=0x00000050, stack_vc_value=0x0000001B, glyph_value=0x00000044,
+        needs_identification=False, field_3d=True, template_id="item_template_2",
+        field_88="s88b", ground_position=(4.5, 5.5, 6.5), appearance="s80b",
+        base_enchantment_tier=0x00000003, equipment_skin="", field_3e=False,
         enchantments=[ic.ItemEnchantmentInfo(9.75, 0x03, 0x00001008,
                                              0x0000100C, "ench_c")],
         socketed_templates=["gem_c"],
@@ -573,16 +579,16 @@ def main(argv: list[str]) -> int:
     inventory = ic.InventoryInfo(
         items=[item1, item2],
         equipment_slots={0x00A00001: (1, 2), 0x00A00002: (7,)},
-        storage_58={0x00A00002: 5}, storage_80={0x00A00001: 6},
-        storage_a8={0x00B00001: 7}, storage_d0={0x00B00002: 8},
-        field_f8=[0x0F800001], field_118=[0x11800001, 0x11800002],
+        storage_slots={0x00A00002: 5}, extra_storage_slots={0x00A00001: 6},
+        bank_storage_slots={0x00B00001: 7}, extra_bank_storage_slots={0x00B00002: 8},
+        overflow_storage_item_ids=[0x0F800001], invisible_storage_item_ids=[0x11800001, 0x11800002],
         changed_item_ids=[0x00A00001],
-        field_158={0x15800001: 0x15800002},
-        field_180=[0x18000001], field_1a0=["s1a0a", "s1a0b"],
+        item_id_replacements={0x15800001: 0x15800002},
+        ingredient_bag_item_ids=[0x18000001], ingredient_bag_templates=["s1a0a", "s1a0b"],
         storage_upgrade=0x1E, bank_storage_upgrade=0x35, storage_size=0xE0,
         bank_storage_size=0x10E, extra_bank_storage_size=0x0B,
         extra_storage_size=0x0C, health_points=1234.5,
-        secondary_resource=67.25, field_1e0=True, actor_id=0x00000001)
+        secondary_resource=67.25, tertiary_resource=8.5, field_1e0=True, actor_id=0x00000001)
     server_batch("InventoryInfoCommand", ic.INVENTORY_INFO_COMMAND,
                  inventory, 0x00000001)
     add("InventoryInfoCommand", ic.INVENTORY_INFO_COMMAND,
@@ -604,7 +610,8 @@ def main(argv: list[str]) -> int:
     selection = cs.CharacterSelection(
         operation=1, deny_reason=0x02, active_character_id=0x0BEE0002,
         header_field_b=0x0000B0B0, character_slots=0x00000005,
-        header_flag=True, header_field_d=0x0000D0D0, locale="DE",
+        header_flag=True, header_field_d=0x0000D0D0, header_field_e=0x0000E0E0,
+        locale="DE",
         characters=[
             cs.CharacterRecord(
                 name="Alpha", map_id="map_alpha", class_id=0, gender=1,

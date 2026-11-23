@@ -12,6 +12,9 @@
 //!   registers three commands at 347 and more after, so the 22 later classes move
 //!   (Wanted Thief 356-359 -> 359-362, ServerToClientMsg 368 -> 381). That registry
 //!   confirms every "code" and "inferred" row and its actor flag.
+//!   The server's default since 2026-11-20, docs/command_ids_rel261_221.json, has
+//!   the same 371 ids as rel261_192 except DebugSpecialOfferCommand (132 -> 263),
+//!   which is not listed here: no row changes.
 
 /// (id, class name, actor-scoped)
 pub const COMMANDS: &[(u16, &str, bool)] = &[

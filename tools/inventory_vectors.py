@@ -20,23 +20,23 @@ from dso_server.protocol.membership_protocol import MEMBERSHIP_UPDATE_COMMAND, m
 out = Path(sys.argv[2]); out.mkdir(parents=True, exist_ok=True)
 inventory = InventoryInfo(items=[ItemInfo(101, amount=10, template_id="consumable_hp", item_level=12),
                                  ItemInfo(102, amount=8, template_id="consumable_hp", item_level=12)],
-                          storage_58={101:0,102:1},storage_size=224)
+                          storage_slots={101:0,102:1},storage_size=224)
 vectors=[]
 def record(name, packet):
     data,bits=packet;vectors.append(dict(name=name,hex=data.hex(),bits=bits))
 record('initial', encode_server_command_batch((ServerCommand(INVENTORY_INFO_COMMAND, inventory, 1),)))
 builder=InventoryMutationBuilder(inventory,200)
-builder.split_stack(101,7,storage_name='storage_58',storage_slot=2)
+builder.split_stack(101,7,storage_name='storage_slots',storage_slot=2)
 m=builder.finish()
 record('split',encode_server_command_batch((ServerCommand(INVENTORY_INFO_COMMAND,m.delta,1),ServerCommand(INVENTORY_INFO_COMMAND,m.final,1))))
 record('force',encode_force_transform_batch(ForceTransform((14.0,0.0,45.0),-1.6433599),actor_id=1))
-record('item_update',encode_item_info_response(ItemInfo(101,amount=7,item_level=19,socket_count=2,socketed_templates=['gem_a','gem_b'],field_f8='skin_a'),actor_id=1))
+record('item_update',encode_item_info_response(ItemInfo(101,amount=7,item_level=19,socket_count=2,socketed_templates=['gem_a','gem_b'],equipment_skin='skin_a'),actor_id=1))
 record('premium',encode_server_command_batch((ServerCommand(MEMBERSHIP_UPDATE_COMMAND,
     membership_update_from_expiry('2099-06-07T08:09:10Z',membership_type=1,active=True),1),)))
 record('expired',encode_server_command_batch((ServerCommand(MEMBERSHIP_UPDATE_COMMAND,
     membership_update_from_expiry('2000-01-01T00:00:00Z',membership_type=1,active=False),1),)))
 record('overflow',encode_server_command_batch((ServerCommand(INVENTORY_INFO_COMMAND,
-    InventoryInfo(premium_inventory_overflow=[ItemInfo(301,amount=9,template_id='loose_item')]),1),)))
+    InventoryInfo(items=[ItemInfo(301,amount=9,template_id='loose_item')],overflow_storage_item_ids=[301]),1),)))
 for name,operation,args in [('split_request',0x1e,[7,2]),('merge_request',0x0d,[102])]:
     w=BitWriter();w.write_uint8(0x8b);w.write_bytes((85).to_bytes(2,'little'));w.write_uint32_le(101)
     w.write_uint8(operation);w.write_uint32_le(len(args))

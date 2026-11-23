@@ -496,8 +496,8 @@ pub struct SelectionCharacter {
 
 /// CharacterSelectionCommand (144), not actor-scoped, the SAME layout both ways
 /// (writer sub_A1CEB7, reader sub_A1C7FD, vtable 0x102DB28): u8 operation (<= 10),
-/// u8 denyReason (<= 7), u32 character, u32 capacity, u32 free, bit, u32, string,
-/// u32 character count (<= 100) + characters, u32 equipment count (<= 20) + entries.
+/// u8 denyReason (<= 7), u32 character, u32 capacity, u32 free, bit, u32, u32
+/// (release261_219+), string, u32 character count (<= 100) + characters, u32 equipment count (<= 20) + entries.
 /// SOURCE: dsor/selection2018.py encode_selection / decode_selection_request.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct CharacterSelection {
@@ -508,6 +508,9 @@ pub struct CharacterSelection {
     pub free: u32,
     pub unknown_flag_0: bool,
     pub unknown_u32_3: u32,
+    /// release261_219+: a second header u32 ahead of the locale (production sends 0).
+    /// SOURCE: dso-server-production protocol/character_selection.py header_field_e.
+    pub unknown_u32_4: u32,
     pub unknown_text_0: String,
     pub characters: Vec<SelectionCharacter>,
     pub equipment: Vec<SelectionEquipment>,
@@ -528,6 +531,7 @@ impl Body for CharacterSelection {
         let free = r.u32()?;
         let unknown_flag_0 = r.bit()?;
         let unknown_u32_3 = r.u32()?;
+        let unknown_u32_4 = r.u32()?;
         let unknown_text_0 = r.string()?;
         let characters = counted(r, 100, "character amount", |r| {
             Ok(SelectionCharacter {
@@ -567,6 +571,7 @@ impl Body for CharacterSelection {
             free,
             unknown_flag_0,
             unknown_u32_3,
+            unknown_u32_4,
             unknown_text_0,
             characters,
             equipment,
@@ -580,6 +585,7 @@ impl Body for CharacterSelection {
         w.u32(self.free);
         w.bit(self.unknown_flag_0);
         w.u32(self.unknown_u32_3);
+        w.u32(self.unknown_u32_4);
         w.string(&self.unknown_text_0);
         w.count(self.characters.len());
         for c in &self.characters {
@@ -750,7 +756,10 @@ pub struct NewPlayer {
     /// field_f0 (u64, production sends 0) and the level (field_f8).
     pub unknown_u64_f0: u64,
     pub level: u32,
-    /// i8 enum at +220 (-1..5): the armament.
+    /// release261_219+: a u32 at +0xfc ahead of the armament (production sends 0).
+    /// SOURCE: dso-server-production protocol/new_player_codec.py (b2f44c2, field_fc).
+    pub unknown_u32_fc: u32,
+    /// i8 enum (-1..5): the armament; +0x100 from release261_219 on.
     pub rank: i8,
     /// +224, 74 bits: the GameFaction -- faction id, owner actor, i8 type (-1..3),
     /// two bools.
@@ -816,6 +825,7 @@ impl Body for NewPlayer {
         let secondary = r.string()?;
         let unknown_u64_f0 = r.u64()?;
         let level = r.u32()?;
+        let unknown_u32_fc = r.u32()?;
         let rank = r.i8()?;
         let composite_words = fixed_u32::<2>(r)?;
         let composite_enum = r.i8()?;
@@ -859,6 +869,7 @@ impl Body for NewPlayer {
             secondary,
             unknown_u64_f0,
             level,
+            unknown_u32_fc,
             rank,
             composite_words,
             composite_enum,
@@ -908,6 +919,7 @@ impl Body for NewPlayer {
         w.string(&self.secondary);
         w.u64(self.unknown_u64_f0);
         w.u32(self.level);
+        w.u32(self.unknown_u32_fc);
         w.i8(self.rank);
         for v in self.composite_words {
             w.u32(v);
@@ -1061,11 +1073,16 @@ pub struct NewRemotePlayer {
     pub character_id: u64,
     pub account_id: u64,
     pub max_health: u32,
+    /// release261_221: the fighting power, between the two level words.
+    /// SOURCE: dso-server-production social_protocol.py encode_new_remote_player
+    ///   (2e635dd: level, fighting power, level, 0).
+    pub fighting_power: u32,
     /// +248.
     pub unknown_u32_248: u32,
+    /// release261_221: a fourth scalar after the second level (production sends 0).
+    pub unknown_u32_250: u32,
     /// Legacy name: release261 sends the player kind here, not hand armament: 4 (the
-    /// release261_192 decoder refuses anything outside -1..4; production sent 5
-    /// until 2026-10-21).
+    /// release261_221 decoder accepts -1..5).
     pub armament: i8,
     /// +256.
     pub faction: Faction,
@@ -1110,7 +1127,9 @@ impl Body for NewRemotePlayer {
             character_id: r.u64()?,
             account_id: r.u64()?,
             max_health: r.u32()?,
+            fighting_power: r.u32()?,
             unknown_u32_248: r.u32()?,
+            unknown_u32_250: r.u32()?,
             armament: r.i8()?,
             faction: Faction::read(r)?,
             pvp_tick: r.u32()?,
@@ -1142,7 +1161,9 @@ impl Body for NewRemotePlayer {
         w.u64(self.character_id);
         w.u64(self.account_id);
         w.u32(self.max_health);
+        w.u32(self.fighting_power);
         w.u32(self.unknown_u32_248);
+        w.u32(self.unknown_u32_250);
         w.i8(self.armament);
         self.faction.write(w);
         w.u32(self.pvp_tick);

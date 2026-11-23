@@ -50,7 +50,7 @@ for name, shop, entries in [
 
 # Server -> client: everything a purchase's reply chains (an andermant-priced,
 # timed offer paying a keyed currency), in the server's order.
-inventory = InventoryInfo(items=[ItemInfo(101, amount=3, template_id="gem_ruby_a", item_level=12)], storage_58={101: 0}, storage_size=21)
+inventory = InventoryInfo(items=[ItemInfo(101, amount=3, template_id="gem_ruby_a", item_level=12)], storage_slots={101: 0}, storage_size=21)
 builder = InventoryMutationBuilder(inventory, 500)
 builder.restore_item(ItemInfo(0, amount=2, template_id="jewelry_ring_01", item_level=12))
 mutation = builder.finish()

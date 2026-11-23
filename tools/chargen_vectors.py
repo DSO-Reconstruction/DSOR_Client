@@ -38,7 +38,7 @@ assert (decoded.class_id, decoded.gender, decoded.hair_style, decoded.beard_styl
 record("create", packet)
 
 # The server's answers.
-record("editor", cg.encode_character_generation(cg.character_generation_editor_response(locale="en", preview_id=7)))
+record("editor", cg.encode_character_generation(cg.character_generation_editor_response(locale="en", preview_id=7, andermant=1362)))
 record("refused", cg.encode_character_generation(cg.character_generation_result(request, operation=4, deny_reason=1)))
 record("created", cg.encode_character_generation(cg.character_generation_result(request, operation=5, character_id=1234)))
 
