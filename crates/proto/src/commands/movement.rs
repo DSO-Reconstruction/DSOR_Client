@@ -159,14 +159,19 @@ impl Body for ActorsLeftVicinity {
 pub struct ActorStatsUpdate {
     pub health: u64,
     pub resource: f32,
+    /// release261_219+: the tertiary resource (f32) after the class resource.
+    /// SOURCE: dso-server-production protocol/gameplay_protocol.py
+    ///   _write_actor_stats_body (b2f44c2).
+    pub tertiary: f32,
 }
 
 impl Body for ActorStatsUpdate {
     fn decode(r: &mut BitReader<'_>) -> Result<Self, DecodeError> {
-        Ok(Self { health: r.u64()?, resource: r.f32()? })
+        Ok(Self { health: r.u64()?, resource: r.f32()?, tertiary: r.f32()? })
     }
     fn encode(&self, w: &mut BitWriter) {
         w.u64(self.health);
         w.f32(self.resource);
+        w.f32(self.tertiary);
     }
 }

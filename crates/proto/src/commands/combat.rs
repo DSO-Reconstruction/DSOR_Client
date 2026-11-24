@@ -222,12 +222,18 @@ pub struct BulletSkill {
     pub step: [f32; 4],
     /// Orbiting direction 0 or 1 (2 = "Random" must not be sent).
     pub orbit: u8,
+    /// release261_221: `_Template_Skill.SkillBulletId` (e.g. `mage_icemissile_bullet_new`),
+    /// a u16-length string right after the orbit byte, both directions.
+    /// SOURCE: dso-server-production protocol/combat_protocol.py (2e635dd),
+    ///   `_read_bullet_visual_id` / encode_monster_attack_batch.
+    pub bullet: String,
     pub server: Option<SkillServerData>,
 }
 
-skill_body!(BulletSkill, |r, base| Ok(Self { base, step: vec4(r)?, orbit: r.u8()?, server: None }), |c, w| {
+skill_body!(BulletSkill, |r, base| Ok(Self { base, step: vec4(r)?, orbit: r.u8()?, bullet: r.string()?, server: None }), |c, w| {
     write_vec4(w, c.step);
     w.u8(c.orbit);
+    w.string(&c.bullet);
 });
 
 /// TargetBulletSkillCommand (release261: 75), both directions: BulletSkill's body,
@@ -241,6 +247,8 @@ pub struct TargetBulletSkill {
     pub base: SkillBase,
     pub step: [f32; 4],
     pub orbit: u8,
+    /// release261_221: SkillBulletId (see BulletSkill::bullet).
+    pub bullet: String,
     pub target: u32,
     pub more_targets: Vec<u32>,
     pub points: Vec<[f32; 3]>,
@@ -250,13 +258,15 @@ pub struct TargetBulletSkill {
 skill_body!(TargetBulletSkill, |r, base| {
     let step = vec4(r)?;
     let orbit = r.u8()?;
+    let bullet = r.string()?;
     let target = r.u32()?;
     let n = r.u8()? as usize;
     let more_targets = list(r, n, |r| r.u32())?;
-    Ok(Self { base, step, orbit, target, more_targets, points: points(r)?, server: None })
+    Ok(Self { base, step, orbit, bullet, target, more_targets, points: points(r)?, server: None })
 }, |c, w| {
     write_vec4(w, c.step);
     w.u8(c.orbit);
+    w.string(&c.bullet);
     w.u32(c.target);
     w.u8(c.more_targets.len() as u8);
     for &t in &c.more_targets {
@@ -289,13 +299,16 @@ pub struct TargetPointBulletSkill {
     pub base: SkillBase,
     pub step: [f32; 4],
     pub orbit: u8,
+    /// release261_221: SkillBulletId (see BulletSkill::bullet).
+    pub bullet: String,
     pub points: Vec<[f32; 3]>,
     pub server: Option<SkillServerData>,
 }
 
-skill_body!(TargetPointBulletSkill, |r, base| Ok(Self { base, step: vec4(r)?, orbit: r.u8()?, points: points(r)?, server: None }), |c, w| {
+skill_body!(TargetPointBulletSkill, |r, base| Ok(Self { base, step: vec4(r)?, orbit: r.u8()?, bullet: r.string()?, points: points(r)?, server: None }), |c, w| {
     write_vec4(w, c.step);
     w.u8(c.orbit);
+    w.string(&c.bullet);
     write_points(w, &c.points);
 });
 
@@ -480,18 +493,21 @@ impl ServerCommand {
 /// victim). EVIDENCE: the 2018 reader 0x9A788A (vtable 0xFEE2A8 slot 5) -- tick, damage
 /// types, two bits (+40 blocked, +41 critical), seven int32, a float, one bit; handler
 /// 0x516453 (dsor/combat.py encode_hit).
-/// SOURCE (release261_192): dso-server-production protocol/combat_protocol.py
-///   _write_hit_body: a reserved bit between the damage types and the two flags,
-///   always sent (without it the client drops the batch: "invalid command ending in
-///   multi command 107").
+/// SOURCE (release261): DSOR_Server protocol/combat_protocol.py _write_hit_body:
+///   three flags after the damage types, in object order +0x48 blocked, +0x49
+///   critical, +0x4a rift (always sent; without the third the client drops the
+///   batch: "invalid command ending in multi command 107").
+/// FAILURE: until 2026-11-23 this read the third bit first (the server's layout
+///   before DSOR_Server #49, 2026-10-27), so blocks were lost, critical hits showed
+///   as blocks and Rift hits as critical.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Hit {
     pub tick: u32,
     pub damage_types: Vec<u8>,
-    /// The reserved bit after the damage types (production tag_boundary_bit, clear).
-    pub tag_boundary: bool,
     pub blocked: bool,
     pub critical: bool,
+    /// +0x4a: the Rift Force echo hit ("floatingRift", combat/rift_hit).
+    pub rift: bool,
     /// SetHitPoints / SetMaxHitPoints (release261: u64).
     pub victim_health: u64,
     pub victim_max_health: u64,
@@ -520,9 +536,9 @@ impl Body for Hit {
         Ok(Self {
             tick: r.u32()?,
             damage_types: damage_types(r)?,
-            tag_boundary: r.bit()?,
             blocked: r.bit()?,
             critical: r.bit()?,
+            rift: r.bit()?,
             victim_health: r.u64()?,
             victim_max_health: r.u64()?,
             absorbed: r.u32()?,
@@ -541,9 +557,9 @@ impl Body for Hit {
     fn encode(&self, w: &mut BitWriter) {
         w.u32(self.tick);
         write_damage_types(w, &self.damage_types);
-        w.bit(self.tag_boundary);
         w.bit(self.blocked);
         w.bit(self.critical);
+        w.bit(self.rift);
         w.u64(self.victim_health);
         w.u64(self.victim_max_health);
         w.u32(self.absorbed);

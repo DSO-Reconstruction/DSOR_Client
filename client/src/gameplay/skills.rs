@@ -123,6 +123,10 @@ pub struct SkillDef {
     /// Shifted skills: the sequence drawn on the aimed point (SkillBulletId).
     #[serde(default)]
     pub shifted: String,
+    /// _Template_Skill.SkillBulletId as is: release261_221 carries it in the bullet
+    /// skill commands (72/73/75). Empty in assets exported before it was added.
+    #[serde(default)]
+    pub bullet_id: String,
     /// UserStatusEffects: on the caster (the shouts' auras), (status id, seconds).
     #[serde(default)]
     pub user_status: Vec<(String, f32)>,
@@ -1312,10 +1316,15 @@ fn cast_input(
         //   nothing and, mounted, did not dismount ("I can still attack while
         //   mounted"; "I seem to miss a lot of my attacks").
         "MeleeTarget" | "RangedTarget" => ClientCommand::Skill(combat::Skill { base, server: None }),
-        "Ranged" => ClientCommand::BulletSkill(combat::BulletSkill { base, step, orbit: 0, server: None }),
-        "RangedTargetPoint" => {
-            ClientCommand::TargetPointBulletSkill(combat::TargetPointBulletSkill { base, step, orbit: 0, points, server: None })
-        }
+        "Ranged" => ClientCommand::BulletSkill(combat::BulletSkill { base, step, orbit: 0, bullet: skill.bullet_id.clone(), server: None }),
+        "RangedTargetPoint" => ClientCommand::TargetPointBulletSkill(combat::TargetPointBulletSkill {
+            base,
+            step,
+            orbit: 0,
+            bullet: skill.bullet_id.clone(),
+            points,
+            server: None,
+        }),
         "Shifted" | "Teleport" | "Jump" | "Charge" | "ChargeThrough" => {
             ClientCommand::ShiftedSkill(combat::ShiftedSkill { base, points, server: None })
         }
