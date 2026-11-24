@@ -70,6 +70,24 @@ fn banner_of_war_makes_the_player_skills_free() {
 }
 
 #[test]
+fn an_active_effect_changes_the_cooldown() {
+    // Forgotten Glory's ranger bonus bgh_ranger_bonus_heredur (6242):
+    // "Explosive Arrow does not have cooldown" = CoolDown:-1.0,relative,explosiveshot.
+    // It is a status effect, not equipment, so it counts only while it runs.
+    let mut fixture: serde_json::Value = serde_json::from_str(include_str!("../../../tests/fixtures/character_stats.json")).unwrap();
+    fixture["data"]["combat"]["statuses"]["6242"] = serde_json::json!({"id": "bgh_ranger_bonus_heredur", "stacks": 1,
+        "modifiers": [["cooldown", ["-1.0", "relative", "explosiveshot#~"]]]});
+    let data: StatsData = serde_json::from_value(fixture["data"].clone()).unwrap();
+    let inventory = crate::gameplay::inventory::InventoryState::default();
+    let bonus = StatusEffectElement { index: 6242, instance: 1, ..default() };
+    let without = CooldownBonuses(calculation::cooldown_bonuses(&data, &inventory, &[]));
+    assert_eq!(without.seconds("explosiveshot", 5.0), 5.0);
+    let with = CooldownBonuses(calculation::cooldown_bonuses(&data, &inventory, &[bonus]));
+    assert_eq!(with.seconds("ExplosiveShot", 5.0), 0.0);
+    assert_eq!(with.seconds("thorntrail", 10.0), 10.0, "other skills keep theirs");
+}
+
+#[test]
 fn equipment_adds_talent_ranks() {
     // A unique weapon's TalentLevelBonus, a set's at three of its parts.
     let mut fixture: serde_json::Value = serde_json::from_str(include_str!("../../../tests/fixtures/character_stats.json")).unwrap();
@@ -106,10 +124,10 @@ fn a_set_shortens_its_skill_cooldown_as_the_server_does() {
         inventory.allocation.slots.push((id, vec![id as i8]));
     };
     wear(&mut inventory, 1, "set_a");
-    let one = CooldownBonuses(calculation::cooldown_bonuses(&data, &inventory));
+    let one = CooldownBonuses(calculation::cooldown_bonuses(&data, &inventory, &[]));
     assert_eq!(one.seconds("FrozenOrb", 10.0), 10.0, "one part reaches no tier");
     wear(&mut inventory, 2, "set_b");
-    let two = CooldownBonuses(calculation::cooldown_bonuses(&data, &inventory));
+    let two = CooldownBonuses(calculation::cooldown_bonuses(&data, &inventory, &[]));
     assert!((two.seconds("FrozenOrb", 10.0) - 8.0).abs() < 1e-9);
     assert_eq!(two.seconds("fireball", 3.0), 3.0, "other skills keep theirs");
 }

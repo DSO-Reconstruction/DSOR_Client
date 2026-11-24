@@ -1195,7 +1195,11 @@ fn cast_input(
     // "refused: mage_fireball_default costs 40.0 and only 28.0 is left").
     let now = time.elapsed_secs_f64();
     let key = cooldown_key(skill).to_owned();
-    if cooldowns.0.get(&key).is_some_and(|&(_, ready)| now < ready) {
+    // An effect that removes the cooldown outright (Forgotten Glory's ranger
+    // bonus: CoolDown -100% on Explosive Arrow) also frees a cast still cooling
+    // down, as the server's ActiveCoolDown/ActorCoolDownReset on Skill07 does.
+    let no_cooldown = skill.cooldown > 0.0 && cooldown_bonuses.seconds(&skill.id, skill.cooldown) <= 0.0;
+    if !no_cooldown && cooldowns.0.get(&key).is_some_and(|&(_, ready)| now < ready) {
         return;
     }
     // ResourceCost is a fraction of the maximum (rage, mana, focus, steam alike):
