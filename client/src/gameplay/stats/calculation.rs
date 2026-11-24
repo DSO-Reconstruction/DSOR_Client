@@ -217,7 +217,12 @@ pub fn talent_bonuses(d: &StatsData, inventory: &InventoryState) -> HashMap<Stri
 ///   item-set tiers are among its sources (_active_skill_modifier_sources).
 ///   Without this the client kept the full cooldown and never cast as early
 ///   as the server allowed ("- 20% cooldown time for Frozen Sphere" did nothing).
-pub fn cooldown_bonuses(d: &StatsData, inventory: &InventoryState) -> HashMap<String, (f64, f64)> {
+///   Active status effects count too while they run: Forgotten Glory's ranger
+///   bonus (bgh_ranger_bonus_heredur, CoolDown:-1.0,relative,explosiveshot)
+///   is a buff, not equipment, and the server lets Explosive Arrow go out
+///   without cooldown under it; the client kept blocking it for 5 s.
+pub fn cooldown_bonuses(d: &StatsData, inventory: &InventoryState, effects: &[StatusEffectElement])
+    -> HashMap<String, (f64, f64)> {
     let mut out: HashMap<String, (f64, f64)> = HashMap::new();
     let Some(db) = &d.combat else { return out };
     let mut equipped = HashSet::new();
@@ -226,10 +231,16 @@ pub fn cooldown_bonuses(d: &StatsData, inventory: &InventoryState) -> HashMap<St
         let Some(amount) = args.first().and_then(|a| a.parse::<f64>().ok()) else { return };
         let relative = args.get(1).is_some_and(|a| a == "relative");
         for skill in args.iter().skip(2) {
-            let e = out.entry(skill.clone()).or_insert((0.0, 0.0));
+            let skill = skill.split('#').next().unwrap_or_default().trim().to_lowercase();
+            if skill.is_empty() { continue; }
+            let e = out.entry(skill).or_insert((0.0, 0.0));
             if relative { e.0 += amount; } else { e.1 += amount; }
         }
     };
+    for effect in effects {
+        let Some(status) = db.statuses.get(&effect.index) else { continue };
+        for (kind, args) in &status.modifiers { add(kind, args); }
+    }
     for (id, slots) in &inventory.allocation.slots {
         if slots.contains(&34) || slots.contains(&36) { continue; }
         let Some(item) = inventory.items.get(id) else { continue };

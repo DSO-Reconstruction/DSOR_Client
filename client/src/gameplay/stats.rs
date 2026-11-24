@@ -275,10 +275,10 @@ fn update_stats(
     *previous = Some(key);
     let mut effects: Vec<_> = net.stat_effects.values().cloned().collect();
     effects.sort_by_key(|e| e.instance);
-    output.0 = calculation::calculate(d, CLASSES[class as usize], level, &net.inventory, effects);
+    output.0 = calculation::calculate(d, CLASSES[class as usize], level, &net.inventory, effects.clone());
     let talents = calculation::talent_bonuses(d, &net.inventory);
     if bonuses.0 != talents { bonuses.0 = talents; }
-    let changed = calculation::cooldown_bonuses(d, &net.inventory);
+    let changed = calculation::cooldown_bonuses(d, &net.inventory, &effects);
     if cooldowns.0 != changed { cooldowns.0 = changed; }
 }
 
